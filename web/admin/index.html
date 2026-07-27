@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="referrer" content="no-referrer" />
+    <title>gameManageKit 管理控制台</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23172033'/%3E%3Ctext x='32' y='39' text-anchor='middle' font-family='system-ui' font-size='22' font-weight='700' fill='white'%3EGM%3C/text%3E%3C/svg%3E"
+    />
+    <script>
+      let savedTheme = null;
+      try {
+        savedTheme = localStorage.getItem("game-manage-kit-theme");
+      } catch {}
+      document.documentElement.dataset.theme =
+        savedTheme === "light" || savedTheme === "dark"
+          ? savedTheme
+          : matchMedia("(prefers-color-scheme: dark)").matches
+            ? "dark"
+            : "light";
+    </script>
+    <link rel="stylesheet" href="/admin/wsk.css" />
+    <link rel="stylesheet" href="/admin/admin.css" />
+    <script type="module" src="/admin/app.js"></script>
+  </head>
+  <body>
+    <a class="wsk-skip-link" href="#main-content">跳到主要内容</a>
+
+    <svg class="wsk-icon-sprite" aria-hidden="true">
+      <defs>
+        <symbol id="sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4"></circle>
+          <path
+            d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"
+          ></path>
+        </symbol>
+        <symbol id="moon" viewBox="0 0 24 24">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"></path>
+        </symbol>
+        <symbol id="check" viewBox="0 0 24 24">
+          <path d="m5 12 4 4L19 6"></path>
+        </symbol>
+        <symbol id="info" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10"></circle>
+          <path d="M12 16v-4M12 8h.01"></path>
+        </symbol>
+        <symbol id="warning" viewBox="0 0 24 24">
+          <path
+            d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"
+          ></path>
+          <path d="M12 9v4M12 17h.01"></path>
+        </symbol>
+        <symbol id="eye" viewBox="0 0 24 24">
+          <path
+            d="M2.06 12.35a1 1 0 0 1 0-.7C3.7 7.6 7.58 5 12 5s8.3 2.6 9.94 6.65a1 1 0 0 1 0 .7C20.3 16.4 16.42 19 12 19S3.7 16.4 2.06 12.35Z"
+          ></path>
+          <circle cx="12" cy="12" r="3"></circle>
+        </symbol>
+        <symbol id="eye-off" viewBox="0 0 24 24">
+          <path d="M3 3l18 18M10.6 10.6a2 2 0 0 0 2.8 2.8"></path>
+          <path
+            d="M9.9 4.24A10.8 10.8 0 0 1 12 4c4.42 0 8.3 2.6 9.94 6.65a1 1 0 0 1 0 .7 11.8 11.8 0 0 1-2.1 3.3M6.23 6.23a11.7 11.7 0 0 0-4.17 5.42 1 1 0 0 0 0 .7C3.7 16.4 7.58 19 12 19c1.24 0 2.43-.2 3.53-.57"
+          ></path>
+        </symbol>
+        <symbol id="chevron" viewBox="0 0 24 24">
+          <path d="m6 9 6 6 6-6"></path>
+        </symbol>
+        <symbol id="x" viewBox="0 0 24 24">
+          <path d="M18 6 6 18M6 6l12 12"></path>
+        </symbol>
+        <symbol id="search" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="7"></circle>
+          <path d="m20 20-4-4"></path>
+        </symbol>
+        <symbol id="shield" viewBox="0 0 24 24">
+          <path d="M12 3 4.5 6v5.5c0 4.7 3.2 8.3 7.5 9.5 4.3-1.2 7.5-4.8 7.5-9.5V6L12 3Z"></path>
+          <path d="m9 12 2 2 4-4"></path>
+        </symbol>
+        <symbol id="user" viewBox="0 0 24 24">
+          <circle cx="12" cy="8" r="4"></circle>
+          <path d="M4.5 21a7.5 7.5 0 0 1 15 0"></path>
+        </symbol>
+        <symbol id="logout" viewBox="0 0 24 24">
+          <path d="M10 17l5-5-5-5M15 12H3"></path>
+          <path d="M14 3h5a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-5"></path>
+        </symbol>
+        <symbol id="ban" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="m5.6 5.6 12.8 12.8"></path>
+        </symbol>
+        <symbol id="sessions" viewBox="0 0 24 24">
+          <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+          <path d="M7 9h10M7 13h6"></path>
+        </symbol>
+      </defs>
+    </svg>
+
+    <header class="wsk-topbar gmk-topbar">
+      <div class="wsk-brand">
+        <span class="wsk-brand-mark" aria-hidden="true">GM</span>
+        <span>
+          <strong>gameManageKit</strong>
+          <span>管理员控制台</span>
+        </span>
+      </div>
+
+      <div class="gmk-session-tools" id="session-tools" hidden>
+        <div class="gmk-game-field">
+          <label class="wsk-sr-only" for="game-select">当前游戏</label>
+          <div class="wsk-select-wrap">
+            <select class="wsk-select" id="game-select" aria-label="当前游戏"></select>
+            <svg class="wsk-icon" aria-hidden="true">
+              <use href="#chevron"></use>
+            </svg>
+          </div>
+        </div>
+        <span class="gmk-operator">
+          <svg class="wsk-icon" aria-hidden="true"><use href="#user"></use></svg>
+          <span id="operator-name"></span>
+        </span>
+        <button class="wsk-button wsk-quiet gmk-logout" id="logout-button" type="button">
+          <svg class="wsk-icon" aria-hidden="true"><use href="#logout"></use></svg>
+          退出
+        </button>
+      </div>
+
+      <button
+        class="wsk-icon-button"
+        type="button"
+        data-theme-toggle
+        aria-label="切换主题"
+        title="切换主题"
+      >
+        <svg class="wsk-icon wsk-theme-sun" aria-hidden="true">
+          <use href="#sun"></use>
+        </svg>
+        <svg class="wsk-icon wsk-theme-moon" aria-hidden="true">
+          <use href="#moon"></use>
+        </svg>
+      </button>
+    </header>
+
+    <main id="main-content">
+      <section class="gmk-centered-view" id="boot-view" data-view="boot">
+        <div class="wsk-panel gmk-boot-card" aria-live="polite">
+          <span class="wsk-spinner gmk-large-spinner" id="boot-spinner" aria-hidden="true"></span>
+          <h1 tabindex="-1">正在连接管理服务</h1>
+          <p class="wsk-help" id="boot-message">正在安全地恢复管理员会话…</p>
+          <button
+            class="wsk-button wsk-secondary"
+            id="boot-retry"
+            type="button"
+            hidden
+          >
+            重新连接
+          </button>
+        </div>
+      </section>
+
+      <section class="gmk-centered-view" id="login-view" data-view="login" hidden>
+        <div class="gmk-login-shell">
+          <div class="gmk-login-intro" aria-hidden="true">
+            <div class="gmk-orbit gmk-orbit-one"></div>
+            <div class="gmk-orbit gmk-orbit-two"></div>
+            <span class="gmk-intro-icon">
+              <svg class="wsk-icon"><use href="#shield"></use></svg>
+            </span>
+            <p class="wsk-panel-title">INTERNAL CONTROL PLANE</p>
+            <h1>管理每一个游戏，<br />守住同一条边界。</h1>
+            <p>
+              管理员身份、游戏权限和账号操作由服务端逐次校验，所有重要操作均留有审计记录。
+            </p>
+          </div>
+
+          <form class="wsk-auth-card gmk-login-card" id="login-form">
+            <div>
+              <p class="wsk-panel-title">ADMIN SIGN IN</p>
+              <h1 tabindex="-1">登录管理控制台</h1>
+              <p class="wsk-help gmk-login-copy">
+                使用分配给你的个人管理员账号登录。
+              </p>
+            </div>
+
+            <div class="wsk-alert wsk-info gmk-login-notice">
+              <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
+              <div>
+                <strong>内部系统</strong>
+                <p>登录与账号操作会记录管理员、时间和来源地址。</p>
+              </div>
+            </div>
+
+            <div class="wsk-field">
+              <label class="wsk-label" for="operator-id">管理员账号</label>
+              <input
+                class="wsk-control"
+                id="operator-id"
+                name="operatorId"
+                type="text"
+                autocomplete="username"
+                autocapitalize="none"
+                spellcheck="false"
+                minlength="1"
+                maxlength="64"
+                placeholder="例如：ops_kimi"
+                required
+              />
+            </div>
+
+            <div class="wsk-field">
+              <label class="wsk-label" for="operator-password">登录密码</label>
+              <div class="wsk-input-wrap">
+                <input
+                  class="wsk-control"
+                  id="operator-password"
+                  name="password"
+                  type="password"
+                  autocomplete="current-password"
+                  maxlength="256"
+                  placeholder="请输入密码"
+                  required
+                />
+                <button
+                  class="wsk-icon-button"
+                  type="button"
+                  data-password
+                  aria-controls="operator-password"
+                  aria-label="显示密码"
+                  aria-pressed="false"
+                  title="显示密码"
+                >
+                  <svg class="wsk-icon" aria-hidden="true"><use href="#eye"></use></svg>
+                </button>
+              </div>
+            </div>
+
+            <div
+              class="wsk-alert wsk-danger"
+              id="login-error"
+              role="alert"
+              tabindex="-1"
+              hidden
+            >
+              <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+              <div>
+                <strong>暂时无法登录</strong>
+                <p id="login-error-message"></p>
+              </div>
+            </div>
+
+            <button class="wsk-button wsk-auth-submit" id="login-button" type="submit">
+              <span class="wsk-spinner" data-button-spinner aria-hidden="true" hidden></span>
+              <span data-button-label>登录管理控制台</span>
+            </button>
+          </form>
+        </div>
+      </section>
+
+      <section class="gmk-centered-view" id="no-access-view" data-view="no-access" hidden>
+        <div class="wsk-panel gmk-empty-card">
+          <span class="gmk-state-icon gmk-state-warning" aria-hidden="true">
+            <svg class="wsk-icon"><use href="#warning"></use></svg>
+          </span>
+          <h1 tabindex="-1">没有可管理的游戏</h1>
+          <p>
+            当前管理员身份有效，但尚未分配任何游戏权限。请联系系统负责人完成授权。
+          </p>
+          <button class="wsk-button wsk-secondary" id="no-access-logout" type="button">
+            退出登录
+          </button>
+        </div>
+      </section>
+
+      <section class="wsk-page gmk-admin-view" id="accounts-view" data-view="accounts" hidden>
+        <div class="wsk-reference-shell">
+          <aside class="gmk-sidebar">
+            <nav class="wsk-reference-nav" aria-label="管理员导航">
+              <div class="wsk-reference-brand">
+                <strong>运营管理</strong>
+                <span>OPERATIONS</span>
+              </div>
+              <a class="wsk-active" href="#accounts" aria-current="page">
+                账号管理
+              </a>
+              <button class="gmk-nav-action" id="sidebar-logout" type="button">
+                退出登录
+              </button>
+            </nav>
+          </aside>
+
+          <div class="wsk-reference-content gmk-admin-content">
+            <div class="wsk-page-head">
+              <div>
+                <p class="wsk-panel-title">ACCOUNT OPERATIONS</p>
+                <h1 tabindex="-1">账号管理</h1>
+                <p>查询指定游戏内的账号，并执行经过确认的安全操作。</p>
+              </div>
+              <span class="wsk-badge" id="game-status-badge">读取中</span>
+            </div>
+
+            <section class="wsk-section" aria-labelledby="account-search-title">
+              <div class="wsk-section-head">
+                <div>
+                  <h2 id="account-search-title">查询账号</h2>
+                  <p class="wsk-help">每次切换游戏都会清空当前查询结果。</p>
+                </div>
+                <span class="wsk-badge wsk-accent" id="selected-game-label"></span>
+              </div>
+
+              <form class="wsk-panel gmk-search-panel" id="account-search-form">
+                <div class="wsk-field">
+                  <label class="wsk-label" for="account-user-id">用户 ID</label>
+                  <input
+                    class="wsk-control"
+                    id="account-user-id"
+                    name="userId"
+                    type="text"
+                    autocomplete="off"
+                    autocapitalize="none"
+                    spellcheck="false"
+                    pattern="u_[0-9]+"
+                    maxlength="32"
+                    placeholder="u_12345"
+                    aria-describedby="account-user-id-help"
+                    required
+                  />
+                  <p class="wsk-help" id="account-user-id-help">
+                    输入完整用户 ID，例如 u_12345。
+                  </p>
+                </div>
+                <button class="wsk-button gmk-search-button" id="search-button" type="submit">
+                  <span class="wsk-spinner" data-button-spinner aria-hidden="true" hidden></span>
+                  <svg class="wsk-icon" data-button-icon aria-hidden="true">
+                    <use href="#search"></use>
+                  </svg>
+                  <span data-button-label>查询账号</span>
+                </button>
+              </form>
+
+              <p class="wsk-sr-only" id="account-live-status" aria-live="polite"></p>
+
+              <div class="gmk-account-state gmk-empty-state" id="account-empty">
+                <span class="gmk-state-icon" aria-hidden="true">
+                  <svg class="wsk-icon"><use href="#search"></use></svg>
+                </span>
+                <h3>等待查询</h3>
+                <p>选择游戏并输入用户 ID，账号信息会显示在这里。</p>
+              </div>
+
+              <div class="gmk-account-state" id="account-loading" aria-live="polite" hidden>
+                <span class="wsk-spinner gmk-large-spinner" aria-hidden="true"></span>
+                <h3>正在查询账号</h3>
+                <p>请稍候，不要重复提交。</p>
+              </div>
+
+              <div class="wsk-alert wsk-warning gmk-account-alert" id="account-not-found" hidden>
+                <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+                <div>
+                  <strong>没有找到账号</strong>
+                  <p id="account-not-found-message"></p>
+                </div>
+              </div>
+
+              <div
+                class="wsk-alert wsk-danger gmk-account-alert"
+                id="account-error"
+                role="alert"
+                tabindex="-1"
+                hidden
+              >
+                <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+                <div>
+                  <strong>查询失败</strong>
+                  <p id="account-error-message"></p>
+                </div>
+              </div>
+
+              <article class="wsk-panel gmk-account-card" id="account-card" hidden>
+                <div class="gmk-account-head">
+                  <div>
+                    <p class="wsk-panel-title">ACCOUNT</p>
+                    <h3 id="account-card-user-id"></h3>
+                  </div>
+                  <span class="wsk-badge" id="account-status-badge"></span>
+                </div>
+
+                <dl class="gmk-account-facts">
+                  <div>
+                    <dt>所属游戏</dt>
+                    <dd id="account-game"></dd>
+                  </div>
+                  <div>
+                    <dt>最近登录</dt>
+                    <dd id="account-last-login"></dd>
+                  </div>
+                  <div>
+                    <dt>活跃会话</dt>
+                    <dd id="account-session-count"></dd>
+                  </div>
+                </dl>
+
+                <div class="gmk-operation-zone">
+                  <div>
+                    <h3>账号操作</h3>
+                    <p id="operation-capability-help">
+                      操作前需要填写原因，并再次核对游戏和用户。
+                    </p>
+                  </div>
+                  <div class="wsk-button-row">
+                    <button
+                      class="wsk-button wsk-secondary"
+                      type="button"
+                      data-operation="revoke"
+                    >
+                      <svg class="wsk-icon" aria-hidden="true">
+                        <use href="#sessions"></use>
+                      </svg>
+                      撤销全部会话
+                    </button>
+                    <button
+                      class="wsk-button wsk-danger"
+                      type="button"
+                      data-operation="ban"
+                    >
+                      <svg class="wsk-icon" aria-hidden="true"><use href="#ban"></use></svg>
+                      封禁账号
+                    </button>
+                  </div>
+                </div>
+              </article>
+            </section>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <dialog
+      class="wsk-dialog"
+      id="operation-dialog"
+      aria-labelledby="operation-dialog-title"
+      aria-describedby="operation-dialog-description"
+    >
+      <form id="operation-form">
+        <div class="wsk-dialog-head">
+          <div>
+            <p class="wsk-panel-title">CONFIRM OPERATION</p>
+            <h2 id="operation-dialog-title">确认账号操作</h2>
+          </div>
+          <button
+            class="wsk-icon-button"
+            id="operation-dialog-close"
+            type="button"
+            aria-label="关闭确认窗口"
+            title="关闭"
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#x"></use></svg>
+          </button>
+        </div>
+        <div class="wsk-dialog-body">
+          <div class="gmk-dialog-target">
+            <span id="operation-dialog-kind"></span>
+            <strong id="operation-dialog-target"></strong>
+            <p id="operation-dialog-description"></p>
+          </div>
+          <div class="wsk-field">
+            <label class="wsk-label" for="operation-reason">
+              操作原因
+              <span class="gmk-required" aria-hidden="true">*</span>
+            </label>
+            <textarea
+              class="wsk-textarea"
+              id="operation-reason"
+              name="reason"
+              minlength="2"
+              maxlength="500"
+              placeholder="请填写可供审计追溯的原因"
+              required
+            ></textarea>
+            <p class="wsk-help">2–500 个字符，提交后写入审计记录。</p>
+          </div>
+          <div
+            class="wsk-alert wsk-danger"
+            id="operation-error"
+            role="alert"
+            tabindex="-1"
+            hidden
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+            <div>
+              <strong>操作未完成</strong>
+              <p id="operation-error-message"></p>
+            </div>
+          </div>
+        </div>
+        <div class="wsk-dialog-foot">
+          <button
+            class="wsk-button wsk-secondary"
+            id="operation-cancel"
+            type="button"
+          >
+            取消
+          </button>
+          <button class="wsk-button wsk-danger" id="operation-confirm" type="submit">
+            <span class="wsk-spinner" data-button-spinner aria-hidden="true" hidden></span>
+            <span data-button-label>确认操作</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <div
+      class="wsk-toast-region"
+      id="toast-region"
+      aria-live="polite"
+      aria-label="操作通知"
+    ></div>
+  </body>
+</html>
