@@ -4,6 +4,19 @@ import mysql, {
   type RowDataPacket,
 } from "mysql2/promise";
 
+const REQUIRED_SCHEMA_TABLES = Object.freeze([
+  "games",
+  "admin_operators",
+  "admin_game_access",
+  "admin_sessions",
+  "admin_auth_audit",
+  "accounts",
+  "account_sessions",
+  "char_registry",
+  "login_audit",
+  "seq",
+]);
+
 export class Database {
   readonly pool: Pool;
 
@@ -46,6 +59,19 @@ export class Database {
       "SELECT MAX(version) AS version FROM schema_migrations",
     );
     if (Number(rows[0]?.version ?? 0) !== expectedSchemaVersion) {
+      return false;
+    }
+    const [tables] = await this.pool.query<RowDataPacket[]>(
+      `SELECT TABLE_NAME AS table_name
+         FROM information_schema.tables
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME IN (?)`,
+      [[...REQUIRED_SCHEMA_TABLES]],
+    );
+    if (
+      new Set(tables.map((row) => String(row.table_name))).size
+      !== REQUIRED_SCHEMA_TABLES.length
+    ) {
       return false;
     }
     if (expectedGameIds.length === 0) {

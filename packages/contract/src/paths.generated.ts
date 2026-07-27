@@ -2,8 +2,12 @@
 export const GAME_MANAGE_KIT_CONTRACT_VERSION = "1.0.0";
 
 export const GameManageKitPath = {
+  AdminLogin: "/v1/admin/auth/login",
+  AdminLogout: "/v1/admin/auth/session",
   BanAccount: "/v1/games/{gameId}/admin/accounts/{userId}/ban",
   DevLogin: "/v1/games/{gameId}/sessions/dev",
+  GetAdminAccount: "/v1/games/{gameId}/admin/accounts/{userId}",
+  GetAdminSession: "/v1/admin/auth/session",
   HasCharacter: "/v1/games/{gameId}/internal/characters/{userId}/{serverId}",
   ListAreas: "/v1/games/{gameId}/areas",
   Livez: "/livez",
@@ -17,8 +21,12 @@ export const GameManageKitPath = {
 } as const;
 
 export const GameManageKitMethod = {
+  AdminLogin: "POST",
+  AdminLogout: "DELETE",
   BanAccount: "POST",
   DevLogin: "POST",
+  GetAdminAccount: "GET",
+  GetAdminSession: "GET",
   HasCharacter: "GET",
   ListAreas: "GET",
   Livez: "GET",

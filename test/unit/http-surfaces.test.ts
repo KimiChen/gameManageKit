@@ -56,6 +56,9 @@ function config(nodeEnv: "development" | "production" = "development") {
     GAME_MANAGE_KIT_MYSQL_URL: "mysql://root@127.0.0.1:3306/game_manage_kit_test",
     AUTH_DEV_ENABLED: nodeEnv === "development" ? "1" : "0",
     GAME_MANAGE_KIT_LOG_ENABLED: "0",
+    ...(nodeEnv === "production"
+      ? { GAME_MANAGE_KIT_ADMIN_ORIGIN: "https://admin.example.invalid" }
+      : {}),
   });
 }
 
@@ -120,12 +123,45 @@ function services(
       },
     },
     admin: {
+      async find(input) {
+        return {
+          userId: input.userId,
+          status: "active",
+          lastLoginAt: null,
+          activeSessionCount: 1,
+        };
+      },
+      async auditDenied() {},
       async execute(input) {
         return {
           accountExists: true,
           status: input.action === "ban" ? "banned" : "revoked",
         };
       },
+    },
+    adminAuth: {
+      async login() {
+        return {
+          sessionToken: Buffer.alloc(32, 1).toString("base64url"),
+          operatorId: "ops_kimi",
+          displayName: "Kimi",
+          authVersion: 1,
+          games: [{ gameId: "game-a", canOperateAccounts: true }],
+          expiresAt: "2026-07-28T18:00:00.000Z",
+        };
+      },
+      async authenticate() {
+        return {
+          operatorId: "ops_kimi",
+          displayName: "Kimi",
+          authVersion: 1,
+          games: [{ gameId: "game-a", canOperateAccounts: true }],
+          expiresAt: "2026-07-28T18:00:00.000Z",
+        };
+      },
+      async logout() {},
+      async requireAccountOperation() {},
+      async requireGameAccess() {},
     },
     readiness: {
       async ready() {
@@ -393,6 +429,10 @@ test("Admin 按游戏使用独立令牌桶且不影响 Public 登录", async (t)
   let executed = 0;
   const limitedServices = services(games, {
     admin: {
+      async find() {
+        return null;
+      },
+      async auditDenied() {},
       async execute() {
         executed += 1;
         return { accountExists: true, status: "banned" };

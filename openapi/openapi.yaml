@@ -14,6 +14,67 @@ tags:
   - name: Admin
   - name: System
 paths:
+  /v1/admin/auth/login:
+    post:
+      operationId: adminLogin
+      tags: [Admin]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminLoginRequest'
+      responses:
+        '204':
+          description: 登录成功；会话仅通过 HttpOnly Cookie 返回
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/auth/session:
+    get:
+      operationId: getAdminSession
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      responses:
+        '200':
+          description: 当前管理员及实时游戏权限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminSessionResponse'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    delete:
+      operationId: adminLogout
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      responses:
+        '204':
+          description: 会话已撤销并清除 Cookie
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
   /v1/games/{gameId}/sessions/wechat:
     parameters:
       - $ref: '#/components/parameters/GameId'
@@ -202,6 +263,7 @@ paths:
       operationId: banAccount
       tags: [Admin]
       security:
+        - AdminSession: []
         - AdminSecret: []
           OperatorId: []
       requestBody:
@@ -220,7 +282,7 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
-          $ref: '#/components/responses/ServiceUnauthorized'
+          $ref: '#/components/responses/AdminUnauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
@@ -241,6 +303,7 @@ paths:
       operationId: revokeAccount
       tags: [Admin]
       security:
+        - AdminSession: []
         - AdminSecret: []
           OperatorId: []
       requestBody:
@@ -259,13 +322,45 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
-          $ref: '#/components/responses/ServiceUnauthorized'
+          $ref: '#/components/responses/AdminUnauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/games/{gameId}/admin/accounts/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/GameId'
+      - $ref: '#/components/parameters/UserId'
+    get:
+      operationId: getAdminAccount
+      tags: [Admin]
+      security:
+        - AdminSession: []
+        - AdminSecret: []
+          OperatorId: []
+      responses:
+        '200':
+          description: 仅返回管理所需的最小账号摘要
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminAccountDetailResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -352,6 +447,10 @@ components:
       type: apiKey
       in: header
       name: x-operator-id
+    AdminSession:
+      type: apiKey
+      in: cookie
+      name: __Host-gmk_admin_session
   parameters:
     GameId:
       name: gameId
@@ -391,6 +490,12 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     ServiceUnauthorized:
       description: 服务身份无效
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    AdminUnauthorized:
+      description: 管理员凭证或会话无效
       content:
         application/json:
           schema:
@@ -458,6 +563,8 @@ components:
         - GAME_ACCESS_DENIED
         - SERVER_NOT_FOUND
         - SERVER_DISABLED
+        - ADMIN_AUTH_REQUIRED
+        - ORIGIN_FORBIDDEN
     ErrorResponse:
       type: object
       additionalProperties: false
@@ -623,6 +730,82 @@ components:
           type: string
           minLength: 1
           maxLength: 255
+    AdminLoginRequest:
+      type: object
+      additionalProperties: false
+      required: [operatorId, password]
+      properties:
+        operatorId:
+          type: string
+          maxLength: 64
+        password:
+          type: string
+          maxLength: 1024
+    AdminOperator:
+      type: object
+      additionalProperties: false
+      required: [operatorId, displayName]
+      properties:
+        operatorId:
+          type: string
+          minLength: 3
+          maxLength: 64
+          pattern: '^[a-z][a-z0-9_.-]{2,63}$'
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 128
+    AdminGameAccess:
+      type: object
+      additionalProperties: false
+      required: [gameId, name, status, canOperateAccounts]
+      properties:
+        gameId:
+          $ref: '#/components/schemas/GameId'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        status:
+          $ref: '#/components/schemas/GameStatus'
+        canOperateAccounts:
+          type: boolean
+    AdminSessionResponse:
+      type: object
+      additionalProperties: false
+      required: [operator, games, expiresAt]
+      properties:
+        operator:
+          $ref: '#/components/schemas/AdminOperator'
+        games:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: '#/components/schemas/AdminGameAccess'
+        expiresAt:
+          type: string
+          format: date-time
+    AdminAccountDetailResponse:
+      type: object
+      additionalProperties: false
+      required: [userId, status, lastLoginAt, activeSessionCount]
+      properties:
+        userId:
+          type: string
+          minLength: 1
+          maxLength: 32
+          pattern: '^u_[0-9]+$'
+        status:
+          type: string
+          enum: [active, banned, deregistered]
+        lastLoginAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        activeSessionCount:
+          type: integer
+          minimum: 0
     AdminAccountResponse:
       type: object
       additionalProperties: false

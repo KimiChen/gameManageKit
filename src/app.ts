@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { GameManageKitConfig } from "./config.js";
 import { AdminAccountService } from "./domain/account/admin.js";
+import { AdminAuthService } from "./domain/admin/auth.js";
 import { LoginService } from "./domain/account/login.js";
 import { CharacterService } from "./domain/character/service.js";
 import {
@@ -14,9 +15,14 @@ import {
   createHttpApp,
 } from "./http/common.js";
 import {
+  registerAdminAuthRoutes,
+  type AdminAuthRouteServices,
+} from "./http/admin/auth-routes.js";
+import {
   registerAdminRoutes,
   type AdminRouteServices,
 } from "./http/admin/routes.js";
+import { registerAdminWebRoutes } from "./http/admin/web.js";
 import {
   registerInternalRoutes,
   type InternalRouteServices,
@@ -37,6 +43,7 @@ import {
 export interface GameManageKitServices
   extends PublicRouteServices,
   InternalRouteServices,
+  AdminAuthRouteServices,
   AdminRouteServices,
   SystemRouteServices,
   MetricsRouteServices {}
@@ -48,6 +55,7 @@ export interface GameManageKitApps {
 
 export interface Runtime {
   readonly apps: GameManageKitApps;
+  readonly adminAuth: AdminAuthService;
   readonly database: Database;
   readonly games: GameRegistry;
   readonly metrics: MetricsRegistry;
@@ -63,7 +71,9 @@ export function buildApps(
 
   const internalApp = createHttpApp(config);
   registerInternalRoutes(internalApp, services);
-  registerAdminRoutes(internalApp, services);
+  registerAdminAuthRoutes(internalApp, config, services);
+  registerAdminRoutes(internalApp, config, services);
+  registerAdminWebRoutes(internalApp);
   registerMetricsRoutes(internalApp, services);
   registerSystemRoutes(internalApp, config, services);
 
@@ -85,6 +95,11 @@ export async function createRuntime(
   });
   const database = new Database(config.mysqlUrl, config.mysqlPoolSize);
   try {
+    if (!await database.ready(config.schemaVersion)) {
+      throw new Error(
+        "数据库 schema 未就绪；请先运行 migration，旧开发库需按文档重建",
+      );
+    }
     await games.sync(database.pool);
     const gameIds = games.list().map((game) => game.gameId);
     const metrics = new MetricsRegistry(gameIds);
@@ -97,6 +112,7 @@ export async function createRuntime(
     );
     const directory = new DirectoryService(sessions, characters);
     const admin = new AdminAccountService(database, metrics);
+    const adminAuth = new AdminAuthService(database);
     const services: GameManageKitServices = {
       games,
       metrics,
@@ -105,6 +121,7 @@ export async function createRuntime(
       sessions,
       characters,
       admin,
+      adminAuth,
       readiness: {
         ready: async () => (
           games.ready()
@@ -114,6 +131,7 @@ export async function createRuntime(
     };
     return {
       apps: buildApps(config, services),
+      adminAuth,
       database,
       games,
       metrics,

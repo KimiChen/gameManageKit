@@ -16,7 +16,7 @@ test("管理员密码哈希验证正确密码并拒绝错误密码", async () =>
 
   assert.match(
     storedHash,
-    /^gmk-scrypt\$v=1\$N=65536,r=8,p=1\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$/u,
+    /^gmk-scrypt\$v=1\$N=65536,r=8,p=2\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$/u,
   );
   assert.equal(await verifyAdminPassword(PASSWORD, storedHash), true);
   assert.equal(await verifyAdminPassword(`${PASSWORD}!`, storedHash), false);
@@ -41,13 +41,14 @@ test("损坏哈希和恶意资源参数均安全失败且不抛出", async () =>
     "",
     storedHash.slice(0, -1),
     `${storedHash}$extra`,
-    `gmk-scrypt$v=2$N=65536,r=8,p=1$${salt}$${digest}`,
-    `gmk-scrypt$v=1$N=32768,r=8,p=1$${salt}$${digest}`,
-    `gmk-scrypt$v=1$N=999999999999,r=8,p=1$${salt}$${digest}`,
-    `gmk-scrypt$v=1$N=65536,r=999999999,p=1$${salt}$${digest}`,
-    `gmk-scrypt$v=1$r=8,N=65536,p=1$${salt}$${digest}`,
-    `gmk-scrypt$v=1$N=65536,r=8,p=1$${"=".repeat(22)}$${digest}`,
-    `gmk-scrypt$v=1$N=65536,r=8,p=1$${salt}$${"!".repeat(43)}`,
+    `gmk-scrypt$v=2$N=65536,r=8,p=2$${salt}$${digest}`,
+    `gmk-scrypt$v=1$N=32768,r=8,p=2$${salt}$${digest}`,
+    `gmk-scrypt$v=1$N=999999999999,r=8,p=2$${salt}$${digest}`,
+    `gmk-scrypt$v=1$N=65536,r=999999999,p=2$${salt}$${digest}`,
+    `gmk-scrypt$v=1$r=8,N=65536,p=2$${salt}$${digest}`,
+    `gmk-scrypt$v=1$N=65536,r=8,p=1$${salt}$${digest}`,
+    `gmk-scrypt$v=1$N=65536,r=8,p=2$${"=".repeat(22)}$${digest}`,
+    `gmk-scrypt$v=1$N=65536,r=8,p=2$${salt}$${"!".repeat(43)}`,
     "x".repeat(1_000_000),
   ];
 

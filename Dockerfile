@@ -26,6 +26,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/packages/contract/dist ./packages/contract/dist
 COPY config ./config
 COPY migrations ./migrations
+COPY web ./web
 COPY scripts/docker-smoke.mjs ./scripts/docker-smoke.mjs
 EXPOSE 2570 2571
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \

@@ -69,6 +69,22 @@ test("管理员静态资源支持 ETag 条件请求", async (t) => {
   assert.equal(cached.statusCode, 304);
   assert.equal(cached.body, "");
   assert.equal(cached.headers.etag, etag);
+
+  for (const ifNoneMatch of [
+    "*",
+    `W/${etag}`,
+    `"other", W/${etag}`,
+  ]) {
+    const weaklyCached = await app.inject({
+      method: "GET",
+      url: "/admin/app.js",
+      headers: {
+        "if-none-match": ifNoneMatch,
+      },
+    });
+    assert.equal(weaklyCached.statusCode, 304);
+    assert.equal(weaklyCached.body, "");
+  }
 });
 
 test("规范化入口重定向到带斜杠的管理页", async (t) => {

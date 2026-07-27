@@ -4,16 +4,24 @@ import test from "node:test";
 import {
   AdminApiError,
   InvalidApiPayloadError,
+  accountStatusPresentation,
   accountPath,
+  canPerformAccountAction,
   chooseInitialGame,
+  createLatestRequestGuard,
   createAdminApi,
   createOperationIntent,
   describeApiError,
+  isSessionExpired,
+  isCompletedLogout,
+  isValidAdminPasswordInput,
   isValidUserId,
   normalizeAccount,
   normalizeOperationResult,
   normalizeSession,
+  reuseOrCreateOperationIntent,
 } from "../../web/admin/app.js";
+import { resetPasswordControl } from "../../web/admin/wsk.js";
 
 const artifactUrl = (name) => new URL(`../../web/admin/${name}`, import.meta.url);
 
@@ -63,6 +71,8 @@ test("管理员页面只引用本地资源且不包含共享 Secret", async () =
   assert.match(html, /lang="zh-CN"/u);
   assert.match(html, /autocomplete="username"/u);
   assert.match(html, /autocomplete="current-password"/u);
+  assert.match(html, /id="operator-password"[\s\S]+?minlength="12"/u);
+  assert.match(html, /id="operation-reason"[\s\S]+?maxlength="255"/u);
   assert.match(html, /aria-labelledby="operation-dialog-title"/u);
   assert.match(html, /href="\/admin\/wsk\.css"/u);
   assert.match(html, /href="\/admin\/admin\.css"/u);
@@ -96,11 +106,25 @@ test("会话响应按管理员和游戏权限严格校验", () => {
   );
   assert.equal(Object.isFrozen(session), true);
   assert.equal(Object.isFrozen(session.games), true);
+  assert.equal(
+    isSessionExpired(session, Date.parse("2026-07-28T18:00:00.000Z")),
+    true,
+  );
+  assert.equal(
+    isSessionExpired(session, Date.parse("2026-07-28T17:59:59.999Z")),
+    false,
+  );
 
   const duplicated = validSession();
   duplicated.games[1].gameId = "game-a";
   assert.throws(
     () => normalizeSession(duplicated),
+    InvalidApiPayloadError,
+  );
+  const invalidOperator = validSession();
+  invalidOperator.operator.operatorId = "INVALID OPERATOR";
+  assert.throws(
+    () => normalizeSession(invalidOperator),
     InvalidApiPayloadError,
   );
 
@@ -128,6 +152,28 @@ test("多游戏必须主动选择，单游戏才自动选中", () => {
   assert.equal(chooseInitialGame([]), null);
 });
 
+test("登录密码校验与服务端 Unicode 和字节边界一致", () => {
+  assert.equal(isValidAdminPasswordInput("密".repeat(12)), true);
+  assert.equal(isValidAdminPasswordInput("密".repeat(11)), false);
+  assert.equal(isValidAdminPasswordInput("a".repeat(256)), true);
+  assert.equal(isValidAdminPasswordInput("a".repeat(257)), false);
+  assert.equal(isValidAdminPasswordInput("🔐".repeat(256)), true);
+  assert.equal(isValidAdminPasswordInput(`\ud800${"a".repeat(12)}`), false);
+});
+
+test("会话请求版本会拒绝退出或过期前发起的迟到响应", () => {
+  const requests = createLatestRequestGuard();
+  const first = requests.begin();
+  assert.equal(requests.isCurrent(first), true);
+
+  const second = requests.begin();
+  assert.equal(requests.isCurrent(first), false);
+  assert.equal(requests.isCurrent(second), true);
+
+  requests.invalidate();
+  assert.equal(requests.isCurrent(second), false);
+});
+
 test("账号与操作响应拒绝宽松或错位数据", () => {
   const account = normalizeAccount({
     userId: "u_12345",
@@ -136,6 +182,22 @@ test("账号与操作响应拒绝宽松或错位数据", () => {
     activeSessionCount: 2,
   }, "u_12345");
   assert.equal(account.activeSessionCount, 2);
+  const deregistered = normalizeAccount({
+    userId: "u_54321",
+    status: "deregistered",
+    lastLoginAt: null,
+    activeSessionCount: 0,
+  }, "u_54321");
+  assert.equal(deregistered.status, "deregistered");
+  assert.deepEqual(
+    accountStatusPresentation(deregistered),
+    { text: "已注销", variant: "warning" },
+  );
+  assert.equal(canPerformAccountAction(deregistered, "ban", true), false);
+  assert.equal(canPerformAccountAction(deregistered, "revoke", true), false);
+  assert.equal(canPerformAccountAction(account, "ban", true), true);
+  assert.equal(canPerformAccountAction(account, "revoke", true), true);
+  assert.equal(canPerformAccountAction(account, "ban", false), false);
   assert.equal(isValidUserId(" u_12345 "), true);
   assert.equal(isValidUserId("12345"), false);
 
@@ -154,11 +216,31 @@ test("账号与操作响应拒绝宽松或错位数据", () => {
     InvalidApiPayloadError,
   );
   assert.deepEqual(
-    normalizeOperationResult({ accountExists: true, status: "revoked" }),
+    normalizeOperationResult(
+      { accountExists: true, status: "revoked" },
+      "revoke",
+    ),
     { accountExists: true, status: "revoked" },
   );
   assert.throws(
-    () => normalizeOperationResult({ accountExists: true, status: "done" }),
+    () => normalizeOperationResult(
+      { accountExists: true, status: "done" },
+      "revoke",
+    ),
+    InvalidApiPayloadError,
+  );
+  assert.throws(
+    () => normalizeOperationResult({
+      accountExists: false,
+      status: "banned",
+    }, "ban"),
+    InvalidApiPayloadError,
+  );
+  assert.throws(
+    () => normalizeOperationResult({
+      accountExists: true,
+      status: "revoked",
+    }, "ban"),
     InvalidApiPayloadError,
   );
 });
@@ -195,6 +277,27 @@ test("路径参数编码且 operationId 在同一次重试中保持不变", asyn
     "c67d6996-67b0-48de-897f-d144b790be50",
   );
   assert.equal(requests[0].init.body, requests[1].init.body);
+
+  const reused = reuseOrCreateOperationIntent({
+    previous: intent,
+    action: "revoke",
+    gameId: "game-a",
+    userId: "u_42",
+    randomUUID: () => {
+      throw new Error("同目标重试不应创建新的 operationId");
+    },
+  });
+  assert.equal(reused, intent);
+
+  const replaced = reuseOrCreateOperationIntent({
+    previous: intent,
+    action: "ban",
+    gameId: "game-a",
+    userId: "u_42",
+    randomUUID: () => "5b31f2c1-7f8a-4480-815e-a074c63b1ae3",
+  });
+  assert.notEqual(replaced, intent);
+  assert.equal(replaced.operationId, "5b31f2c1-7f8a-4480-815e-a074c63b1ae3");
 });
 
 test("API 客户端使用同源 Cookie、正确方法和 JSON 请求", async () => {
@@ -277,6 +380,64 @@ test("API 请求失败不自动重试并保留限流信息", async () => {
   assert.equal(attempts, 1);
 });
 
+test("退出接口 401 视为会话已经结束，其他失败仍可重试", () => {
+  assert.equal(isCompletedLogout(null), true);
+  assert.equal(
+    isCompletedLogout(new AdminApiError("expired", { status: 401 })),
+    true,
+  );
+  assert.equal(
+    isCompletedLogout(new AdminApiError("offline", { status: 0 })),
+    false,
+  );
+});
+
+test("API 请求超时会中止 fetch 并返回可重试错误", async () => {
+  let timeoutCleared = false;
+  const api = createAdminApi(async (_path, init) => {
+    assert.equal(init.signal.aborted, true);
+    throw new DOMException("aborted", "AbortError");
+  }, {
+    requestTimeoutMs: 1,
+    schedule(callback) {
+      callback();
+      return 17;
+    },
+    cancelSchedule(timer) {
+      assert.equal(timer, 17);
+      timeoutCleared = true;
+    },
+  });
+
+  await assert.rejects(
+    () => api.session(),
+    (error) => {
+      assert.equal(error instanceof AdminApiError, true);
+      assert.equal(error.code, "REQUEST_TIMEOUT");
+      assert.equal(describeApiError(error, "session"), "管理服务响应超时，请重试。");
+      return true;
+    },
+  );
+  assert.equal(timeoutCleared, true);
+});
+
+test("危险操作拒绝与操作意图不一致的成功响应", async () => {
+  const api = createAdminApi(async () => (
+    jsonResponse({ accountExists: true, status: "revoked" })
+  ));
+  const intent = createOperationIntent({
+    action: "ban",
+    gameId: "game-a",
+    userId: "u_42",
+    randomUUID: () => "97a6279c-1a98-425f-b8b1-c2bc5a1a1a30",
+  });
+
+  await assert.rejects(
+    () => api.perform(intent, "安全处置"),
+    InvalidApiPayloadError,
+  );
+});
+
 test("网络错误与成功状态下的非法响应被区分", async () => {
   const offlineApi = createAdminApi(async () => {
     throw new TypeError("offline");
@@ -301,4 +462,30 @@ test("网络错误与成功状态下的非法响应被区分", async () => {
     () => malformedApi.session(),
     InvalidApiPayloadError,
   );
+});
+
+test("清空密码时同步恢复隐藏状态和无障碍标签", () => {
+  const attributes = new Map();
+  const useAttributes = new Map();
+  const input = { type: "text" };
+  const button = {
+    setAttribute(name, value) {
+      attributes.set(name, value);
+    },
+    querySelector(selector) {
+      assert.equal(selector, "use");
+      return {
+        setAttribute(name, value) {
+          useAttributes.set(name, value);
+        },
+      };
+    },
+  };
+
+  resetPasswordControl(input, button);
+  assert.equal(input.type, "password");
+  assert.equal(attributes.get("aria-pressed"), "false");
+  assert.equal(attributes.get("aria-label"), "显示密码");
+  assert.equal(attributes.get("title"), "显示密码");
+  assert.equal(useAttributes.get("href"), "#eye");
 });

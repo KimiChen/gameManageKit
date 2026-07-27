@@ -77,10 +77,18 @@ function securityHeaders(reply: FastifyReply, scriptHash: string): void {
 
 function matchesEtag(request: FastifyRequest, expected: string): boolean {
   const value: unknown = request.headers["if-none-match"];
-  if (typeof value === "string") {
-    return value.split(",").some((candidate) => candidate.trim() === expected);
-  }
-  return Array.isArray(value) && value.some((candidate) => candidate === expected);
+  const values = typeof value === "string"
+    ? [value]
+    : Array.isArray(value)
+      ? value
+      : [];
+  const expectedWeakValue = expected.replace(/^W\//u, "");
+  return values
+    .flatMap((header) => header.split(","))
+    .some((candidate) => {
+      const tag = candidate.trim();
+      return tag === "*" || tag.replace(/^W\//u, "") === expectedWeakValue;
+    });
 }
 
 function sendAsset(

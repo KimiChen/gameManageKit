@@ -21,6 +21,7 @@ export interface RateLimitPolicy {
 
 export interface GameContext {
   readonly gameId: string;
+  readonly name: string;
   readonly status: GameStatus;
   readonly directory: DirectoryProvider;
   readonly wechat: WechatClient;
@@ -60,6 +61,7 @@ interface StoredGameRow extends RowDataPacket {
 
 interface ParsedGame {
   readonly gameId: string;
+  readonly name: string;
   readonly status: GameStatus;
   readonly directoryPath: string;
   readonly sessionTtlSeconds: number;
@@ -81,6 +83,7 @@ type Environment = Readonly<Record<string, string | undefined>>;
 const ROOT_KEYS = new Set(["games", "serviceIdentities", "adminIdentities"]);
 const GAME_KEYS = new Set([
   "gameId",
+  "name",
   "status",
   "directoryPath",
   "sessionTtlSeconds",
@@ -246,6 +249,9 @@ function asGame(
 
   return {
     gameId,
+    name: input.name === undefined
+      ? gameId
+      : asNonEmptyString(input.name, `${label}.name`, 128),
     status: input.status as GameStatus,
     directoryPath: resolveConfigPath(
       configDirectory,
@@ -471,6 +477,7 @@ export class GameRegistry {
       const adminRate = Object.freeze({ ...game.adminRate });
       return Object.freeze({
         gameId: game.gameId,
+        name: game.name,
         status: game.status,
         directory,
         wechat: new WechatClient({

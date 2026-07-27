@@ -26,6 +26,20 @@ async function requestJson(baseUrl, path, expectedStatus, init = {}) {
   return body;
 }
 
+async function requestText(baseUrl, path, expectedStatus, init = {}) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    redirect: "manual",
+    ...init,
+  });
+  const body = await response.text();
+  assert.equal(
+    response.status,
+    expectedStatus,
+    `${path} returned HTTP ${response.status}: ${body}`,
+  );
+  return { body, headers: response.headers };
+}
+
 const jsonRequest = (body, headers = {}) => ({
   method: "POST",
   headers: {
@@ -34,6 +48,27 @@ const jsonRequest = (body, headers = {}) => ({
   },
   body: JSON.stringify(body),
 });
+
+const adminIndex = await requestText(internalUrl, "/admin/", 200);
+assert.match(
+  adminIndex.headers.get("content-type") ?? "",
+  /^text\/html(?:;|$)/u,
+);
+assert.match(
+  adminIndex.headers.get("content-security-policy") ?? "",
+  /default-src 'none'/u,
+);
+assert.match(adminIndex.body, /gameManageKit 管理控制台/u);
+
+const adminApplication = await requestText(internalUrl, "/admin/app.js", 200);
+assert.match(
+  adminApplication.headers.get("content-type") ?? "",
+  /^application\/javascript(?:;|$)/u,
+);
+assert.match(adminApplication.body, /bootstrapAdminConsole/u);
+
+await requestText(publicUrl, "/admin/", 404);
+await requestText(publicUrl, "/v1/admin/auth/session", 404);
 
 const devKey = "docker-smoke-shared-identity";
 const gameALogin = await requestJson(
@@ -114,4 +149,4 @@ const forbidden = await requestJson(
 );
 assert.equal(forbidden.code, "GAME_ACCESS_DENIED");
 
-console.log("[docker-smoke] two-game isolation verified");
+console.log("[docker-smoke] admin surface and two-game isolation verified");

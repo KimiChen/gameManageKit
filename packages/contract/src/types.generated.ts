@@ -49,6 +49,57 @@ export type paths = {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["adminLogin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/auth/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getAdminSession"];
+        put?: never;
+        post?: never;
+        delete: operations["adminLogout"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/games/{gameId}/admin/accounts/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+                userId: components["parameters"]["UserId"];
+            };
+            cookie?: never;
+        };
+        get: operations["getAdminAccount"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/games/{gameId}/admin/accounts/{userId}/ban": {
         parameters: {
             query?: never;
@@ -200,6 +251,14 @@ export type paths = {
 export type webhooks = Record<string, never>;
 export type components = {
     schemas: {
+        AdminAccountDetailResponse: {
+            activeSessionCount: number;
+            /** Format: date-time */
+            lastLoginAt: string | null;
+            /** @enum {string} */
+            status: "active" | "banned" | "deregistered";
+            userId: string;
+        };
         AdminAccountRequest: {
             operationId: string;
             reason: string;
@@ -208,6 +267,26 @@ export type components = {
             accountExists: boolean;
             /** @enum {string} */
             status: "banned" | "revoked" | "not_found";
+        };
+        AdminGameAccess: {
+            canOperateAccounts: boolean;
+            gameId: components["schemas"]["GameId"];
+            name: string;
+            status: components["schemas"]["GameStatus"];
+        };
+        AdminLoginRequest: {
+            operatorId: string;
+            password: string;
+        };
+        AdminOperator: {
+            displayName: string;
+            operatorId: string;
+        };
+        AdminSessionResponse: {
+            /** Format: date-time */
+            expiresAt: string;
+            games: components["schemas"]["AdminGameAccess"][];
+            operator: components["schemas"]["AdminOperator"];
         };
         AreaListResponse: {
             hash: string;
@@ -232,7 +311,7 @@ export type components = {
             serverId: number;
         };
         /** @enum {string} */
-        ErrorCode: "INVALID_PAYLOAD" | "AUTH_REQUIRED" | "ACCOUNT_BANNED" | "NOT_FOUND" | "RATE_LIMITED" | "UPSTREAM_UNAVAILABLE" | "SERVICE_AUTH_REQUIRED" | "SERVICE_FORBIDDEN" | "OPERATION_CONFLICT" | "INTERNAL" | "GAME_NOT_FOUND" | "GAME_DISABLED" | "GAME_ACCESS_DENIED" | "SERVER_NOT_FOUND" | "SERVER_DISABLED";
+        ErrorCode: "INVALID_PAYLOAD" | "AUTH_REQUIRED" | "ACCOUNT_BANNED" | "NOT_FOUND" | "RATE_LIMITED" | "UPSTREAM_UNAVAILABLE" | "SERVICE_AUTH_REQUIRED" | "SERVICE_FORBIDDEN" | "OPERATION_CONFLICT" | "INTERNAL" | "GAME_NOT_FOUND" | "GAME_DISABLED" | "GAME_ACCESS_DENIED" | "SERVER_NOT_FOUND" | "SERVER_DISABLED" | "ADMIN_AUTH_REQUIRED" | "ORIGIN_FORBIDDEN";
         ErrorResponse: {
             code: components["schemas"]["ErrorCode"];
             requestId: string;
@@ -289,6 +368,15 @@ export type components = {
         };
     };
     responses: {
+        /** @description 管理员凭证或会话无效 */
+        AdminUnauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
         /** @description 入参不合法 */
         BadRequest: {
             headers: {
@@ -454,6 +542,109 @@ export interface operations {
             };
         };
     };
+    adminLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminLoginRequest"];
+            };
+        };
+        responses: {
+            /** @description 登录成功；会话仅通过 HttpOnly Cookie 返回 */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["AdminUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getAdminSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 当前管理员及实时游戏权限 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminSessionResponse"];
+                };
+            };
+            401: components["responses"]["AdminUnauthorized"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    adminLogout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 会话已撤销并清除 Cookie */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["AdminUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getAdminAccount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+                userId: components["parameters"]["UserId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 仅返回管理所需的最小账号摘要 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminAccountDetailResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["AdminUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     banAccount: {
         parameters: {
             query?: never;
@@ -480,7 +671,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
-            401: components["responses"]["ServiceUnauthorized"];
+            401: components["responses"]["AdminUnauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
@@ -515,7 +706,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
-            401: components["responses"]["ServiceUnauthorized"];
+            401: components["responses"]["AdminUnauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];

@@ -73,9 +73,37 @@ function serviceStubs(games: GameRegistry): GameManageKitServices {
       },
     },
     admin: {
+      async find() {
+        return null;
+      },
+      async auditDenied() {},
       async execute() {
         return { accountExists: false, status: "not_found" };
       },
+    },
+    adminAuth: {
+      async login() {
+        return {
+          sessionToken: Buffer.alloc(32, 1).toString("base64url"),
+          operatorId: "ops_contract",
+          displayName: "Contract",
+          authVersion: 1,
+          games: [],
+          expiresAt: "2026-07-28T18:00:00.000Z",
+        };
+      },
+      async authenticate() {
+        return {
+          operatorId: "ops_contract",
+          displayName: "Contract",
+          authVersion: 1,
+          games: [],
+          expiresAt: "2026-07-28T18:00:00.000Z",
+        };
+      },
+      async logout() {},
+      async requireAccountOperation() {},
+      async requireGameAccess() {},
     },
     readiness: {
       async ready() {
@@ -131,7 +159,11 @@ test("实际双监听路由全集与 OpenAPI method/path/tag 完全一致", asyn
   await Promise.all([apps.publicApp.ready(), apps.internalApp.ready()]);
 
   const actualPublic = new Set(listRegisteredRoutes(apps.publicApp).map(canonicalRoute));
-  const actualInternal = new Set(listRegisteredRoutes(apps.internalApp).map(canonicalRoute));
+  const actualInternal = new Set(
+    listRegisteredRoutes(apps.internalApp)
+      .filter((route) => !route.path.startsWith("/admin"))
+      .map(canonicalRoute),
+  );
   assert.deepEqual(actualPublic, expectedPublic);
   assert.deepEqual(actualInternal, expectedInternal);
 

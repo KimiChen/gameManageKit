@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import mysql, { type RowDataPacket } from "mysql2/promise";
+import { createAdminOperator } from "../../src/admin-create.js";
 import { createRuntime } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
 import { GameRegistry } from "../../src/domain/game/registry.js";
@@ -94,7 +95,7 @@ test("多游戏迁移、认证、数据与运行态完整隔离", async () => {
         [[1, "0001_initial.sql"]],
       );
       const [tables] = await check.query<RowDataPacket[]>("SHOW TABLES");
-      assert.equal(tables.length, 7);
+      assert.equal(tables.length, 11);
       const [sessionKeyColumns] = await check.query<RowDataPacket[]>(
         "SHOW COLUMNS FROM accounts LIKE 'session_key'",
       );
@@ -126,6 +127,33 @@ test("多游戏迁移、认证、数据与运行态完整隔离", async () => {
     });
     runtime = await createRuntime(config, { games });
     const { publicApp, internalApp } = runtime.apps;
+    const webAdminPassword = "integration admin password";
+    await createAdminOperator(runtime.database, {
+      operatorId: "ops_integration",
+      displayName: "Integration Admin",
+      gameIds: ["game-a"],
+      canOperateAccounts: true,
+    }, webAdminPassword);
+    const webLogin = async (password = webAdminPassword): Promise<string> => {
+      const response = await internalApp.inject({
+        method: "POST",
+        url: "/v1/admin/auth/login",
+        headers: { origin: config.adminOrigin },
+        payload: { operatorId: "ops_integration", password },
+      });
+      assert.equal(response.statusCode, 204, response.body);
+      const setCookie = response.headers["set-cookie"];
+      const sessionCookie = (Array.isArray(setCookie) ? setCookie : [setCookie])
+        .find((cookie) => (
+          cookie?.startsWith("gmk_admin_session=")
+          && !cookie.includes("Max-Age=0")
+        ));
+      assert.equal(typeof sessionCookie, "string");
+      if (sessionCookie === undefined) {
+        throw new Error("管理员登录未返回 Cookie");
+      }
+      return sessionCookie.split(";", 1)[0]!;
+    };
     const serviceA = {
       "x-service-id": "game-a-service",
       "x-service-secret": TENANT_ENV.GAME_A_SERVICE_SECRET,
@@ -165,6 +193,39 @@ test("多游戏迁移、认证、数据与运行态完整隔离", async () => {
       headers: gameId === "game-a" ? serviceA : serviceB,
       payload: { accessToken, serverId },
     });
+
+    const wrongAdminLogin = await internalApp.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      headers: { origin: config.adminOrigin },
+      payload: {
+        operatorId: "ops_integration",
+        password: "wrong admin password",
+      },
+    });
+    assert.equal(wrongAdminLogin.statusCode, 401);
+    assert.equal(wrongAdminLogin.json().code, "ADMIN_AUTH_REQUIRED");
+    const adminCookie = await webLogin();
+    const webSession = await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/auth/session",
+      headers: { cookie: adminCookie },
+    });
+    assert.equal(webSession.statusCode, 200);
+    assert.deepEqual(
+      webSession.json().games.map((game: { gameId: string }) => game.gameId),
+      ["game-a"],
+    );
+    const [creationAudit] = await runtime.database.pool.query<RowDataPacket[]>(
+      `SELECT event, reason
+         FROM admin_auth_audit
+        WHERE operator_id = 'ops_integration'
+          AND event = 'operator_created'`,
+    );
+    assert.deepEqual(
+      creationAudit.map((row) => [String(row.event), String(row.reason)]),
+      [["operator_created", "cli"]],
+    );
 
     const ready = await publicApp.inject({ method: "GET", url: "/readyz" });
     assert.equal(ready.statusCode, 200);
@@ -307,6 +368,44 @@ test("多游戏迁移、认证、数据与运行态完整隔离", async () => {
 
     const adminPlayerA = await loginDev("game-a", "admin-shared");
     const adminPlayerB = await loginDev("game-b", "admin-shared");
+    const webAccount = await internalApp.inject({
+      method: "GET",
+      url: `/v1/games/game-a/admin/accounts/${adminPlayerA.userId}`,
+      headers: { cookie: adminCookie },
+    });
+    assert.equal(webAccount.statusCode, 200);
+    assert.equal(webAccount.json().userId, adminPlayerA.userId);
+    assert.equal(webAccount.json().activeSessionCount, 1);
+    const webCrossGame = await internalApp.inject({
+      method: "GET",
+      url: `/v1/games/game-b/admin/accounts/${adminPlayerB.userId}`,
+      headers: { cookie: adminCookie },
+    });
+    assert.equal(webCrossGame.statusCode, 403);
+    assert.equal(webCrossGame.json().code, "GAME_ACCESS_DENIED");
+    const webWritePlayer = await loginDev("game-a", "web-admin-write");
+    const webWritePayload = {
+      operationId: "web-admin-revoke",
+      reason: "browser integration test",
+    };
+    const webRevoke = await internalApp.inject({
+      method: "POST",
+      url: `/v1/games/game-a/admin/accounts/${webWritePlayer.userId}/revoke`,
+      headers: { cookie: adminCookie, origin: config.adminOrigin },
+      payload: webWritePayload,
+    });
+    assert.equal(webRevoke.statusCode, 200);
+    assert.deepEqual(webRevoke.json(), {
+      accountExists: true,
+      status: "revoked",
+    });
+    const webRevokeReplay = await internalApp.inject({
+      method: "POST",
+      url: `/v1/games/game-a/admin/accounts/${webWritePlayer.userId}/revoke`,
+      headers: { cookie: adminCookie, origin: config.adminOrigin },
+      payload: webWritePayload,
+    });
+    assert.deepEqual(webRevokeReplay.json(), webRevoke.json());
     const sharedOperation = { operationId: "same-operation", reason: "integration test" };
     const revokeA = await internalApp.inject({
       method: "POST",
@@ -421,6 +520,75 @@ test("多游戏迁移、认证、数据与运行态完整隔离", async () => {
     const unaffectedB = unaffectedLoginB.json<LoginBody>();
     assert.equal(unaffectedB.userId, banPlayerB.userId);
     assert.equal((await verify("game-b", unaffectedB.accessToken)).json().valid, true);
+
+    const logout = await internalApp.inject({
+      method: "DELETE",
+      url: "/v1/admin/auth/session",
+      headers: { cookie: adminCookie, origin: config.adminOrigin },
+    });
+    assert.equal(logout.statusCode, 204);
+    assert.equal((await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/auth/session",
+      headers: { cookie: adminCookie },
+    })).statusCode, 401);
+
+    await runtime.database.pool.execute(
+      `INSERT INTO admin_sessions
+         (token_hash, operator_id, auth_version, created_at, last_seen_at, expires_at)
+       VALUES (
+         UNHEX(SHA2('integration-cleanup-token', 256)),
+         'ops_integration',
+         1,
+         DATE_SUB(NOW(3), INTERVAL 2 HOUR),
+         DATE_SUB(NOW(3), INTERVAL 31 MINUTE),
+         DATE_ADD(NOW(3), INTERVAL 6 HOUR)
+       )`,
+    );
+    assert.equal(await runtime.adminAuth.purgeExpiredSessions(10), 1);
+    const [cleanedSessions] = await runtime.database.pool.query<RowDataPacket[]>(
+      `SELECT COUNT(*) AS session_count
+         FROM admin_sessions
+        WHERE token_hash = UNHEX(SHA2('integration-cleanup-token', 256))`,
+    );
+    assert.equal(Number(cleanedSessions[0]?.session_count), 0);
+
+    const idleCookie = await webLogin();
+    await runtime.database.pool.execute(
+      `UPDATE admin_sessions
+          SET created_at = DATE_SUB(NOW(3), INTERVAL 1 HOUR),
+              last_seen_at = DATE_SUB(NOW(3), INTERVAL 31 MINUTE)
+        WHERE operator_id = 'ops_integration'`,
+    );
+    assert.equal((await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/auth/session",
+      headers: { cookie: idleCookie },
+    })).statusCode, 401);
+
+    const absoluteCookie = await webLogin();
+    await runtime.database.pool.execute(
+      `UPDATE admin_sessions
+          SET created_at = DATE_SUB(NOW(3), INTERVAL 9 HOUR),
+              last_seen_at = NOW(3),
+              expires_at = DATE_SUB(NOW(3), INTERVAL 1 HOUR)
+        WHERE operator_id = 'ops_integration'`,
+    );
+    assert.equal((await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/auth/session",
+      headers: { cookie: absoluteCookie },
+    })).statusCode, 401);
+
+    const disabledCookie = await webLogin();
+    await runtime.database.pool.execute(
+      "UPDATE admin_operators SET status = 'disabled' WHERE operator_id = 'ops_integration'",
+    );
+    assert.equal((await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/auth/session",
+      headers: { cookie: disabledCookie },
+    })).statusCode, 401);
 
     const metricsA = await internalApp.inject({
       method: "GET",

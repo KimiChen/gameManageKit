@@ -33,7 +33,9 @@ export const GameManageKitSchemas = {
       "GAME_DISABLED",
       "GAME_ACCESS_DENIED",
       "SERVER_NOT_FOUND",
-      "SERVER_DISABLED"
+      "SERVER_DISABLED",
+      "ADMIN_AUTH_REQUIRED",
+      "ORIGIN_FORBIDDEN"
     ],
     "$id": "ErrorCode"
   },
@@ -335,6 +337,138 @@ export const GameManageKitSchemas = {
       }
     },
     "$id": "AdminAccountRequest"
+  },
+  "AdminLoginRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "operatorId",
+      "password"
+    ],
+    "properties": {
+      "operatorId": {
+        "type": "string",
+        "maxLength": 64
+      },
+      "password": {
+        "type": "string",
+        "maxLength": 1024
+      }
+    },
+    "$id": "AdminLoginRequest"
+  },
+  "AdminOperator": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "operatorId",
+      "displayName"
+    ],
+    "properties": {
+      "operatorId": {
+        "type": "string",
+        "minLength": 3,
+        "maxLength": 64,
+        "pattern": "^[a-z][a-z0-9_.-]{2,63}$"
+      },
+      "displayName": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    },
+    "$id": "AdminOperator"
+  },
+  "AdminGameAccess": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "gameId",
+      "name",
+      "status",
+      "canOperateAccounts"
+    ],
+    "properties": {
+      "gameId": {
+        "$ref": "GameId#"
+      },
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "status": {
+        "$ref": "GameStatus#"
+      },
+      "canOperateAccounts": {
+        "type": "boolean"
+      }
+    },
+    "$id": "AdminGameAccess"
+  },
+  "AdminSessionResponse": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "operator",
+      "games",
+      "expiresAt"
+    ],
+    "properties": {
+      "operator": {
+        "$ref": "AdminOperator#"
+      },
+      "games": {
+        "type": "array",
+        "maxItems": 1024,
+        "items": {
+          "$ref": "AdminGameAccess#"
+        }
+      },
+      "expiresAt": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "$id": "AdminSessionResponse"
+  },
+  "AdminAccountDetailResponse": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "userId",
+      "status",
+      "lastLoginAt",
+      "activeSessionCount"
+    ],
+    "properties": {
+      "userId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 32,
+        "pattern": "^u_[0-9]+$"
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "active",
+          "banned",
+          "deregistered"
+        ]
+      },
+      "lastLoginAt": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "format": "date-time"
+      },
+      "activeSessionCount": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "$id": "AdminAccountDetailResponse"
   },
   "AdminAccountResponse": {
     "type": "object",

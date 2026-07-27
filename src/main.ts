@@ -66,15 +66,39 @@ export async function start(
     throw error;
   }
 
+  let cleanupPromise: Promise<void> = Promise.resolve();
+  const cleanExpiredAdminSessions = (): void => {
+    cleanupPromise = cleanupPromise
+      .then(async () => {
+        await runtime.adminAuth.purgeExpiredSessions();
+      })
+      .catch((error: unknown) => {
+        console.error(
+          "[gameManageKit] admin session cleanup failed",
+          safeErrorDetails(error),
+        );
+      });
+  };
+  cleanExpiredAdminSessions();
+  const cleanupTimer = setInterval(
+    cleanExpiredAdminSessions,
+    15 * 60 * 1_000,
+  );
+  cleanupTimer.unref();
+
   let closePromise: Promise<void> | null = null;
   return {
     runtime,
     publicAddress,
     internalAddress,
     close() {
+      clearInterval(cleanupTimer);
       closePromise ??= closeWithDeadline(
         [runtime.apps.publicApp, runtime.apps.internalApp],
-        () => runtime.database.close(),
+        async () => {
+          await cleanupPromise;
+          await runtime.database.close();
+        },
         config.shutdownTimeoutMs,
       );
       return closePromise;

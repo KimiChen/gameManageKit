@@ -57,6 +57,7 @@ test("生产镜像以非 root 用户运行并提供 readiness 健康检查", asy
   assert.match(dockerfile, /GAME_MANAGE_KIT_PUBLIC_HOST=0\.0\.0\.0/);
   assert.match(dockerfile, /GAME_MANAGE_KIT_INTERNAL_HOST=0\.0\.0\.0/);
   assert.match(dockerfile, /COPY scripts\/docker-smoke\.mjs/);
+  assert.match(dockerfile, /COPY web \.\/web/);
   assert.match(dockerfile, /HEALTHCHECK[\s\S]*127\.0\.0\.1:2570\/readyz/);
   assert.match(dockerfile, /\nUSER node\n/);
 });
@@ -66,6 +67,7 @@ test("仓库默认多游戏配置可通过生产校验", async () => {
     ...parseEnv(await readFile(rootFile(".env.example"), "utf8")),
     NODE_ENV: "production",
     AUTH_DEV_ENABLED: "0",
+    GAME_MANAGE_KIT_ADMIN_ORIGIN: "https://admin.example.invalid",
     GAME_MANAGE_KIT_GAMES_CONFIG: fileURLToPath(rootFile("config/games.json")),
   };
   const config = loadConfig(env);

@@ -218,12 +218,14 @@
                   name="password"
                   type="password"
                   autocomplete="current-password"
-                  maxlength="256"
+                  minlength="12"
+                  maxlength="512"
                   placeholder="请输入密码"
                   required
                 />
                 <button
                   class="wsk-icon-button"
+                  id="password-toggle"
                   type="button"
                   data-password
                   aria-controls="operator-password"
@@ -345,8 +347,10 @@
                 <span class="gmk-state-icon" aria-hidden="true">
                   <svg class="wsk-icon"><use href="#search"></use></svg>
                 </span>
-                <h3>等待查询</h3>
-                <p>选择游戏并输入用户 ID，账号信息会显示在这里。</p>
+                <h3 id="account-empty-title">等待查询</h3>
+                <p id="account-empty-message">
+                  选择游戏并输入用户 ID，账号信息会显示在这里。
+                </p>
               </div>
 
               <div class="gmk-account-state" id="account-loading" aria-live="polite" hidden>
@@ -474,11 +478,11 @@
               id="operation-reason"
               name="reason"
               minlength="2"
-              maxlength="500"
+              maxlength="255"
               placeholder="请填写可供审计追溯的原因"
               required
             ></textarea>
-            <p class="wsk-help">2–500 个字符，提交后写入审计记录。</p>
+            <p class="wsk-help">2–255 个字符，提交后写入审计记录。</p>
           </div>
           <div
             class="wsk-alert wsk-danger"

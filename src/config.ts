@@ -11,6 +11,7 @@ export interface GameManageKitConfig {
   readonly publicPort: number;
   readonly internalHost: string;
   readonly internalPort: number;
+  readonly adminOrigin: string;
   readonly gamesConfigPath: string;
   readonly trustedProxyCidrs: readonly string[];
   readonly authDevEnabled: boolean;
@@ -92,6 +93,32 @@ function validateProxy(value: string): string {
   return value;
 }
 
+function validateAdminOrigin(raw: string, production: boolean): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error("GAME_MANAGE_KIT_ADMIN_ORIGIN 不是合法 URL origin");
+  }
+  if (
+    parsed.username
+    || parsed.password
+    || parsed.pathname !== "/"
+    || parsed.search
+    || parsed.hash
+    || parsed.origin === "null"
+  ) {
+    throw new Error("GAME_MANAGE_KIT_ADMIN_ORIGIN 只能包含 scheme、host 和 port");
+  }
+  if (production && parsed.protocol !== "https:") {
+    throw new Error("生产环境 GAME_MANAGE_KIT_ADMIN_ORIGIN 必须使用 https://");
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error("GAME_MANAGE_KIT_ADMIN_ORIGIN 只允许 http:// 或 https://");
+  }
+  return parsed.origin;
+}
+
 export function loadConfig(env: Env = process.env): GameManageKitConfig {
   const nodeEnv = env.NODE_ENV?.trim() || "development";
   if (!["development", "test", "production"].includes(nodeEnv)) {
@@ -109,6 +136,17 @@ export function loadConfig(env: Env = process.env): GameManageKitConfig {
     .map((item) => item.trim())
     .filter(Boolean)
     .map(validateProxy);
+  const internalPort = integer(
+    env,
+    "GAME_MANAGE_KIT_INTERNAL_PORT",
+    2571,
+    1,
+    65_535,
+  );
+  const adminOriginRaw = env.GAME_MANAGE_KIT_ADMIN_ORIGIN?.trim()
+    || (nodeEnv === "production"
+      ? required(env, "GAME_MANAGE_KIT_ADMIN_ORIGIN")
+      : `http://127.0.0.1:${internalPort}`);
 
   return {
     nodeEnv,
@@ -117,7 +155,8 @@ export function loadConfig(env: Env = process.env): GameManageKitConfig {
     publicHost: env.GAME_MANAGE_KIT_PUBLIC_HOST?.trim() || "127.0.0.1",
     publicPort: integer(env, "GAME_MANAGE_KIT_PUBLIC_PORT", 2570, 1, 65_535),
     internalHost: env.GAME_MANAGE_KIT_INTERNAL_HOST?.trim() || "127.0.0.1",
-    internalPort: integer(env, "GAME_MANAGE_KIT_INTERNAL_PORT", 2571, 1, 65_535),
+    internalPort,
+    adminOrigin: validateAdminOrigin(adminOriginRaw, nodeEnv === "production"),
     gamesConfigPath: env.GAME_MANAGE_KIT_GAMES_CONFIG?.trim() || "config/games.json",
     trustedProxyCidrs,
     authDevEnabled,

@@ -11,6 +11,7 @@ import type {
   GameRegistry,
   ServiceIdentity,
 } from "../domain/game/registry.js";
+import type { AdminSessionIdentity } from "../domain/admin/auth.js";
 import { GameManageKitError } from "../errors.js";
 import { safeErrorDetails } from "../infra/security/security.js";
 
@@ -19,6 +20,7 @@ declare module "fastify" {
     gameContext: GameContext | null;
     serviceIdentity: ServiceIdentity | null;
     adminIdentity: AdminIdentity | null;
+    adminSessionIdentity: AdminSessionIdentity | null;
   }
 }
 
@@ -170,9 +172,13 @@ export function createHttpApp(
             "req.headers.authorization",
             "req.headers.x-service-secret",
             "req.headers.x-admin-secret",
+            "req.headers.cookie",
             "request.headers.authorization",
             "request.headers.x-service-secret",
             "request.headers.x-admin-secret",
+            "request.headers.cookie",
+            "req.body.password",
+            "request.body.password",
             "req.body.accessToken",
             "request.body.accessToken",
             "accessToken",
@@ -198,6 +204,7 @@ export function createHttpApp(
   app.decorateRequest("gameContext", null);
   app.decorateRequest("serviceIdentity", null);
   app.decorateRequest("adminIdentity", null);
+  app.decorateRequest("adminSessionIdentity", null);
   const routes: RegisteredHttpRoute[] = [];
   const drainState: RequestDrainState = {
     active: new Set(),

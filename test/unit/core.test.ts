@@ -83,6 +83,7 @@ test("全局配置只保留 GameRegistry 文件入口并拒绝危险启动配置
   const config = loadConfig(BASE_ENV);
   assert.equal(config.gamesConfigPath, "config/games.json");
   assert.equal(config.authDevEnabled, true);
+  assert.equal(config.adminOrigin, "http://127.0.0.1:2571");
   assert.equal("serviceSecrets" in config, false);
   assert.equal("wxSecret" in config, false);
   assert.equal(loadConfig({
@@ -112,6 +113,22 @@ test("全局配置只保留 GameRegistry 文件入口并拒绝危险启动配置
       AUTH_DEV_ENABLED: undefined,
     }),
     /NODE_ENV 只允许/,
+  );
+  assert.throws(
+    () => loadConfig({
+      ...BASE_ENV,
+      NODE_ENV: "production",
+      AUTH_DEV_ENABLED: "0",
+      GAME_MANAGE_KIT_ADMIN_ORIGIN: "http://admin.example.invalid",
+    }),
+    /必须使用 https/,
+  );
+  assert.throws(
+    () => loadConfig({
+      ...BASE_ENV,
+      GAME_MANAGE_KIT_ADMIN_ORIGIN: "https://admin.example.invalid/path",
+    }),
+    /只能包含/,
   );
 });
 

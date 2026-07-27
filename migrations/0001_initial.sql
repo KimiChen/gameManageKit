@@ -18,6 +18,72 @@ CREATE TABLE IF NOT EXISTS games (
     CHECK (status IN ('enabled', 'maintenance', 'disabled'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE IF NOT EXISTS admin_operators (
+  operator_id   VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  display_name  VARCHAR(128) NOT NULL,
+  password_hash VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  status        ENUM('enabled', 'disabled') NOT NULL DEFAULT 'enabled',
+  auth_version  BIGINT UNSIGNED NOT NULL DEFAULT 1,
+  created_at    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+    ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (operator_id),
+  CONSTRAINT chk_admin_operator_id
+    CHECK (REGEXP_LIKE(operator_id, '^[a-z][a-z0-9_.-]{2,63}$', 'c')),
+  CONSTRAINT chk_admin_operator_auth_version CHECK (auth_version > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS admin_game_access (
+  operator_id         VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  game_id             VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  can_operate_accounts TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  created_at          DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at          DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+    ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (operator_id, game_id),
+  KEY idx_admin_game_access_game (game_id, operator_id),
+  CONSTRAINT fk_admin_game_access_operator
+    FOREIGN KEY (operator_id) REFERENCES admin_operators (operator_id)
+    ON UPDATE RESTRICT ON DELETE CASCADE,
+  CONSTRAINT fk_admin_game_access_game
+    FOREIGN KEY (game_id) REFERENCES games (game_id)
+    ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT chk_admin_game_access_operate
+    CHECK (can_operate_accounts IN (0, 1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  token_hash   BINARY(32) NOT NULL,
+  operator_id  VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  auth_version BIGINT UNSIGNED NOT NULL,
+  created_at   DATETIME(3) NOT NULL,
+  last_seen_at DATETIME(3) NOT NULL,
+  expires_at   DATETIME(3) NOT NULL,
+  PRIMARY KEY (token_hash),
+  KEY idx_admin_sessions_operator (operator_id, expires_at),
+  KEY idx_admin_sessions_expires (expires_at),
+  KEY idx_admin_sessions_idle (last_seen_at),
+  CONSTRAINT fk_admin_sessions_operator
+    FOREIGN KEY (operator_id) REFERENCES admin_operators (operator_id)
+    ON UPDATE RESTRICT ON DELETE CASCADE,
+  CONSTRAINT chk_admin_session_times CHECK (
+    last_seen_at >= created_at
+    AND expires_at > created_at
+  )
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS admin_auth_audit (
+  id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  operator_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  event       VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  reason      VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  ip          VARBINARY(16) NULL,
+  created_at  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  KEY idx_admin_auth_operator_time (operator_id, created_at),
+  KEY idx_admin_auth_event_time (event, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS accounts (
   game_id       VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   user_id       VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,

@@ -2,6 +2,7 @@
   "games": [
     {
       "gameId": "game-a",
+      "name": "示例游戏 A",
       "status": "enabled",
       "directoryPath": "areas.game-a.json",
       "sessionTtlSeconds": 259200,
@@ -24,6 +25,7 @@
     },
     {
       "gameId": "game-b",
+      "name": "示例游戏 B",
       "status": "enabled",
       "directoryPath": "areas.game-b.json",
       "sessionTtlSeconds": 259200,

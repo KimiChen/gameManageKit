@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import test from "node:test";
 import mysql, { type RowDataPacket } from "mysql2/promise";
+import { Database } from "../../src/infra/mysql/database.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -59,7 +60,7 @@ test("0001 migration 建立多游戏复合约束并隔离相同领域标识", as
       );
 
       const [tables] = await connection.query<RowDataPacket[]>("SHOW TABLES");
-      assert.equal(tables.length, 7);
+      assert.equal(tables.length, 11);
 
       const [accountColumns] = await connection.query<RowDataPacket[]>(
         "SHOW COLUMNS FROM accounts",
@@ -68,6 +69,64 @@ test("0001 migration 建立多游戏复合约束并隔离相同领域标识", as
         accountColumns.some((column) => String(column.Field) === "session_key"),
         false,
       );
+      const [adminColumns] = await connection.query<RowDataPacket[]>(
+        `SELECT TABLE_NAME AS table_name, COLUMN_NAME AS column_name,
+                COLUMN_TYPE AS column_type, COLLATION_NAME AS collation_name,
+                IS_NULLABLE AS is_nullable
+           FROM information_schema.columns
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND (
+              (TABLE_NAME = 'admin_operators'
+                AND COLUMN_NAME IN ('operator_id', 'password_hash', 'auth_version'))
+              OR
+              (TABLE_NAME = 'admin_sessions'
+                AND COLUMN_NAME IN ('token_hash', 'operator_id', 'expires_at'))
+            )`,
+      );
+      assert.deepEqual(
+        new Map(adminColumns.map((column) => [
+          `${String(column.table_name)}.${String(column.column_name)}`,
+          {
+            type: String(column.column_type),
+            collation: column.collation_name === null
+              ? null
+              : String(column.collation_name),
+            nullable: String(column.is_nullable),
+          },
+        ])),
+        new Map([
+          ["admin_operators.auth_version", {
+            type: "bigint unsigned",
+            collation: null,
+            nullable: "NO",
+          }],
+          ["admin_operators.operator_id", {
+            type: "varchar(64)",
+            collation: "ascii_bin",
+            nullable: "NO",
+          }],
+          ["admin_operators.password_hash", {
+            type: "varchar(255)",
+            collation: "ascii_bin",
+            nullable: "NO",
+          }],
+          ["admin_sessions.expires_at", {
+            type: "datetime(3)",
+            collation: null,
+            nullable: "NO",
+          }],
+          ["admin_sessions.operator_id", {
+            type: "varchar(64)",
+            collation: "ascii_bin",
+            nullable: "NO",
+          }],
+          ["admin_sessions.token_hash", {
+            type: "binary(32)",
+            collation: null,
+            nullable: "NO",
+          }],
+        ]),
+      );
 
       const [indexRows] = await connection.query<RowDataPacket[]>(
         `SELECT TABLE_NAME AS table_name, INDEX_NAME AS index_name,
@@ -75,7 +134,9 @@ test("0001 migration 建立多游戏复合约束并隔离相同领域标识", as
            FROM information_schema.statistics
           WHERE TABLE_SCHEMA = DATABASE()
             AND TABLE_NAME IN
-              ('games', 'accounts', 'account_sessions', 'char_registry', 'login_audit', 'seq')
+              ('games', 'admin_operators', 'admin_game_access', 'admin_sessions',
+               'admin_auth_audit', 'accounts', 'account_sessions', 'char_registry',
+               'login_audit', 'seq')
           GROUP BY TABLE_NAME, INDEX_NAME`,
       );
       const indexes = new Map(
@@ -89,6 +150,16 @@ test("0001 migration 建立多游戏复合约束并隔离相同领域标识", as
         ["accounts.PRIMARY", "game_id,user_id"],
         ["accounts.uk_openid", "game_id,openid"],
         ["accounts.uk_unionid", "game_id,unionid"],
+        ["admin_auth_audit.PRIMARY", "id"],
+        ["admin_auth_audit.idx_admin_auth_event_time", "event,created_at"],
+        ["admin_auth_audit.idx_admin_auth_operator_time", "operator_id,created_at"],
+        ["admin_game_access.PRIMARY", "operator_id,game_id"],
+        ["admin_game_access.idx_admin_game_access_game", "game_id,operator_id"],
+        ["admin_operators.PRIMARY", "operator_id"],
+        ["admin_sessions.PRIMARY", "token_hash"],
+        ["admin_sessions.idx_admin_sessions_expires", "expires_at"],
+        ["admin_sessions.idx_admin_sessions_idle", "last_seen_at"],
+        ["admin_sessions.idx_admin_sessions_operator", "operator_id,expires_at"],
         ["char_registry.PRIMARY", "game_id,user_id,server_id"],
         ["char_registry.idx_user_time", "game_id,user_id,created_at"],
         ["games.PRIMARY", "game_id"],
@@ -118,6 +189,11 @@ test("0001 migration 建立多游戏复合约束并隔离相同领域标识", as
         ))),
         new Set([
           "fk_accounts_game:accounts(game_id)->games(game_id)",
+          "fk_admin_game_access_game:admin_game_access(game_id)->games(game_id)",
+          "fk_admin_game_access_operator:admin_game_access(operator_id)"
+            + "->admin_operators(operator_id)",
+          "fk_admin_sessions_operator:admin_sessions(operator_id)"
+            + "->admin_operators(operator_id)",
           "fk_account_sessions_account:account_sessions(game_id,user_id)"
             + "->accounts(game_id,user_id)",
           "fk_char_registry_account:char_registry(game_id,user_id)"
@@ -130,6 +206,29 @@ test("0001 migration 建立多游戏复合约束并隔离相同领域标识", as
       await connection.query(
         `INSERT INTO games (game_id, status)
          VALUES ('game-a', 'enabled'), ('game-b', 'maintenance')`,
+      );
+      await connection.query(
+        `INSERT INTO admin_operators
+           (operator_id, display_name, password_hash)
+         VALUES ('ops_kimi', 'Kimi', 'test-only-hash')`,
+      );
+      await connection.query(
+        `INSERT INTO admin_game_access
+           (operator_id, game_id, can_operate_accounts)
+         VALUES
+           ('ops_kimi', 'game-a', 1),
+           ('ops_kimi', 'game-b', 0)`,
+      );
+      await connection.query(
+        `INSERT INTO admin_sessions
+           (token_hash, operator_id, auth_version, created_at, last_seen_at, expires_at)
+         VALUES
+           (UNHEX(SHA2('test-token', 256)), 'ops_kimi', 1, NOW(3), NOW(3),
+            DATE_ADD(NOW(3), INTERVAL 8 HOUR))`,
+      );
+      await connection.query(
+        `INSERT INTO admin_auth_audit (operator_id, event, reason)
+         VALUES ('ops_kimi', 'login_success', 'password')`,
       );
       await connection.query(
         `INSERT INTO seq (game_id, name, val)
@@ -236,6 +335,47 @@ test("0001 migration 建立多游戏复合约束并隔离相同领域标识", as
         ),
         hasMysqlErrno(3819),
       );
+      await assert.rejects(
+        connection.query(
+          `INSERT INTO admin_operators
+             (operator_id, display_name, password_hash)
+           VALUES ('INVALID OPERATOR', 'Invalid', 'test-only-hash')`,
+        ),
+        hasMysqlErrno(3819),
+      );
+      await assert.rejects(
+        connection.query(
+          `INSERT INTO admin_game_access
+             (operator_id, game_id, can_operate_accounts)
+           VALUES ('ops_kimi', 'game-a', 2)`,
+        ),
+        hasMysqlErrno(3819),
+      );
+      await assert.rejects(
+        connection.query(
+          `INSERT INTO admin_sessions
+             (token_hash, operator_id, auth_version,
+              created_at, last_seen_at, expires_at)
+           VALUES (
+             UNHEX(SHA2('invalid-session-time', 256)),
+             'ops_kimi',
+             1,
+             NOW(3),
+             DATE_SUB(NOW(3), INTERVAL 1 SECOND),
+             DATE_ADD(NOW(3), INTERVAL 1 HOUR)
+           )`,
+        ),
+        hasMysqlErrno(3819),
+      );
+
+      const readinessProbe = new Database(mysqlUrl, 1);
+      try {
+        assert.equal(await readinessProbe.ready(1), true);
+        await connection.query("DROP TABLE admin_auth_audit");
+        assert.equal(await readinessProbe.ready(1), false);
+      } finally {
+        await readinessProbe.close();
+      }
     } finally {
       await connection.end();
     }

@@ -2,16 +2,20 @@ import {
   createToastController,
   initPasswordControls,
   initTheme,
+  resetPasswordControl,
 } from "./wsk.js";
 
 export const USER_ID_PATTERN = /^u_[0-9]+$/u;
-export const GAME_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/u;
+export const GAME_ID_PATTERN = /^[a-z][a-z0-9-]{1,31}$/u;
+export const OPERATOR_ID_PATTERN = /^[a-z][a-z0-9_.-]{2,63}$/u;
 export const ADMIN_ACTIONS = Object.freeze(["ban", "revoke"]);
+export const ADMIN_SESSION_IDLE_TTL_MS = 30 * 60 * 1_000;
 
 const GAME_STATUSES = new Set(["enabled", "maintenance", "disabled"]);
-const ACCOUNT_STATUSES = new Set(["active", "banned"]);
+const ACCOUNT_STATUSES = new Set(["active", "banned", "deregistered"]);
 const OPERATION_STATUSES = new Set(["banned", "revoked", "not_found"]);
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 
 export class InvalidApiPayloadError extends Error {
   constructor(message) {
@@ -72,6 +76,9 @@ export function normalizeSession(payload) {
     "operator.operatorId",
     64,
   );
+  if (!OPERATOR_ID_PATTERN.test(operatorId)) {
+    throw new InvalidApiPayloadError("operator.operatorId 无效");
+  }
   const displayName = requiredString(
     payload.operator.displayName,
     "operator.displayName",
@@ -149,11 +156,17 @@ export function normalizeAccount(payload, expectedUserId = null) {
   });
 }
 
-export function normalizeOperationResult(payload) {
+export function normalizeOperationResult(payload, expectedAction) {
+  if (!ADMIN_ACTIONS.includes(expectedAction)) {
+    throw new TypeError("未知管理员操作");
+  }
+  const expectedStatus = expectedAction === "ban" ? "banned" : "revoked";
   if (
     !isRecord(payload)
     || typeof payload.accountExists !== "boolean"
     || !OPERATION_STATUSES.has(payload.status)
+    || (payload.accountExists && payload.status !== expectedStatus)
+    || (!payload.accountExists && payload.status !== "not_found")
   ) {
     throw new InvalidApiPayloadError("账号操作响应无效");
   }
@@ -167,6 +180,23 @@ export function isValidUserId(value) {
   return typeof value === "string" && USER_ID_PATTERN.test(value.trim());
 }
 
+export function isValidAdminPasswordInput(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const codePoints = [...value];
+  return (
+    codePoints.length >= 12
+    && codePoints.length <= 256
+    && new TextEncoder().encode(value).length <= 1_024
+    && !codePoints.some((character) => (
+      character.length === 1
+      && character.charCodeAt(0) >= 0xd800
+      && character.charCodeAt(0) <= 0xdfff
+    ))
+  );
+}
+
 export function chooseInitialGame(games, currentGameId = null) {
   if (
     currentGameId
@@ -175,6 +205,26 @@ export function chooseInitialGame(games, currentGameId = null) {
     return currentGameId;
   }
   return games.length === 1 ? games[0].gameId : null;
+}
+
+export function isSessionExpired(session, timestamp = Date.now()) {
+  return Date.parse(session.expiresAt) <= timestamp;
+}
+
+export function createLatestRequestGuard() {
+  let version = 0;
+  return Object.freeze({
+    begin() {
+      version += 1;
+      return version;
+    },
+    invalidate() {
+      version += 1;
+    },
+    isCurrent(requestVersion) {
+      return requestVersion === version;
+    },
+  });
 }
 
 export function accountPath(gameId, userId) {
@@ -201,6 +251,29 @@ export function createOperationIntent({
     gameId,
     userId,
     operationId: randomUUID(),
+  });
+}
+
+export function reuseOrCreateOperationIntent({
+  previous = null,
+  action,
+  gameId,
+  userId,
+  randomUUID = globalThis.crypto?.randomUUID?.bind(globalThis.crypto),
+}) {
+  if (
+    previous
+    && previous.action === action
+    && previous.gameId === gameId
+    && previous.userId === userId
+  ) {
+    return previous;
+  }
+  return createOperationIntent({
+    action,
+    gameId,
+    userId,
+    randomUUID,
   });
 }
 
@@ -231,9 +304,23 @@ async function responsePayload(response) {
   }
 }
 
-export function createAdminApi(fetchImpl = globalThis.fetch) {
+export function createAdminApi(fetchImpl = globalThis.fetch, {
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  AbortControllerImpl = globalThis.AbortController,
+  schedule = globalThis.setTimeout?.bind(globalThis),
+  cancelSchedule = globalThis.clearTimeout?.bind(globalThis),
+} = {}) {
   if (typeof fetchImpl !== "function") {
     throw new TypeError("缺少 fetch 实现");
+  }
+  if (
+    !Number.isSafeInteger(requestTimeoutMs)
+    || requestTimeoutMs <= 0
+    || typeof AbortControllerImpl !== "function"
+    || typeof schedule !== "function"
+    || typeof cancelSchedule !== "function"
+  ) {
+    throw new TypeError("API 请求超时配置无效");
   }
 
   async function request(path, { method = "GET", body } = {}) {
@@ -242,7 +329,10 @@ export function createAdminApi(fetchImpl = globalThis.fetch) {
       headers["Content-Type"] = "application/json";
     }
 
+    const controller = new AbortControllerImpl();
+    const timeout = schedule(() => controller.abort(), requestTimeoutMs);
     let response;
+    let payload;
     try {
       response = await fetchImpl(path, {
         method,
@@ -251,12 +341,24 @@ export function createAdminApi(fetchImpl = globalThis.fetch) {
         credentials: "same-origin",
         cache: "no-store",
         redirect: "error",
+        signal: controller.signal,
       });
+      payload = await responsePayload(response);
     } catch (error) {
+      if (controller.signal.aborted) {
+        throw new AdminApiError("管理服务响应超时", {
+          code: "REQUEST_TIMEOUT",
+          cause: error,
+        });
+      }
+      if (error instanceof InvalidApiPayloadError) {
+        throw error;
+      }
       throw new AdminApiError("无法连接管理服务", { cause: error });
+    } finally {
+      cancelSchedule(timeout);
     }
 
-    const payload = await responsePayload(response);
     const requestId = response.headers?.get?.("x-request-id") ?? null;
     if (!response.ok) {
       throw new AdminApiError("管理服务拒绝了请求", {
@@ -300,6 +402,7 @@ export function createAdminApi(fetchImpl = globalThis.fetch) {
             reason,
           },
         }),
+        intent.action,
       );
     },
   });
@@ -340,9 +443,18 @@ export function describeApiError(error, context) {
     return `管理服务暂时不可用，请稍后重试。${suffix}`;
   }
   if (error.status === 0) {
-    return "无法连接管理服务，请检查网络后重试。";
+    return error.code === "REQUEST_TIMEOUT"
+      ? "管理服务响应超时，请重试。"
+      : "无法连接管理服务，请检查网络后重试。";
   }
   return `请求未完成，请稍后重试。${suffix}`;
+}
+
+export function isCompletedLogout(error) {
+  return (
+    error === null
+    || (error instanceof AdminApiError && error.status === 401)
+  );
 }
 
 export function formatDateTime(value, locale = "zh-CN") {
@@ -403,10 +515,26 @@ function gameStatusPresentation(game) {
   return { text: "游戏已停用", variant: "danger" };
 }
 
-function accountStatusPresentation(account) {
-  return account.status === "active"
-    ? { text: "正常", variant: "success" }
-    : { text: "已封禁", variant: "danger" };
+export function accountStatusPresentation(account) {
+  if (account.status === "active") {
+    return { text: "正常", variant: "success" };
+  }
+  return account.status === "banned"
+    ? { text: "已封禁", variant: "danger" }
+    : { text: "已注销", variant: "warning" };
+}
+
+export function canPerformAccountAction(account, action, canOperateAccounts) {
+  if (
+    !canOperateAccounts
+    || account.status === "deregistered"
+    || !ADMIN_ACTIONS.includes(action)
+  ) {
+    return false;
+  }
+  return action === "ban"
+    ? account.status !== "banned"
+    : account.activeSessionCount > 0;
 }
 
 export function bootstrapAdminConsole({
@@ -425,6 +553,8 @@ export function bootstrapAdminConsole({
   initTheme({ root: document.documentElement });
   initPasswordControls({ document });
   const toast = createToastController({ document, schedule });
+  const sessionRequests = createLatestRequestGuard();
+  const loginRequests = createLatestRequestGuard();
 
   const elements = {
     views: new Map(
@@ -448,6 +578,7 @@ export function bootstrapAdminConsole({
     loginForm: requiredElement(document, "login-form"),
     operatorId: requiredElement(document, "operator-id"),
     password: requiredElement(document, "operator-password"),
+    passwordToggle: requiredElement(document, "password-toggle"),
     loginButton: requiredElement(document, "login-button"),
     loginError: requiredElement(document, "login-error"),
     loginErrorMessage: requiredElement(document, "login-error-message"),
@@ -458,6 +589,8 @@ export function bootstrapAdminConsole({
     searchButton: requiredElement(document, "search-button"),
     accountLiveStatus: requiredElement(document, "account-live-status"),
     accountEmpty: requiredElement(document, "account-empty"),
+    accountEmptyTitle: requiredElement(document, "account-empty-title"),
+    accountEmptyMessage: requiredElement(document, "account-empty-message"),
     accountLoading: requiredElement(document, "account-loading"),
     accountNotFound: requiredElement(document, "account-not-found"),
     accountNotFoundMessage: requiredElement(document, "account-not-found-message"),
@@ -489,6 +622,7 @@ export function bootstrapAdminConsole({
       document,
       "operation-error-message",
     ),
+    toastRegion: requiredElement(document, "toast-region"),
   };
 
   const state = {
@@ -497,9 +631,14 @@ export function bootstrapAdminConsole({
     account: null,
     accountRequestVersion: 0,
     pendingOperation: null,
+    retryOperation: null,
     operationSubmitting: false,
+    loginSubmitting: false,
+    logoutSubmitting: false,
     operationOpener: null,
     expiryTimer: null,
+    idleExpiresAt: null,
+    authGeneration: 0,
   };
 
   function currentGame() {
@@ -576,27 +715,50 @@ export function bootstrapAdminConsole({
     elements.accountEmpty.hidden = false;
     elements.accountNotFoundMessage.textContent = "";
     elements.accountErrorMessage.textContent = "";
+    elements.accountCardUserId.textContent = "";
+    elements.accountStatusBadge.textContent = "";
+    elements.accountGame.textContent = "";
+    elements.accountLastLogin.textContent = "";
+    elements.accountSessionCount.textContent = "";
     elements.accountLiveStatus.textContent = announcement;
+    elements.userId.value = "";
+    elements.userId.setAttribute("aria-invalid", "false");
+    elements.operationReason.value = "";
+    elements.operationTarget.textContent = "";
+    elements.operationDescription.textContent = "";
+    elements.operationErrorMessage.textContent = "";
     closeOperationDialog();
     state.pendingOperation = null;
+    state.retryOperation = null;
   }
 
   function clearAuthenticatedState() {
+    sessionRequests.invalidate();
     clearExpiryTimer();
+    state.idleExpiresAt = null;
     state.session = null;
+    state.authGeneration += 1;
     state.selectedGameId = null;
     state.accountRequestVersion += 1;
     state.account = null;
     state.pendingOperation = null;
+    state.retryOperation = null;
     state.operationSubmitting = false;
+    state.logoutSubmitting = false;
     elements.sessionTools.hidden = true;
     elements.gameSelect.replaceChildren();
+    elements.operatorName.textContent = "";
+    elements.selectedGameLabel.textContent = "";
+    elements.gameStatusBadge.textContent = "";
+    elements.toastRegion.replaceChildren();
     closeOperationDialog();
     clearAccount();
   }
 
   function becomeAnonymous(message = "") {
     clearAuthenticatedState();
+    elements.password.value = "";
+    resetPasswordControl(elements.password, elements.passwordToggle);
     if (message) {
       showLoginError(message);
     } else {
@@ -608,15 +770,36 @@ export function bootstrapAdminConsole({
 
   function scheduleExpiry(expiresAt) {
     clearExpiryTimer();
-    const remaining = Date.parse(expiresAt) - now();
+    const expiresAtMs = Date.parse(expiresAt);
+    const effectiveExpiry = Math.min(
+      expiresAtMs,
+      state.idleExpiresAt ?? expiresAtMs,
+    );
+    const remaining = effectiveExpiry - now();
     if (remaining <= 0) {
       becomeAnonymous("管理员会话已过期，请重新登录。");
       return;
     }
-    state.expiryTimer = schedule(
-      () => becomeAnonymous("管理员会话已过期，请重新登录。"),
-      Math.min(remaining, MAX_TIMER_DELAY_MS),
-    );
+    const delay = Math.min(remaining, MAX_TIMER_DELAY_MS);
+    state.expiryTimer = schedule(() => {
+      if (remaining > MAX_TIMER_DELAY_MS) {
+        scheduleExpiry(expiresAt);
+      } else {
+        becomeAnonymous("管理员会话已过期，请重新登录。");
+      }
+    }, delay);
+  }
+
+  function touchSessionActivity() {
+    if (!state.session) {
+      return;
+    }
+    state.idleExpiresAt = now() + ADMIN_SESSION_IDLE_TTL_MS;
+    scheduleExpiry(state.session.expiresAt);
+  }
+
+  function canQueryGame(game) {
+    return game?.status === "enabled";
   }
 
   function populateGames() {
@@ -650,11 +833,28 @@ export function bootstrapAdminConsole({
       ? `${game.name} · ${game.gameId}`
       : "尚未选择游戏";
 
-    const canQuery = game !== null;
+    const canQuery = canQueryGame(game);
     elements.userId.disabled = !canQuery;
     elements.searchButton.disabled = !canQuery;
     if (!game) {
+      elements.accountEmptyTitle.textContent = "等待选择游戏";
+      elements.accountEmptyMessage.textContent =
+        "选择游戏后即可输入用户 ID 查询账号。";
       elements.operationHelp.textContent = "请先选择要管理的游戏。";
+    } else if (game.status === "maintenance") {
+      elements.accountEmptyTitle.textContent = "游戏维护中";
+      elements.accountEmptyMessage.textContent =
+        "当前游戏暂停管理员账号查询和操作，请在维护结束后重试。";
+      elements.operationHelp.textContent = "游戏维护期间不能执行账号操作。";
+    } else if (game.status === "disabled") {
+      elements.accountEmptyTitle.textContent = "游戏已停用";
+      elements.accountEmptyMessage.textContent =
+        "当前游戏已停用，不能查询或修改账号。";
+      elements.operationHelp.textContent = "已停用游戏不能执行账号操作。";
+    } else {
+      elements.accountEmptyTitle.textContent = "等待查询";
+      elements.accountEmptyMessage.textContent =
+        "输入完整用户 ID，账号信息会显示在这里。";
     }
   }
 
@@ -677,21 +877,25 @@ export function bootstrapAdminConsole({
     const canOperate = game.canOperateAccounts;
     for (const button of elements.operationButtons) {
       const action = button.dataset.operation;
-      button.disabled = (
-        !canOperate
-        || (action === "ban" && account.status === "banned")
-        || (action === "revoke" && account.activeSessionCount === 0)
-      );
+      button.disabled = !canPerformAccountAction(account, action, canOperate);
     }
-    elements.operationHelp.textContent = canOperate
-      ? "操作前需要填写原因，并再次核对游戏和用户。"
-      : "当前管理员只有查看权限，不能修改这个游戏的账号。";
+    elements.operationHelp.textContent = account.status === "deregistered"
+      ? "账号已注销，不能再执行封禁或会话撤销操作。"
+      : canOperate
+        ? "操作前需要填写原因，并再次核对游戏和用户。"
+        : "当前管理员只有查看权限，不能修改这个游戏的账号。";
     elements.accountLiveStatus.textContent = `已加载账号 ${account.userId}。`;
   }
 
   function applySession(session) {
+    if (isSessionExpired(session, now())) {
+      becomeAnonymous("管理员会话已过期，请重新登录。");
+      return false;
+    }
     const previousGameId = state.selectedGameId;
+    state.authGeneration += 1;
     state.session = session;
+    state.idleExpiresAt = now() + ADMIN_SESSION_IDLE_TTL_MS;
     state.selectedGameId = chooseInitialGame(session.games, previousGameId);
     elements.operatorName.textContent = session.operator.displayName;
     elements.sessionTools.hidden = false;
@@ -703,15 +907,17 @@ export function bootstrapAdminConsole({
 
     if (session.games.length === 0) {
       showView("no-access");
-      return;
+      return true;
     }
     showView("accounts");
     if (!state.selectedGameId) {
       elements.gameSelect.focus();
     }
+    return true;
   }
 
   async function restoreSession({ showBoot = true } = {}) {
+    const version = sessionRequests.begin();
     if (showBoot) {
       showView("boot", { focus: false });
       elements.bootSpinner.hidden = false;
@@ -719,8 +925,15 @@ export function bootstrapAdminConsole({
       elements.bootMessage.textContent = "正在安全地恢复管理员会话…";
     }
     try {
-      applySession(await api.session());
+      const session = await api.session();
+      if (!sessionRequests.isCurrent(version)) {
+        return;
+      }
+      applySession(session);
     } catch (error) {
+      if (!sessionRequests.isCurrent(version)) {
+        return;
+      }
       if (error instanceof AdminApiError && error.status === 401) {
         becomeAnonymous();
         return;
@@ -736,10 +949,19 @@ export function bootstrapAdminConsole({
   }
 
   async function refreshPermissions() {
+    const version = sessionRequests.begin();
     try {
-      applySession(await api.session());
-      toast("管理员权限已经刷新。", "info");
+      const session = await api.session();
+      if (!sessionRequests.isCurrent(version)) {
+        return;
+      }
+      if (applySession(session)) {
+        toast("管理员权限已经刷新。", "info");
+      }
     } catch (error) {
+      if (!sessionRequests.isCurrent(version)) {
+        return;
+      }
       if (error instanceof AdminApiError && error.status === 401) {
         becomeAnonymous("管理员会话已过期，请重新登录。");
         return;
@@ -749,6 +971,7 @@ export function bootstrapAdminConsole({
   }
 
   async function loadAccount(gameId, userId) {
+    state.retryOperation = null;
     const version = ++state.accountRequestVersion;
     hideAccountPanels();
     elements.accountLoading.hidden = false;
@@ -764,6 +987,7 @@ export function bootstrapAdminConsole({
       ) {
         return;
       }
+      touchSessionActivity();
       renderAccount(account);
     } catch (error) {
       if (
@@ -778,10 +1002,12 @@ export function bootstrapAdminConsole({
         return;
       }
       if (error instanceof AdminApiError && error.status === 403) {
-        elements.accountErrorMessage.textContent = describeApiError(error, "account");
+        const message = describeApiError(error, "account");
+        elements.accountErrorMessage.textContent = message;
         elements.accountError.hidden = false;
         elements.accountError.focus();
         await refreshPermissions();
+        toast(message, "danger");
         return;
       }
       if (error instanceof AdminApiError && error.status === 404) {
@@ -800,7 +1026,7 @@ export function bootstrapAdminConsole({
           idleLabel: "查询账号",
           busyLabel: "查询中…",
         });
-        elements.searchButton.disabled = currentGame() === null;
+        elements.searchButton.disabled = !canQueryGame(currentGame());
       }
     }
   }
@@ -823,14 +1049,18 @@ export function bootstrapAdminConsole({
     if (!game || !account || !game.canOperateAccounts || opener.disabled) {
       return;
     }
-    state.pendingOperation = createOperationIntent({
+    state.pendingOperation = reuseOrCreateOperationIntent({
+      previous: state.retryOperation?.intent ?? null,
       action,
       gameId: game.gameId,
       userId: account.userId,
       randomUUID,
     });
     state.operationOpener = opener;
-    elements.operationReason.value = "";
+    elements.operationReason.value =
+      state.pendingOperation === state.retryOperation?.intent
+        ? state.retryOperation.reason
+        : "";
     elements.operationError.hidden = true;
     elements.operationErrorMessage.textContent = "";
 
@@ -855,7 +1085,7 @@ export function bootstrapAdminConsole({
 
   async function submitOperation(event) {
     event.preventDefault();
-    const intent = state.pendingOperation;
+    let intent = state.pendingOperation;
     if (!intent || state.operationSubmitting) {
       return;
     }
@@ -864,11 +1094,35 @@ export function bootstrapAdminConsole({
     if (!elements.operationForm.reportValidity()) {
       return;
     }
+    if (
+      state.retryOperation?.intent === intent
+      && state.retryOperation.reason !== reason
+    ) {
+      intent = createOperationIntent({
+        action: intent.action,
+        gameId: intent.gameId,
+        userId: intent.userId,
+        randomUUID,
+      });
+      state.pendingOperation = intent;
+    }
 
     elements.operationError.hidden = true;
     setOperationBusy(true);
+    state.retryOperation = { intent, reason };
+    const authGeneration = state.authGeneration;
+    const accountVersion = state.accountRequestVersion;
     try {
       const result = await api.perform(intent, reason);
+      if (
+        authGeneration !== state.authGeneration
+        || accountVersion !== state.accountRequestVersion
+        || !state.session
+      ) {
+        return;
+      }
+      touchSessionActivity();
+      state.retryOperation = null;
       if (!result.accountExists) {
         closeOperationDialog();
         state.pendingOperation = null;
@@ -900,14 +1154,26 @@ export function bootstrapAdminConsole({
           : `账号 ${intent.userId} 的全部会话已撤销。`,
       );
     } catch (error) {
+      if (
+        authGeneration !== state.authGeneration
+        || accountVersion !== state.accountRequestVersion
+        || !state.session
+      ) {
+        return;
+      }
+      if (error instanceof AdminApiError && error.status === 409) {
+        state.retryOperation = null;
+      }
       if (error instanceof AdminApiError && error.status === 401) {
         closeOperationDialog();
         becomeAnonymous("管理员会话已过期，请重新登录。");
         return;
       }
       if (error instanceof AdminApiError && error.status === 403) {
+        const message = describeApiError(error, "operation");
         closeOperationDialog();
         await refreshPermissions();
+        toast(message, "danger");
         return;
       }
       elements.operationErrorMessage.textContent = describeApiError(
@@ -926,6 +1192,11 @@ export function bootstrapAdminConsole({
   }
 
   async function logout() {
+    if (state.logoutSubmitting) {
+      return;
+    }
+    state.logoutSubmitting = true;
+    sessionRequests.invalidate();
     for (const button of elements.logoutButtons) {
       button.disabled = true;
     }
@@ -933,42 +1204,62 @@ export function bootstrapAdminConsole({
     try {
       await api.logout();
     } catch (error) {
-      failure = error;
+      if (!isCompletedLogout(error)) {
+        failure = error;
+      }
     } finally {
+      state.logoutSubmitting = false;
       for (const button of elements.logoutButtons) {
         button.disabled = false;
       }
     }
-    becomeAnonymous(
-      failure
-        ? "退出请求未被服务确认。请重新登录或关闭浏览器以结束本次使用。"
-        : "你已安全退出管理控制台。",
-    );
     if (failure) {
       toast(describeApiError(failure, "logout"), "danger");
+      return;
     }
+    becomeAnonymous("你已安全退出管理控制台。");
   }
 
   elements.bootRetry.addEventListener("click", () => restoreSession());
   elements.loginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (state.loginSubmitting) {
+      return;
+    }
     hideLoginError();
     const operatorId = elements.operatorId.value.trim();
     elements.operatorId.value = operatorId;
+    elements.password.setCustomValidity(
+      isValidAdminPasswordInput(elements.password.value)
+        ? ""
+        : "密码必须为 12–256 个 Unicode 字符，且不超过 1024 字节。",
+    );
     if (!elements.loginForm.reportValidity()) {
       return;
     }
+    elements.password.setCustomValidity("");
 
+    const version = sessionRequests.begin();
+    const loginVersion = loginRequests.begin();
+    state.loginSubmitting = true;
     setButtonBusy(elements.loginButton, true, {
       idleLabel: "登录管理控制台",
       busyLabel: "正在登录…",
     });
     try {
       await api.login(operatorId, elements.password.value);
-      elements.password.value = "";
-      applySession(await api.session());
+      if (!sessionRequests.isCurrent(version)) {
+        return;
+      }
+      const session = await api.session();
+      if (!sessionRequests.isCurrent(version)) {
+        return;
+      }
+      applySession(session);
     } catch (error) {
-      elements.password.value = "";
+      if (!sessionRequests.isCurrent(version)) {
+        return;
+      }
       const isCredentialFailure =
         error instanceof AdminApiError && error.status === 401;
       showLoginError(describeApiError(error, "login"), {
@@ -978,11 +1269,19 @@ export function bootstrapAdminConsole({
         elements.operatorId.focus();
       }
     } finally {
-      setButtonBusy(elements.loginButton, false, {
-        idleLabel: "登录管理控制台",
-        busyLabel: "正在登录…",
-      });
+      if (loginRequests.isCurrent(loginVersion)) {
+        state.loginSubmitting = false;
+        elements.password.value = "";
+        resetPasswordControl(elements.password, elements.passwordToggle);
+        setButtonBusy(elements.loginButton, false, {
+          idleLabel: "登录管理控制台",
+          busyLabel: "正在登录…",
+        });
+      }
     }
+  });
+  elements.password.addEventListener("input", () => {
+    elements.password.setCustomValidity("");
   });
 
   elements.gameSelect.addEventListener("change", () => {
@@ -1001,8 +1300,13 @@ export function bootstrapAdminConsole({
   elements.searchForm.addEventListener("submit", (event) => {
     event.preventDefault();
     const game = currentGame();
-    if (!game) {
-      toast("请先选择要管理的游戏。", "warning");
+    if (!canQueryGame(game)) {
+      toast(
+        game
+          ? "当前游戏不可用，暂时不能查询账号。"
+          : "请先选择要管理的游戏。",
+        "warning",
+      );
       elements.gameSelect.focus();
       return;
     }
@@ -1067,6 +1371,7 @@ export function bootstrapAdminConsole({
         selectedGameId: state.selectedGameId,
         accountUserId: state.account?.userId ?? null,
         pendingOperationId: state.pendingOperation?.operationId ?? null,
+        retryOperationId: state.retryOperation?.intent.operationId ?? null,
       });
     },
   });

@@ -36,6 +36,7 @@ npm run dev
 
 - `GAME_MANAGE_KIT_MYSQL_URL`
 - `GAME_MANAGE_KIT_GAMES_CONFIG`
+- 生产环境的 `GAME_MANAGE_KIT_ADMIN_ORIGIN`
 - 游戏配置中 `appIdEnv`、`secretEnv` 和各调用方 `secretEnv` 引用的全部环境变量
 
 `AUTH_DEV_ENABLED` 默认关闭，只允许在 `NODE_ENV=development` 或 `test` 时显式设为
@@ -50,6 +51,20 @@ npm run dev
 `GAME_MANAGE_KIT_INTERNAL_HOST` 配成 `0.0.0.0`，并只向受信网络发布 Internal 端口。
 Public 登录与 Admin 写操作分别使用独立的进程内令牌桶；多实例的全局限流仍应由
 LB/WAF 承担。
+
+管理员网页位于 Internal/Admin origin 的 `/admin/`。完成 migration 并至少启动一次
+服务以同步游戏配置后，使用隐藏 TTY 输入创建个人管理员：
+
+```bash
+npm run admin:create -- \
+  --operator-id ops_kimi \
+  --display-name Kimi \
+  --games game-a,game-b
+```
+
+管理员密码不允许作为命令行参数。网页登录不会接收或保存游戏配置里的 Admin Secret。
+账号权限、HTTPS 反向代理、Cookie 和会话失效要求见
+[管理员控制台运维指南](docs/admin-console.md)。
 
 ### 数据库维护
 
@@ -105,6 +120,7 @@ npm run mysql:docker:clean
 
 ```bash
 npm test
+npm run test:web
 ```
 
 集成测试会根据 `.env` 中的管理连接创建并删除名字唯一的临时数据库：
@@ -167,6 +183,8 @@ docker run --rm \
 启动校验，但其中 `.invalid` 区服域名和开发密钥只是安全占位值，部署前必须替换。
 `GameRegistry` 与区服目录是启动快照；修改配置或密钥后需要滚动重启实例。
 `/readyz` 同时检查数据库 schema 与 `GameRegistry`，只有返回 HTTP 200 才可接流量。
+管理员 origin 必须配置为独立的 HTTPS 主机名，并且只代理 Internal/Admin 监听面；
+不能只用同一主机的不同端口隔离 Public 和管理员 Cookie。
 
 ### 可观测性
 

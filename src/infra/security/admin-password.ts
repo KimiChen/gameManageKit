@@ -13,7 +13,7 @@ const HASH_ALGORITHM = "gmk-scrypt";
 const HASH_VERSION = "v=1";
 const SCRYPT_N = 65_536;
 const SCRYPT_R = 8;
-const SCRYPT_P = 1;
+const SCRYPT_P = 2;
 const SCRYPT_MAX_MEMORY_BYTES = 128 * 1024 * 1024;
 const SCRYPT_PARAMETERS = `N=${SCRYPT_N},r=${SCRYPT_R},p=${SCRYPT_P}`;
 const SALT_BYTES = 16;

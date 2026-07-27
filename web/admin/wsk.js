@@ -72,15 +72,10 @@ export function initPasswordControls({
       continue;
     }
 
+    resetPasswordControl(input, button);
     const toggle = () => {
       const reveal = input.type === "password";
-      input.type = reveal ? "text" : "password";
-      button.setAttribute("aria-pressed", String(reveal));
-      button.setAttribute("aria-label", reveal ? "隐藏密码" : "显示密码");
-      button.setAttribute("title", reveal ? "隐藏密码" : "显示密码");
-      button
-        .querySelector("use")
-        ?.setAttribute("href", reveal ? "#eye-off" : "#eye");
+      setPasswordVisibility(input, button, reveal);
     };
 
     button.addEventListener("click", toggle);
@@ -92,6 +87,23 @@ export function initPasswordControls({
       cleanup();
     }
   };
+}
+
+function setPasswordVisibility(input, button, reveal) {
+  input.type = reveal ? "text" : "password";
+  button.setAttribute("aria-pressed", String(reveal));
+  button.setAttribute("aria-label", reveal ? "隐藏密码" : "显示密码");
+  button.setAttribute("title", reveal ? "隐藏密码" : "显示密码");
+  button
+    .querySelector("use")
+    ?.setAttribute("href", reveal ? "#eye-off" : "#eye");
+}
+
+export function resetPasswordControl(input, button) {
+  if (!input || !button) {
+    return;
+  }
+  setPasswordVisibility(input, button, false);
 }
 
 function toastIcon(document, href) {
