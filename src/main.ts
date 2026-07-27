@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { createRuntime, type Runtime } from "./app.js";
 import { loadConfig, type GameManageKitConfig } from "./config.js";
 import { waitForRequestsDrained } from "./http/common.js";
+import { safeErrorDetails } from "./infra/security/security.js";
 
 export interface RunningGameManageKit {
   readonly runtime: Runtime;
@@ -98,7 +99,7 @@ async function run(): Promise<void> {
         console.log("[gameManageKit] shutdown complete");
       })
       .catch((error: unknown) => {
-        console.error("[gameManageKit] shutdown failed", error);
+        console.error("[gameManageKit] shutdown failed", safeErrorDetails(error));
         for (const app of [running.runtime.apps.publicApp, running.runtime.apps.internalApp]) {
           app.server.closeAllConnections();
         }
@@ -111,7 +112,7 @@ async function run(): Promise<void> {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   run().catch((error: unknown) => {
-    console.error("[gameManageKit] startup failed", error);
+    console.error("[gameManageKit] startup failed", safeErrorDetails(error));
     process.exitCode = 1;
   });
 }

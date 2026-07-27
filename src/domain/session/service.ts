@@ -1,8 +1,12 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
-import { SESSION_TTL_SECONDS, TOKEN_BYTES } from "../../config.js";
+import { TOKEN_BYTES } from "../../config.js";
+import type { MetricsRegistry } from "../../infra/observability/metrics.js";
+import { GAME_ID_PATTERN } from "../game/registry.js";
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
+const USER_ID_PATTERN = /^u_[0-9]+$/;
+const RANDOM_TOKEN_PATTERN = new RegExp(`^[0-9a-f]{${TOKEN_BYTES * 2}}$`);
 
 function safeEqualHex(actual: string, expected: string): boolean {
   if (!/^[0-9a-f]{64}$/.test(actual) || !/^[0-9a-f]{64}$/.test(expected)) {
@@ -12,20 +16,29 @@ function safeEqualHex(actual: string, expected: string): boolean {
 }
 
 export interface ParsedAccessToken {
+  readonly gameId: string;
   readonly userId: string;
   readonly accessToken: string;
 }
 
 export function parseAccessToken(accessToken: string): ParsedAccessToken | null {
-  const separator = accessToken.lastIndexOf(".");
-  if (separator <= 0 || separator === accessToken.length - 1) {
+  const parts = accessToken.split(".");
+  if (parts.length !== 3) {
     return null;
   }
-  const userId = accessToken.slice(0, separator);
-  if (userId.length > 32 || !/^u_[0-9]+$/.test(userId)) {
+  const [gameId, userId, randomToken] = parts;
+  if (
+    !gameId
+    || !GAME_ID_PATTERN.test(gameId)
+    || !userId
+    || userId.length > 32
+    || !USER_ID_PATTERN.test(userId)
+    || !randomToken
+    || !RANDOM_TOKEN_PATTERN.test(randomToken)
+  ) {
     return null;
   }
-  return { userId, accessToken };
+  return { gameId, userId, accessToken };
 }
 
 export type VerifySessionResult =
@@ -45,35 +58,29 @@ interface VerifyRow extends RowDataPacket {
 export class SessionService {
   constructor(
     private readonly pool: Pool,
-    private readonly ttlSeconds = SESSION_TTL_SECONDS,
+    private readonly metrics?: MetricsRegistry,
   ) {}
 
   async issue(
     connection: PoolConnection,
+    gameId: string,
     userId: string,
     serverId: number,
-    sessionKey: string | null,
   ): Promise<{ accessToken: string; issuedAtMs: number }> {
-    const accessToken = `${userId}.${randomBytes(TOKEN_BYTES).toString("hex")}`;
+    const accessToken = `${gameId}.${userId}.${randomBytes(TOKEN_BYTES).toString("hex")}`;
     await connection.execute<ResultSetHeader>(
-      `INSERT INTO account_sessions (user_id, server_id, token_hash, token_issued_at)
-       VALUES (?, ?, ?, NOW(3))
+      `INSERT INTO account_sessions (game_id, user_id, server_id, token_hash, token_issued_at)
+       VALUES (?, ?, ?, ?, NOW(3))
        ON DUPLICATE KEY UPDATE
          token_hash = VALUES(token_hash),
          token_issued_at = GREATEST(NOW(3), token_issued_at + INTERVAL 1000 MICROSECOND)`,
-      [userId, serverId, sha256(accessToken)],
+      [gameId, userId, serverId, sha256(accessToken)],
     );
-    if (sessionKey !== null) {
-      await connection.execute<ResultSetHeader>(
-        "UPDATE accounts SET session_key = ? WHERE user_id = ?",
-        [sessionKey, userId],
-      );
-    }
     const [rows] = await connection.query<RowDataPacket[]>(
       `SELECT ROUND(UNIX_TIMESTAMP(token_issued_at) * 1000) AS issued_ms
          FROM account_sessions
-        WHERE user_id = ? AND server_id = ?`,
-      [userId, serverId],
+        WHERE game_id = ? AND user_id = ? AND server_id = ?`,
+      [gameId, userId, serverId],
     );
     const issuedAtMs = Number(rows[0]?.issued_ms ?? 0);
     if (!Number.isSafeInteger(issuedAtMs) || issuedAtMs <= 0) {
@@ -82,21 +89,31 @@ export class SessionService {
     return { accessToken, issuedAtMs };
   }
 
-  async verify(accessToken: string, serverId: number): Promise<VerifySessionResult> {
+  async verify(
+    gameId: string,
+    ttlSeconds: number,
+    accessToken: string,
+    serverId: number,
+  ): Promise<VerifySessionResult> {
     const parsed = parseAccessToken(accessToken);
-    if (!parsed) {
+    if (!parsed || parsed.gameId !== gameId) {
       return { valid: false, reason: "MISMATCH" };
     }
-    const [rows] = await this.pool.query<VerifyRow[]>(
+    const query = () => this.pool.query<VerifyRow[]>(
       `SELECT s.token_hash, a.status,
               TIMESTAMPDIFF(SECOND, s.token_issued_at, NOW(3)) AS age_s,
               ROUND(UNIX_TIMESTAMP(s.token_issued_at) * 1000) AS issued_ms
          FROM accounts a
          LEFT JOIN account_sessions s
-           ON s.user_id = a.user_id AND s.server_id = ?
-        WHERE a.user_id = ?`,
-      [serverId, parsed.userId],
+           ON s.game_id = a.game_id
+          AND s.user_id = a.user_id
+          AND s.server_id = ?
+        WHERE a.game_id = ? AND a.user_id = ?`,
+      [serverId, gameId, parsed.userId],
     );
+    const [rows] = this.metrics
+      ? await this.metrics.measureDatabase(gameId, "session_verify", query)
+      : await query();
     const account = rows[0];
     if (!account) {
       return { valid: false, reason: "NOT_FOUND" };
@@ -116,7 +133,7 @@ export class SessionService {
     ) {
       return { valid: false, reason: "MISMATCH" };
     }
-    if (account.age_s === null || Number(account.age_s) > this.ttlSeconds) {
+    if (account.age_s === null || Number(account.age_s) > ttlSeconds) {
       return { valid: false, reason: "EXPIRED" };
     }
     return {
@@ -126,19 +143,27 @@ export class SessionService {
     };
   }
 
-  async verifyAnyZone(accessToken: string): Promise<string | null> {
+  async verifyAnyZone(
+    gameId: string,
+    ttlSeconds: number,
+    accessToken: string,
+  ): Promise<string | null> {
     const parsed = parseAccessToken(accessToken);
-    if (!parsed) {
+    if (!parsed || parsed.gameId !== gameId) {
       return null;
     }
-    const [rows] = await this.pool.query<RowDataPacket[]>(
+    const query = () => this.pool.query<RowDataPacket[]>(
       `SELECT s.token_hash
          FROM accounts a
-         JOIN account_sessions s ON s.user_id = a.user_id
-        WHERE a.user_id = ? AND a.status = 0
+         JOIN account_sessions s
+           ON s.game_id = a.game_id AND s.user_id = a.user_id
+        WHERE a.game_id = ? AND a.user_id = ? AND a.status = 0
           AND TIMESTAMPDIFF(SECOND, s.token_issued_at, NOW(3)) <= ?`,
-      [parsed.userId, this.ttlSeconds],
+      [gameId, parsed.userId, ttlSeconds],
     );
+    const [rows] = this.metrics
+      ? await this.metrics.measureDatabase(gameId, "session_lookup", query)
+      : await query();
     const wanted = sha256(accessToken);
     return rows.some((row) => safeEqualHex(String(row.token_hash ?? ""), wanted))
       ? parsed.userId

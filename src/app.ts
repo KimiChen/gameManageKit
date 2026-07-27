@@ -5,12 +5,11 @@ import { LoginService } from "./domain/account/login.js";
 import { CharacterService } from "./domain/character/service.js";
 import {
   DirectoryService,
-  FileDirectoryProvider,
 } from "./domain/directory/service.js";
+import { GameRegistry } from "./domain/game/registry.js";
 import { SessionService } from "./domain/session/service.js";
 import { Database } from "./infra/mysql/database.js";
-import { TokenBucketLimiter } from "./infra/security/security.js";
-import { WechatClient } from "./infra/wechat/client.js";
+import { MetricsRegistry } from "./infra/observability/metrics.js";
 import {
   createHttpApp,
 } from "./http/common.js";
@@ -30,12 +29,17 @@ import {
   registerSystemRoutes,
   type SystemRouteServices,
 } from "./http/system/routes.js";
+import {
+  registerMetricsRoutes,
+  type MetricsRouteServices,
+} from "./http/metrics/routes.js";
 
 export interface GameManageKitServices
   extends PublicRouteServices,
   InternalRouteServices,
   AdminRouteServices,
-  SystemRouteServices {}
+  SystemRouteServices,
+  MetricsRouteServices {}
 
 export interface GameManageKitApps {
   readonly publicApp: FastifyInstance;
@@ -45,6 +49,8 @@ export interface GameManageKitApps {
 export interface Runtime {
   readonly apps: GameManageKitApps;
   readonly database: Database;
+  readonly games: GameRegistry;
+  readonly metrics: MetricsRegistry;
 }
 
 export function buildApps(
@@ -56,53 +62,62 @@ export function buildApps(
   registerSystemRoutes(publicApp, config, services);
 
   const internalApp = createHttpApp(config);
-  registerInternalRoutes(internalApp, config, services);
-  registerAdminRoutes(internalApp, config, services);
+  registerInternalRoutes(internalApp, services);
+  registerAdminRoutes(internalApp, services);
+  registerMetricsRoutes(internalApp, services);
   registerSystemRoutes(internalApp, config, services);
 
   return { publicApp, internalApp };
 }
 
-export async function createRuntime(config: GameManageKitConfig): Promise<Runtime> {
+export interface RuntimeOptions {
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly games?: GameRegistry;
+}
+
+export async function createRuntime(
+  config: GameManageKitConfig,
+  options: RuntimeOptions = {},
+): Promise<Runtime> {
+  const games = options.games ?? await GameRegistry.load(config.gamesConfigPath, {
+    production: config.nodeEnv === "production",
+    ...(options.env ? { env: options.env } : {}),
+  });
   const database = new Database(config.mysqlUrl, config.mysqlPoolSize);
   try {
-    const sessions = new SessionService(database.pool);
-    const characters = new CharacterService(database.pool);
-    const wechat = new WechatClient({
-      appId: config.wxAppId,
-      secret: config.wxSecret,
-      endpoint: config.wxCode2SessionUrl,
-      timeoutMs: config.wxTimeoutMs,
-      breakerThreshold: config.wxBreakerThreshold,
-      breakerOpenMs: config.wxBreakerOpenMs,
-    });
+    await games.sync(database.pool);
+    const gameIds = games.list().map((game) => game.gameId);
+    const metrics = new MetricsRegistry(gameIds);
+    const sessions = new SessionService(database.pool, metrics);
+    const characters = new CharacterService(database.pool, metrics);
     const login = new LoginService(
       database,
       sessions,
-      wechat,
-      new TokenBucketLimiter(config.loginRateCapacity, config.loginRateRefillPerSecond),
+      metrics,
     );
-    const provider = await FileDirectoryProvider.load(
-      config.areaConfigPath,
-      config.nodeEnv === "production",
-    );
-    const directory = new DirectoryService(provider, sessions, characters);
-    const admin = new AdminAccountService(database);
+    const directory = new DirectoryService(sessions, characters);
+    const admin = new AdminAccountService(database, metrics);
     const services: GameManageKitServices = {
+      games,
+      metrics,
       login,
       directory,
       sessions,
       characters,
       admin,
-      adminLimiter: new TokenBucketLimiter(
-        config.adminRateCapacity,
-        config.adminRateRefillPerSecond,
-      ),
       readiness: {
-        ready: () => database.ready(config.schemaVersion),
+        ready: async () => (
+          games.ready()
+          && await database.ready(config.schemaVersion, gameIds)
+        ),
       },
     };
-    return { apps: buildApps(config, services), database };
+    return {
+      apps: buildApps(config, services),
+      database,
+      games,
+      metrics,
+    };
   } catch (error) {
     await database.close().catch(() => undefined);
     throw error;

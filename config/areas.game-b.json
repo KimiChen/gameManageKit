@@ -1,0 +1,23 @@
+{
+  "isOps": true,
+  "servers": [
+    {
+      "serverId": 1,
+      "name": "B 一区",
+      "tag": "normal",
+      "status": "smooth",
+      "openTime": 1700000000,
+      "gameHttpUrl": "https://game-b.example.invalid",
+      "gameWsUrl": "wss://game-b.example.invalid"
+    },
+    {
+      "serverId": 2,
+      "name": "B 二区",
+      "tag": "full",
+      "status": "busy",
+      "openTime": 1705000000,
+      "gameHttpUrl": "https://game-b.example.invalid",
+      "gameWsUrl": "wss://game-b.example.invalid"
+    }
+  ]
+}

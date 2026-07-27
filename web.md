@@ -80,7 +80,7 @@ Hash 只记录页面视图，不记录管理员、账号、密码、会话或操
 交互要求：
 
 - 不提供“记住密码”。
-- 不允许输入或保存 `GAME_MANAGE_KIT_ADMIN_SECRET`。
+- 不允许输入或保存游戏配置中 Admin 身份所引用的 Secret 环境变量值。
 - 登录失败统一提示“账号或密码错误”，不向客户端区分账号不存在、密码错误或管理员停用。
 - 限流、网络错误和服务不可用使用不同的可恢复提示。
 - 错误提示使用 `aria-live`；失败后焦点回到第一个需要处理的字段。
@@ -164,7 +164,7 @@ POST /v1/games/{gameId}/admin/accounts/{userId}/revoke
   },
   "games": [
     {
-      "gameId": "game_a",
+      "gameId": "game-a",
       "name": "示例游戏",
       "status": "enabled",
       "canOperateAccounts": true
@@ -233,7 +233,7 @@ admin_sessions
 首个管理员通过命令行创建，例如：
 
 ```text
-npm run admin:create -- --operator-id ops_kimi --games game_a,game_b
+npm run admin:create -- --operator-id ops_kimi --games game-a,game-b
 ```
 
 密码必须从 TTY 隐藏输入或标准输入读取，不允许作为命令行参数进入 Shell history。第一版不提供网页注册入口。

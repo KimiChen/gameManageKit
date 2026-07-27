@@ -2,7 +2,6 @@ import { isIP } from "node:net";
 
 export const CURRENT_SCHEMA_VERSION = 1;
 export const TOKEN_BYTES = 24;
-export const SESSION_TTL_SECONDS = 259_200;
 
 export interface GameManageKitConfig {
   readonly nodeEnv: string;
@@ -12,21 +11,9 @@ export interface GameManageKitConfig {
   readonly publicPort: number;
   readonly internalHost: string;
   readonly internalPort: number;
-  readonly serviceSecrets: readonly string[];
-  readonly adminSecrets: readonly string[];
-  readonly areaConfigPath: string;
+  readonly gamesConfigPath: string;
   readonly trustedProxyCidrs: readonly string[];
   readonly authDevEnabled: boolean;
-  readonly wxAppId: string;
-  readonly wxSecret: string;
-  readonly wxCode2SessionUrl: string;
-  readonly wxTimeoutMs: number;
-  readonly wxBreakerThreshold: number;
-  readonly wxBreakerOpenMs: number;
-  readonly loginRateCapacity: number;
-  readonly loginRateRefillPerSecond: number;
-  readonly adminRateCapacity: number;
-  readonly adminRateRefillPerSecond: number;
   readonly bodyLimitBytes: number;
   readonly requestTimeoutMs: number;
   readonly shutdownTimeoutMs: number;
@@ -51,15 +38,6 @@ function integer(env: Env, name: string, fallback: number, minimum: number, maxi
   const value = raw === undefined || raw === "" ? fallback : (/^\d+$/.test(raw) ? Number(raw) : Number.NaN);
   if (!Number.isInteger(value) || value < minimum || value > maximum) {
     throw new Error(`${name} 必须是 ${minimum}..${maximum} 的整数`);
-  }
-  return value;
-}
-
-function positiveNumber(env: Env, name: string, fallback: number): number {
-  const raw = env[name];
-  const value = raw === undefined || raw === "" ? fallback : Number(raw);
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`${name} 必须是正数`);
   }
   return value;
 }
@@ -114,26 +92,17 @@ function validateProxy(value: string): string {
   return value;
 }
 
-function secrets(current: string, previous: string | undefined): readonly string[] {
-  const values = [current, previous?.trim()].filter((value): value is string => Boolean(value));
-  return [...new Set(values)];
-}
-
 export function loadConfig(env: Env = process.env): GameManageKitConfig {
   const nodeEnv = env.NODE_ENV?.trim() || "development";
-  const authDevEnabled = boolean(env, "AUTH_DEV_ENABLED", nodeEnv !== "production");
+  if (!["development", "test", "production"].includes(nodeEnv)) {
+    throw new Error("NODE_ENV 只允许 development/test/production");
+  }
+  const authDevEnabled = boolean(env, "AUTH_DEV_ENABLED", false);
   if (nodeEnv === "production" && authDevEnabled) {
     throw new Error("AUTH_DEV_ENABLED=1 在生产环境被显式开启");
   }
 
   const mysqlUrl = validateMysqlUrl(required(env, "GAME_MANAGE_KIT_MYSQL_URL"), env.MYSQL_URL);
-  const serviceSecret = required(env, "GAME_MANAGE_KIT_SERVICE_SECRET");
-  const adminSecret = required(env, "GAME_MANAGE_KIT_ADMIN_SECRET");
-  const wxAppId = env.WX_APPID?.trim() ?? "";
-  const wxSecret = env.WX_SECRET?.trim() ?? "";
-  if (nodeEnv === "production" && (!wxAppId || !wxSecret)) {
-    throw new Error("生产环境必须配置 WX_APPID 与 WX_SECRET");
-  }
 
   const trustedProxyCidrs = (env.GAME_MANAGE_KIT_TRUST_PROXY_CIDRS ?? "")
     .split(",")
@@ -149,22 +118,9 @@ export function loadConfig(env: Env = process.env): GameManageKitConfig {
     publicPort: integer(env, "GAME_MANAGE_KIT_PUBLIC_PORT", 2570, 1, 65_535),
     internalHost: env.GAME_MANAGE_KIT_INTERNAL_HOST?.trim() || "127.0.0.1",
     internalPort: integer(env, "GAME_MANAGE_KIT_INTERNAL_PORT", 2571, 1, 65_535),
-    serviceSecrets: secrets(serviceSecret, env.GAME_MANAGE_KIT_SERVICE_SECRET_PREVIOUS),
-    adminSecrets: secrets(adminSecret, env.GAME_MANAGE_KIT_ADMIN_SECRET_PREVIOUS),
-    areaConfigPath: env.GAME_MANAGE_KIT_AREA_CONFIG?.trim() || "config/areas.json",
+    gamesConfigPath: env.GAME_MANAGE_KIT_GAMES_CONFIG?.trim() || "config/games.json",
     trustedProxyCidrs,
     authDevEnabled,
-    wxAppId,
-    wxSecret,
-    wxCode2SessionUrl: env.WX_CODE2SESSION_URL?.trim()
-      || "https://api.weixin.qq.com/sns/jscode2session",
-    wxTimeoutMs: integer(env, "WX_TIMEOUT_MS", 3_000, 100, 30_000),
-    wxBreakerThreshold: integer(env, "WX_BREAKER_THRESHOLD", 5, 1, 1_000),
-    wxBreakerOpenMs: integer(env, "WX_BREAKER_OPEN_MS", 10_000, 100, 600_000),
-    loginRateCapacity: positiveNumber(env, "LOGIN_RATE_CAPACITY", 5),
-    loginRateRefillPerSecond: positiveNumber(env, "LOGIN_RATE_REFILL_PER_S", 0.2),
-    adminRateCapacity: positiveNumber(env, "ADMIN_RATE_CAPACITY", 10),
-    adminRateRefillPerSecond: positiveNumber(env, "ADMIN_RATE_REFILL_PER_S", 1),
     bodyLimitBytes: integer(env, "GAME_MANAGE_KIT_BODY_LIMIT_BYTES", 65_536, 1_024, 1_048_576),
     requestTimeoutMs: integer(env, "GAME_MANAGE_KIT_REQUEST_TIMEOUT_MS", 10_000, 100, 120_000),
     shutdownTimeoutMs: integer(env, "GAME_MANAGE_KIT_SHUTDOWN_TIMEOUT_MS", 10_000, 100, 120_000),

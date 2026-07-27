@@ -17,6 +17,22 @@ export type paths = {
         patch?: never;
         trace?: never;
     };
+    "/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["metrics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/readyz": {
         parameters: {
             query?: never;
@@ -33,11 +49,12 @@ export type paths = {
         patch?: never;
         trace?: never;
     };
-    "/v1/admin/accounts/{userId}/ban": {
+    "/v1/games/{gameId}/admin/accounts/{userId}/ban": {
         parameters: {
             query?: never;
             header?: never;
             path: {
+                gameId: components["parameters"]["GameId"];
                 userId: components["parameters"]["UserId"];
             };
             cookie?: never;
@@ -51,11 +68,12 @@ export type paths = {
         patch?: never;
         trace?: never;
     };
-    "/v1/admin/accounts/{userId}/revoke": {
+    "/v1/games/{gameId}/admin/accounts/{userId}/revoke": {
         parameters: {
             query?: never;
             header?: never;
             path: {
+                gameId: components["parameters"]["GameId"];
                 userId: components["parameters"]["UserId"];
             };
             cookie?: never;
@@ -69,11 +87,13 @@ export type paths = {
         patch?: never;
         trace?: never;
     };
-    "/v1/areas": {
+    "/v1/games/{gameId}/areas": {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
             cookie?: never;
         };
         get: operations["listAreas"];
@@ -85,11 +105,12 @@ export type paths = {
         patch?: never;
         trace?: never;
     };
-    "/v1/internal/characters/{userId}/{serverId}": {
+    "/v1/games/{gameId}/internal/characters/{userId}/{serverId}": {
         parameters: {
             query?: never;
             header?: never;
             path: {
+                gameId: components["parameters"]["GameId"];
                 serverId: components["parameters"]["ServerId"];
                 userId: components["parameters"]["UserId"];
             };
@@ -104,11 +125,13 @@ export type paths = {
         patch?: never;
         trace?: never;
     };
-    "/v1/internal/sessions/verify": {
+    "/v1/games/{gameId}/internal/sessions/verify": {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
             cookie?: never;
         };
         get?: never;
@@ -120,15 +143,18 @@ export type paths = {
         patch?: never;
         trace?: never;
     };
-    "/v1/sessions/dev": {
+    "/v1/games/{gameId}/sessions/dev": {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
             cookie?: never;
         };
         get?: never;
         put?: never;
+        /** @description 仅 AUTH_DEV_ENABLED=1 时可用；生产环境固定返回 404。 */
         post: operations["devLogin"];
         delete?: never;
         options?: never;
@@ -136,11 +162,13 @@ export type paths = {
         patch?: never;
         trace?: never;
     };
-    "/v1/sessions/wechat": {
+    "/v1/games/{gameId}/sessions/wechat": {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
             cookie?: never;
         };
         get?: never;
@@ -203,10 +231,15 @@ export type components = {
             devKey: string;
             serverId: number;
         };
+        /** @enum {string} */
+        ErrorCode: "INVALID_PAYLOAD" | "AUTH_REQUIRED" | "ACCOUNT_BANNED" | "NOT_FOUND" | "RATE_LIMITED" | "UPSTREAM_UNAVAILABLE" | "SERVICE_AUTH_REQUIRED" | "SERVICE_FORBIDDEN" | "OPERATION_CONFLICT" | "INTERNAL" | "GAME_NOT_FOUND" | "GAME_DISABLED" | "GAME_ACCESS_DENIED" | "SERVER_NOT_FOUND" | "SERVER_DISABLED";
         ErrorResponse: {
-            code: string;
+            code: components["schemas"]["ErrorCode"];
             requestId: string;
         };
+        GameId: string;
+        /** @enum {string} */
+        GameStatus: "enabled" | "maintenance" | "disabled";
         HasCharacterResponse: {
             exists: boolean;
         };
@@ -274,7 +307,7 @@ export type components = {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
-        /** @description 禁止访问 */
+        /** @description 禁止访问；可能为账号封禁、游戏停用、调用方无游戏权限或区服停用 */
         Forbidden: {
             headers: {
                 [name: string]: unknown;
@@ -292,7 +325,7 @@ export type components = {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
-        /** @description 不存在 */
+        /** @description 资源、游戏或区服不存在 */
         NotFound: {
             headers: {
                 [name: string]: unknown;
@@ -328,7 +361,7 @@ export type components = {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
-        /** @description 上游不可用 */
+        /** @description 微信上游不可用，或游戏处于维护状态 */
         Unavailable: {
             headers: {
                 [name: string]: unknown;
@@ -339,6 +372,7 @@ export type components = {
         };
     };
     parameters: {
+        GameId: components["schemas"]["GameId"];
         ServerId: number;
         UserId: string;
     };
@@ -366,6 +400,29 @@ export interface operations {
                     "application/json": components["schemas"]["LiveResponse"];
                 };
             };
+        };
+    };
+    metrics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Prometheus 文本格式指标 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            401: components["responses"]["ServiceUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["Internal"];
         };
     };
     readyz: {
@@ -402,6 +459,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                gameId: components["parameters"]["GameId"];
                 userId: components["parameters"]["UserId"];
             };
             cookie?: never;
@@ -423,9 +481,12 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["ServiceUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
         };
     };
     revokeAccount: {
@@ -433,6 +494,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                gameId: components["parameters"]["GameId"];
                 userId: components["parameters"]["UserId"];
             };
             cookie?: never;
@@ -443,7 +505,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description 撤销结果 */
+            /** @description 撤销该游戏账号的全部现有会话；账号保留且允许重新登录 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -454,16 +516,21 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["ServiceUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
         };
     };
     listAreas: {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -477,7 +544,11 @@ export interface operations {
                     "application/json": components["schemas"]["AreaListResponse"];
                 };
             };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
         };
     };
     hasCharacter: {
@@ -485,6 +556,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                gameId: components["parameters"]["GameId"];
                 serverId: components["parameters"]["ServerId"];
                 userId: components["parameters"]["UserId"];
             };
@@ -503,7 +575,10 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["ServiceUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
         };
     };
     registerCharacter: {
@@ -511,6 +586,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                gameId: components["parameters"]["GameId"];
                 serverId: components["parameters"]["ServerId"];
                 userId: components["parameters"]["UserId"];
             };
@@ -529,14 +605,19 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["ServiceUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
         };
     };
     verifySession: {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
             cookie?: never;
         };
         requestBody: {
@@ -556,14 +637,19 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["ServiceUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
         };
     };
     devLogin: {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
             cookie?: never;
         };
         requestBody: {
@@ -586,13 +672,16 @@ export interface operations {
             404: components["responses"]["NotFound"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
         };
     };
     wxLogin: {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
             cookie?: never;
         };
         requestBody: {
@@ -613,6 +702,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["Internal"];
             503: components["responses"]["Unavailable"];

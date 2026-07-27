@@ -1,14 +1,5 @@
-export type GameManageKitErrorCode =
-  | "INVALID_PAYLOAD"
-  | "AUTH_REQUIRED"
-  | "ACCOUNT_BANNED"
-  | "NOT_FOUND"
-  | "RATE_LIMITED"
-  | "UPSTREAM_UNAVAILABLE"
-  | "SERVICE_AUTH_REQUIRED"
-  | "SERVICE_FORBIDDEN"
-  | "OPERATION_CONFLICT"
-  | "INTERNAL";
+import type { GameManageKitErrorCode } from "@gono/game-manage-kit-contract";
+export type { GameManageKitErrorCode } from "@gono/game-manage-kit-contract";
 
 export class GameManageKitError extends Error {
   constructor(

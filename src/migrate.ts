@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import mysql, { type RowDataPacket } from "mysql2/promise";
+import { safeErrorDetails } from "./infra/security/security.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const defaultMigrationDir = resolve(here, "..", "migrations");
@@ -64,5 +65,8 @@ export async function runMigrations(
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await runMigrations();
+  await runMigrations().catch((error: unknown) => {
+    console.error("[migrate] failed", safeErrorDetails(error));
+    process.exitCode = 1;
+  });
 }

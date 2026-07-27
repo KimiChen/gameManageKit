@@ -4,6 +4,7 @@ import { normalizeIp } from "../../infra/security/security.js";
 type AuditExecutor = Pick<Pool | PoolConnection, "execute">;
 
 export interface AuditInput {
+  readonly gameId: string;
   readonly operationId?: string | null;
   readonly userId: string | null;
   readonly event: string;
@@ -30,9 +31,10 @@ function clamp(value: string | null | undefined, maximum: number): string | null
 export async function insertAudit(executor: AuditExecutor, input: AuditInput): Promise<void> {
   await executor.execute<ResultSetHeader>(
     `INSERT INTO login_audit
-       (operation_id, user_id, event, \`operator\`, caller, target_exists, reason, ip, device_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, INET6_ATON(?), ?)`,
+       (game_id, operation_id, user_id, event, \`operator\`, caller, target_exists, reason, ip, device_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, INET6_ATON(?), ?)`,
     [
+      input.gameId,
       clamp(input.operationId, 64),
       input.userId,
       clamp(input.event, 24),

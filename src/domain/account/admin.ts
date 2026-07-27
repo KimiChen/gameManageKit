@@ -2,11 +2,13 @@ import type { AdminAccountResponse } from "@gono/game-manage-kit-contract";
 import type { RowDataPacket } from "mysql2/promise";
 import { OperationConflictError } from "../../errors.js";
 import { Database } from "../../infra/mysql/database.js";
+import type { MetricsRegistry } from "../../infra/observability/metrics.js";
 import { insertAudit } from "./audit.js";
 
 export type AdminAction = "ban" | "revoke";
 
 export interface AdminOperationInput {
+  readonly gameId: string;
   readonly action: AdminAction;
   readonly userId: string;
   readonly operationId: string;
@@ -36,69 +38,81 @@ function isDuplicate(error: unknown): boolean {
 }
 
 export class AdminAccountService {
-  constructor(private readonly database: Database) {}
+  constructor(
+    private readonly database: Database,
+    private readonly metrics?: MetricsRegistry,
+  ) {}
 
   async execute(input: AdminOperationInput): Promise<AdminAccountResponse> {
-    try {
-      return await this.database.transaction(async (connection) => {
-        const [operations] = await connection.query<OperationRow[]>(
-          `SELECT user_id, event, target_exists
-             FROM login_audit
-            WHERE operation_id = ?`,
-          [input.operationId],
-        );
-        const replay = operations[0];
-        if (replay) {
-          return this.replay(input, replay);
-        }
+    const execute = async (): Promise<AdminAccountResponse> => {
+      try {
+        return await this.database.transaction(async (connection) => {
+          const [operations] = await connection.query<OperationRow[]>(
+            `SELECT user_id, event, target_exists
+               FROM login_audit
+              WHERE game_id = ? AND operation_id = ?`,
+            [input.gameId, input.operationId],
+          );
+          const replay = operations[0];
+          if (replay) {
+            return this.replay(input, replay);
+          }
 
-        const [accounts] = await connection.query<RowDataPacket[]>(
-          "SELECT status FROM accounts WHERE user_id = ? FOR UPDATE",
-          [input.userId],
-        );
-        const accountExists = accounts.length > 0;
-        if (accountExists) {
-          if (input.action === "ban") {
+          const [accounts] = await connection.query<RowDataPacket[]>(
+            "SELECT status FROM accounts WHERE game_id = ? AND user_id = ? FOR UPDATE",
+            [input.gameId, input.userId],
+          );
+          const accountExists = accounts.length > 0;
+          if (accountExists) {
+            if (input.action === "ban") {
+              await connection.execute(
+                "UPDATE accounts SET status = 1 WHERE game_id = ? AND user_id = ?",
+                [input.gameId, input.userId],
+              );
+            }
             await connection.execute(
-              "UPDATE accounts SET status = 1 WHERE user_id = ?",
-              [input.userId],
+              "DELETE FROM account_sessions WHERE game_id = ? AND user_id = ?",
+              [input.gameId, input.userId],
             );
           }
-          await connection.execute(
-            "DELETE FROM account_sessions WHERE user_id = ?",
-            [input.userId],
-          );
-        }
-        await insertAudit(connection, {
-          operationId: input.operationId,
-          userId: input.userId,
-          event: input.action,
-          operator: input.operatorId,
-          caller: input.caller,
-          targetExists: accountExists,
-          reason: input.reason,
-          ip: input.ip,
+          await insertAudit(connection, {
+            gameId: input.gameId,
+            operationId: input.operationId,
+            userId: input.userId,
+            event: input.action,
+            operator: input.operatorId,
+            caller: input.caller,
+            targetExists: accountExists,
+            reason: input.reason,
+            ip: input.ip,
+          });
+          return statusFor(input.action, accountExists);
         });
-        return statusFor(input.action, accountExists);
-      });
-    } catch (error) {
-      if (!isDuplicate(error)) {
-        throw error;
+      } catch (error) {
+        if (!isDuplicate(error)) {
+          throw error;
+        }
+        const replay = await this.findOperation(input.gameId, input.operationId);
+        if (!replay) {
+          throw error;
+        }
+        return this.replay(input, replay);
       }
-      const replay = await this.findOperation(input.operationId);
-      if (!replay) {
-        throw error;
-      }
-      return this.replay(input, replay);
-    }
+    };
+    return this.metrics
+      ? this.metrics.measureDatabase(input.gameId, "admin", execute)
+      : execute();
   }
 
-  private async findOperation(operationId: string): Promise<OperationRow | undefined> {
+  private async findOperation(
+    gameId: string,
+    operationId: string,
+  ): Promise<OperationRow | undefined> {
     const [rows] = await this.database.pool.query<OperationRow[]>(
       `SELECT user_id, event, target_exists
          FROM login_audit
-        WHERE operation_id = ?`,
-      [operationId],
+        WHERE game_id = ? AND operation_id = ?`,
+      [gameId, operationId],
     );
     return rows[0];
   }

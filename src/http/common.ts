@@ -1,11 +1,26 @@
 import Fastify, {
+  LogController,
   type FastifyInstance,
   type FastifyRequest,
 } from "fastify";
 import { GameManageKitSchemas } from "@gono/game-manage-kit-contract";
 import type { GameManageKitConfig } from "../config.js";
+import type {
+  AdminIdentity,
+  GameContext,
+  GameRegistry,
+  ServiceIdentity,
+} from "../domain/game/registry.js";
 import { GameManageKitError } from "../errors.js";
-import { matchesAnySecret } from "../infra/security/security.js";
+import { safeErrorDetails } from "../infra/security/security.js";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    gameContext: GameContext | null;
+    serviceIdentity: ServiceIdentity | null;
+    adminIdentity: AdminIdentity | null;
+  }
+}
 
 export interface RegisteredHttpRoute {
   readonly method: string;
@@ -18,6 +33,10 @@ interface RequestDrainState {
   readonly waiters: Set<() => void>;
 }
 const requestDrainStates = new WeakMap<FastifyInstance, RequestDrainState>();
+
+export interface LogStream {
+  write(message: string): void;
+}
 
 function finishRequest(state: RequestDrainState, request: FastifyRequest): void {
   if (!state.active.delete(request) || state.active.size > 0) {
@@ -36,6 +55,15 @@ export const schemaRef = (name: keyof typeof GameManageKitSchemas): { $ref: stri
 export const fastifyPath = (openApiPath: string): string => (
   openApiPath.replace(/\{([A-Za-z0-9_]+)\}/g, ":$1")
 );
+
+export const gameParamsSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["gameId"],
+  properties: {
+    gameId: schemaRef("GameId"),
+  },
+} as const;
 
 export const errorResponseSchemas = {
   400: schemaRef("ErrorResponse"),
@@ -59,33 +87,82 @@ export function headerValue(request: FastifyRequest, name: string): string | nul
   return null;
 }
 
-export function authenticateService(request: FastifyRequest, config: GameManageKitConfig): string {
+export function authenticateService(
+  request: FastifyRequest,
+  registry: GameRegistry,
+): ServiceIdentity {
   const serviceId = headerValue(request, "x-service-id")?.trim() ?? "";
   const secret = headerValue(request, "x-service-secret");
-  if (
-    !serviceId
-    || serviceId.length > 64
-    || !matchesAnySecret(secret, config.serviceSecrets)
-  ) {
+  const identity = serviceId.length <= 64
+    ? registry.authenticateService(serviceId, secret)
+    : null;
+  if (!identity) {
     throw new GameManageKitError(401, "SERVICE_AUTH_REQUIRED");
   }
-  return serviceId;
+  request.serviceIdentity = identity;
+  request.log = request.log.child({ serviceId: identity.serviceId });
+  return identity;
 }
 
-export function authenticateAdmin(request: FastifyRequest, config: GameManageKitConfig): string {
+export function authenticateAdmin(
+  request: FastifyRequest,
+  registry: GameRegistry,
+): AdminIdentity {
   const operatorId = headerValue(request, "x-operator-id")?.trim() ?? "";
   const secret = headerValue(request, "x-admin-secret");
-  if (
-    !operatorId
-    || operatorId.length > 64
-    || !matchesAnySecret(secret, config.adminSecrets)
-  ) {
+  const identity = operatorId.length <= 64
+    ? registry.authenticateAdmin(operatorId, secret)
+    : null;
+  if (!identity) {
     throw new GameManageKitError(401, "SERVICE_AUTH_REQUIRED");
   }
-  return operatorId;
+  request.adminIdentity = identity;
+  request.log = request.log.child({ operatorId: identity.operatorId });
+  return identity;
 }
 
-export function createHttpApp(config: GameManageKitConfig): FastifyInstance {
+export function resolveGameContext(
+  request: FastifyRequest,
+  registry: GameRegistry,
+): GameContext {
+  const gameId = (request.params as { gameId?: unknown }).gameId;
+  if (typeof gameId !== "string") {
+    throw new GameManageKitError(404, "GAME_NOT_FOUND");
+  }
+  const knownGame = registry.get(gameId);
+  if (knownGame) {
+    request.gameContext = knownGame;
+    request.log = request.log.child({ gameId: knownGame.gameId });
+  }
+  return registry.resolve(gameId);
+}
+
+export function authorizeServiceGame(
+  request: FastifyRequest,
+  registry: GameRegistry,
+): void {
+  const game = resolveGameContext(request, registry);
+  const identity = authenticateService(request, registry);
+  if (!registry.canAccess(identity, game.gameId)) {
+    throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
+  }
+}
+
+export function authorizeAdminGame(
+  request: FastifyRequest,
+  registry: GameRegistry,
+): void {
+  const game = resolveGameContext(request, registry);
+  const identity = authenticateAdmin(request, registry);
+  if (!registry.canAccess(identity, game.gameId)) {
+    throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
+  }
+}
+
+export function createHttpApp(
+  config: GameManageKitConfig,
+  logStream?: LogStream,
+): FastifyInstance {
   const logger = config.logEnabled
     ? {
         redact: {
@@ -96,9 +173,15 @@ export function createHttpApp(config: GameManageKitConfig): FastifyInstance {
             "request.headers.authorization",
             "request.headers.x-service-secret",
             "request.headers.x-admin-secret",
+            "req.body.accessToken",
+            "request.body.accessToken",
+            "accessToken",
+            "token",
+            "secret",
           ],
           censor: "[REDACTED]",
         },
+        ...(logStream ? { stream: logStream } : {}),
       }
     : false;
   const app = Fastify({
@@ -106,11 +189,15 @@ export function createHttpApp(config: GameManageKitConfig): FastifyInstance {
     bodyLimit: config.bodyLimitBytes,
     requestTimeout: config.requestTimeoutMs,
     connectionTimeout: config.requestTimeoutMs,
+    logController: new LogController({ disableRequestLogging: true }),
     // closeWithDeadline tracks in-flight requests, then closes keep-alive
     // sockets after the active set reaches zero.
     forceCloseConnections: false,
     trustProxy: config.trustedProxyCidrs.length > 0 ? [...config.trustedProxyCidrs] : false,
   });
+  app.decorateRequest("gameContext", null);
+  app.decorateRequest("serviceIdentity", null);
+  app.decorateRequest("adminIdentity", null);
   const routes: RegisteredHttpRoute[] = [];
   const drainState: RequestDrainState = {
     active: new Set(),
@@ -129,10 +216,18 @@ export function createHttpApp(config: GameManageKitConfig): FastifyInstance {
   app.addHook("onRequest", async (request) => {
     drainState.active.add(request);
   });
-  app.addHook("onResponse", async (request) => {
+  app.addHook("onResponse", async (request, reply) => {
+    request.log.info(
+      {
+        statusCode: reply.statusCode,
+        responseTimeMs: reply.elapsedTime,
+      },
+      "[gameManageKit] request completed",
+    );
     finishRequest(drainState, request);
   });
   app.addHook("onRequestAbort", async (request) => {
+    request.log.warn("[gameManageKit] request aborted");
     finishRequest(drainState, request);
   });
 
@@ -163,7 +258,7 @@ export function createHttpApp(config: GameManageKitConfig): FastifyInstance {
         requestId: request.id,
       });
     }
-    request.log.error({ err: error }, "[gameManageKit] 未映射异常");
+    request.log.error(safeErrorDetails(error), "[gameManageKit] 未映射异常");
     return reply.code(500).send({
       code: "INTERNAL",
       requestId: request.id,

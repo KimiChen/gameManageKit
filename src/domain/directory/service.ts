@@ -6,6 +6,7 @@ import type {
 } from "@gono/game-manage-kit-contract";
 import type { SessionService } from "../session/service.js";
 import type { CharacterService } from "../character/service.js";
+import type { GameContext } from "../game/registry.js";
 
 export interface AreaDirectory {
   readonly isOps: boolean;
@@ -15,6 +16,8 @@ export interface AreaDirectory {
 
 export interface DirectoryProvider {
   listAreas(): Promise<AreaDirectory>;
+  findServer(serverId: number): Promise<AreaServer | undefined>;
+  isServerUsable(serverId: number): Promise<boolean>;
 }
 
 const TAGS = new Set(["normal", "new", "full", "maintenance"]);
@@ -28,14 +31,20 @@ function assertUrl(raw: unknown, expected: "http" | "ws", production: boolean): 
   try {
     value = new URL(raw);
   } catch {
-    throw new Error(`目录含非法 URL: ${raw}`);
+    throw new Error("目录含非法 URL");
+  }
+  if (value.username || value.password || value.hash) {
+    throw new Error("目录 URL 不允许包含凭证或 fragment");
   }
   const secureProtocol = expected === "http" ? "https:" : "wss:";
   const developmentProtocol = expected === "http" ? "http:" : "ws:";
   if (value.protocol === secureProtocol) {
     return raw;
   }
-  const local = value.hostname === "localhost" || value.hostname === "127.0.0.1" || value.hostname === "::1";
+  const local = value.hostname === "localhost"
+    || value.hostname === "127.0.0.1"
+    || value.hostname === "::1"
+    || value.hostname === "[::1]";
   if (!production && local && value.protocol === developmentProtocol) {
     return raw;
   }
@@ -101,7 +110,11 @@ export function validateAreaDirectory(value: unknown, production: boolean): Area
 }
 
 export class FileDirectoryProvider implements DirectoryProvider {
-  private constructor(private readonly directory: AreaDirectory) {}
+  private readonly serversById: ReadonlyMap<number, AreaServer>;
+
+  private constructor(private readonly directory: AreaDirectory) {
+    this.serversById = new Map(directory.servers.map((server) => [server.serverId, server]));
+  }
 
   static async load(path: string, production: boolean): Promise<FileDirectoryProvider> {
     const raw = await readFile(path, "utf8");
@@ -111,22 +124,37 @@ export class FileDirectoryProvider implements DirectoryProvider {
   async listAreas(): Promise<AreaDirectory> {
     return this.directory;
   }
+
+  async findServer(serverId: number): Promise<AreaServer | undefined> {
+    const server = this.serversById.get(serverId);
+    return server ? { ...server } : undefined;
+  }
+
+  async isServerUsable(serverId: number): Promise<boolean> {
+    const server = this.serversById.get(serverId);
+    return server !== undefined && server.status !== "maintenance";
+  }
 }
 
 export class DirectoryService {
   constructor(
-    private readonly provider: DirectoryProvider,
     private readonly sessions: Pick<SessionService, "verifyAnyZone">,
     private readonly characters: Pick<CharacterService, "zones">,
   ) {}
 
-  async list(accessToken: string | null): Promise<AreaListResponse> {
-    const directory = await this.provider.listAreas();
+  async list(game: GameContext, accessToken: string | null): Promise<AreaListResponse> {
+    const directory = await game.directory.listAreas();
     let myServerIds: number[] = [];
     if (accessToken) {
-      const userId = await this.sessions.verifyAnyZone(accessToken);
+      const userId = await this.sessions.verifyAnyZone(
+        game.gameId,
+        game.sessionTtlSeconds,
+        accessToken,
+      );
       if (userId) {
-        myServerIds = await this.characters.zones(userId);
+        const directoryServerIds = new Set(directory.servers.map((server) => server.serverId));
+        myServerIds = (await this.characters.zones(game.gameId, userId))
+          .filter((serverId) => directoryServerIds.has(serverId));
       }
     }
     return {

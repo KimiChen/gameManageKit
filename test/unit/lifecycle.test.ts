@@ -9,8 +9,6 @@ test("SIGTERM 使用的 drain 会等待在途请求后再关闭数据库", async
   const app = createHttpApp(loadConfig({
     NODE_ENV: "development",
     GAME_MANAGE_KIT_MYSQL_URL: "mysql://root@127.0.0.1:3316/game_manage_kit_lifecycle_test",
-    GAME_MANAGE_KIT_SERVICE_SECRET: "service",
-    GAME_MANAGE_KIT_ADMIN_SECRET: "admin",
     GAME_MANAGE_KIT_LOG_ENABLED: "0",
   }));
   let releaseRequest: (() => void) | undefined;

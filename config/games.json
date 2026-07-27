@@ -1,0 +1,80 @@
+{
+  "games": [
+    {
+      "gameId": "game-a",
+      "status": "enabled",
+      "directoryPath": "areas.game-a.json",
+      "sessionTtlSeconds": 259200,
+      "wechat": {
+        "appIdEnv": "GAME_A_WX_APPID",
+        "secretEnv": "GAME_A_WX_SECRET",
+        "endpoint": "https://api.weixin.qq.com/sns/jscode2session",
+        "timeoutMs": 3000,
+        "breakerThreshold": 5,
+        "breakerOpenMs": 10000
+      },
+      "loginRate": {
+        "capacity": 5,
+        "refillPerSecond": 0.2
+      },
+      "adminRate": {
+        "capacity": 10,
+        "refillPerSecond": 1
+      }
+    },
+    {
+      "gameId": "game-b",
+      "status": "enabled",
+      "directoryPath": "areas.game-b.json",
+      "sessionTtlSeconds": 259200,
+      "wechat": {
+        "appIdEnv": "GAME_B_WX_APPID",
+        "secretEnv": "GAME_B_WX_SECRET",
+        "endpoint": "https://api.weixin.qq.com/sns/jscode2session",
+        "timeoutMs": 3000,
+        "breakerThreshold": 5,
+        "breakerOpenMs": 10000
+      },
+      "loginRate": {
+        "capacity": 5,
+        "refillPerSecond": 0.2
+      },
+      "adminRate": {
+        "capacity": 10,
+        "refillPerSecond": 1
+      }
+    }
+  ],
+  "serviceIdentities": [
+    {
+      "serviceId": "game-a-service",
+      "secretEnv": "GAME_A_SERVICE_SECRET",
+      "gameIds": [
+        "game-a"
+      ]
+    },
+    {
+      "serviceId": "game-b-service",
+      "secretEnv": "GAME_B_SERVICE_SECRET",
+      "gameIds": [
+        "game-b"
+      ]
+    }
+  ],
+  "adminIdentities": [
+    {
+      "operatorId": "game-a-admin",
+      "secretEnv": "GAME_A_ADMIN_SECRET",
+      "gameIds": [
+        "game-a"
+      ]
+    },
+    {
+      "operatorId": "game-b-admin",
+      "secretEnv": "GAME_B_ADMIN_SECRET",
+      "gameIds": [
+        "game-b"
+      ]
+    }
+  ]
+}

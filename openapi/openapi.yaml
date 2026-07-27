@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: gameManageKit API
   version: 1.0.0
-  description: 单游戏、HTTP-only、MySQL-only 的账号门户服务。
+  description: 多游戏、HTTP-only、MySQL-only 的账号门户服务。
 servers:
   - url: https://portal.example.com
     description: Public
@@ -14,7 +14,9 @@ tags:
   - name: Admin
   - name: System
 paths:
-  /v1/sessions/wechat:
+  /v1/games/{gameId}/sessions/wechat:
+    parameters:
+      - $ref: '#/components/parameters/GameId'
     post:
       operationId: wxLogin
       tags: [Public]
@@ -37,15 +39,20 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
           $ref: '#/components/responses/Internal'
         '503':
           $ref: '#/components/responses/Unavailable'
-  /v1/sessions/dev:
+  /v1/games/{gameId}/sessions/dev:
+    parameters:
+      - $ref: '#/components/parameters/GameId'
     post:
       operationId: devLogin
+      description: 仅 AUTH_DEV_ENABLED=1 时可用；生产环境固定返回 404。
       tags: [Public]
       requestBody:
         required: true
@@ -70,7 +77,11 @@ paths:
           $ref: '#/components/responses/RateLimited'
         '500':
           $ref: '#/components/responses/Internal'
-  /v1/areas:
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/games/{gameId}/areas:
+    parameters:
+      - $ref: '#/components/parameters/GameId'
     get:
       operationId: listAreas
       tags: [Public]
@@ -84,9 +95,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AreaListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/Internal'
-  /v1/internal/sessions/verify:
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/games/{gameId}/internal/sessions/verify:
+    parameters:
+      - $ref: '#/components/parameters/GameId'
     post:
       operationId: verifySession
       tags: [Internal]
@@ -110,10 +131,17 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/ServiceUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/Internal'
-  /v1/internal/characters/{userId}/{serverId}:
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/games/{gameId}/internal/characters/{userId}/{serverId}:
     parameters:
+      - $ref: '#/components/parameters/GameId'
       - $ref: '#/components/parameters/UserId'
       - $ref: '#/components/parameters/ServerId'
     put:
@@ -133,8 +161,14 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/ServiceUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
     get:
       operationId: hasCharacter
       tags: [Internal]
@@ -152,10 +186,17 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/ServiceUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/Internal'
-  /v1/admin/accounts/{userId}/ban:
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/games/{gameId}/admin/accounts/{userId}/ban:
     parameters:
+      - $ref: '#/components/parameters/GameId'
       - $ref: '#/components/parameters/UserId'
     post:
       operationId: banAccount
@@ -180,14 +221,21 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/ServiceUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
           $ref: '#/components/responses/Internal'
-  /v1/admin/accounts/{userId}/revoke:
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/games/{gameId}/admin/accounts/{userId}/revoke:
     parameters:
+      - $ref: '#/components/parameters/GameId'
       - $ref: '#/components/parameters/UserId'
     post:
       operationId: revokeAccount
@@ -203,7 +251,7 @@ paths:
               $ref: '#/components/schemas/AdminAccountRequest'
       responses:
         '200':
-          description: 撤销结果
+          description: 撤销该游戏账号的全部现有会话；账号保留且允许重新登录
           content:
             application/json:
               schema:
@@ -212,10 +260,36 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/ServiceUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /metrics:
+    get:
+      operationId: metrics
+      tags: [Internal]
+      security:
+        - ServiceId: []
+          ServiceSecret: []
+      responses:
+        '200':
+          description: Prometheus 文本格式指标
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/ServiceUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/Internal'
   /livez:
@@ -279,6 +353,12 @@ components:
       in: header
       name: x-operator-id
   parameters:
+    GameId:
+      name: gameId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/GameId'
     UserId:
       name: userId
       in: path
@@ -316,13 +396,13 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
     Forbidden:
-      description: 禁止访问
+      description: 禁止访问；可能为账号封禁、游戏停用、调用方无游戏权限或区服停用
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
     NotFound:
-      description: 不存在
+      description: 资源、游戏或区服不存在
       content:
         application/json:
           schema:
@@ -346,19 +426,45 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
     Unavailable:
-      description: 上游不可用
+      description: 微信上游不可用，或游戏处于维护状态
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
   schemas:
+    GameId:
+      type: string
+      minLength: 2
+      maxLength: 32
+      pattern: '^[a-z][a-z0-9-]{1,31}$'
+    GameStatus:
+      type: string
+      enum: [enabled, maintenance, disabled]
+    ErrorCode:
+      type: string
+      enum:
+        - INVALID_PAYLOAD
+        - AUTH_REQUIRED
+        - ACCOUNT_BANNED
+        - NOT_FOUND
+        - RATE_LIMITED
+        - UPSTREAM_UNAVAILABLE
+        - SERVICE_AUTH_REQUIRED
+        - SERVICE_FORBIDDEN
+        - OPERATION_CONFLICT
+        - INTERNAL
+        - GAME_NOT_FOUND
+        - GAME_DISABLED
+        - GAME_ACCESS_DENIED
+        - SERVER_NOT_FOUND
+        - SERVER_DISABLED
     ErrorResponse:
       type: object
       additionalProperties: false
       required: [code, requestId]
       properties:
         code:
-          type: string
+          $ref: '#/components/schemas/ErrorCode'
         requestId:
           type: string
     WxLoginRequest:

@@ -11,11 +11,24 @@ import { GameManageKitError } from "../../errors.js";
 import { normalizeIp } from "../../infra/security/security.js";
 import type { LoginResult, LoginService } from "../../domain/account/login.js";
 import type { DirectoryService } from "../../domain/directory/service.js";
-import { errorResponseSchemas, headerValue, schemaRef } from "../common.js";
+import type { GameRegistry } from "../../domain/game/registry.js";
+import {
+  errorResponseSchemas,
+  fastifyPath,
+  gameParamsSchema,
+  headerValue,
+  resolveGameContext,
+  schemaRef,
+} from "../common.js";
 
 export interface PublicRouteServices {
+  readonly games: GameRegistry;
   readonly login: Pick<LoginService, "loginWechat" | "loginDev">;
   readonly directory: Pick<DirectoryService, "list">;
+}
+
+interface GameParams {
+  gameId: string;
 }
 
 function loginResponse(result: LoginResult): LoginResponse {
@@ -48,10 +61,16 @@ export function registerPublicRoutes(
   config: GameManageKitConfig,
   services: PublicRouteServices,
 ): void {
-  app.post<{ Body: WxLoginRequest }>(
-    GameManageKitPath.WxLogin,
+  const preHandler = async (request: Parameters<typeof resolveGameContext>[0]): Promise<void> => {
+    resolveGameContext(request, services.games);
+  };
+
+  app.post<{ Params: GameParams; Body: WxLoginRequest }>(
+    fastifyPath(GameManageKitPath.WxLogin),
     {
+      preHandler,
       schema: {
+        params: gameParamsSchema,
         body: schemaRef("WxLoginRequest"),
         response: {
           200: schemaRef("LoginResponse"),
@@ -60,8 +79,10 @@ export function registerPublicRoutes(
       },
     },
     async (request): Promise<LoginResponse> => {
+      const game = request.gameContext!;
+      await services.games.requireServer(game, request.body.serverId);
       const ip = normalizeIp(request.ip);
-      return loginResponse(await services.login.loginWechat(request.body.code, {
+      return loginResponse(await services.login.loginWechat(game, request.body.code, {
         rateKey: ip ?? request.ip,
         ip,
         deviceId: request.body.deviceId ?? null,
@@ -70,34 +91,43 @@ export function registerPublicRoutes(
     },
   );
 
-  if (config.authDevEnabled) {
-    app.post<{ Body: DevLoginRequest }>(
-      GameManageKitPath.DevLogin,
-      {
-        schema: {
-          body: schemaRef("DevLoginRequest"),
-          response: {
-            200: schemaRef("LoginResponse"),
-            ...errorResponseSchemas,
-          },
+  app.post<{ Params: GameParams; Body: DevLoginRequest }>(
+    fastifyPath(GameManageKitPath.DevLogin),
+    {
+      onRequest: async () => {
+        if (!config.authDevEnabled) {
+          throw new GameManageKitError(404, "NOT_FOUND");
+        }
+      },
+      preHandler,
+      schema: {
+        params: gameParamsSchema,
+        body: schemaRef("DevLoginRequest"),
+        response: {
+          200: schemaRef("LoginResponse"),
+          ...errorResponseSchemas,
         },
       },
-      async (request): Promise<LoginResponse> => {
-        const ip = normalizeIp(request.ip);
-        return loginResponse(await services.login.loginDev(request.body.devKey, {
-          rateKey: ip ?? request.ip,
-          ip,
-          deviceId: request.body.deviceId ?? null,
-          serverId: request.body.serverId,
-        }));
-      },
-    );
-  }
+    },
+    async (request): Promise<LoginResponse> => {
+      const game = request.gameContext!;
+      await services.games.requireServer(game, request.body.serverId);
+      const ip = normalizeIp(request.ip);
+      return loginResponse(await services.login.loginDev(game, request.body.devKey, {
+        rateKey: ip ?? request.ip,
+        ip,
+        deviceId: request.body.deviceId ?? null,
+        serverId: request.body.serverId,
+      }));
+    },
+  );
 
-  app.get(
-    GameManageKitPath.ListAreas,
+  app.get<{ Params: GameParams }>(
+    fastifyPath(GameManageKitPath.ListAreas),
     {
+      preHandler,
       schema: {
+        params: gameParamsSchema,
         response: {
           200: schemaRef("AreaListResponse"),
           ...errorResponseSchemas,
@@ -106,7 +136,7 @@ export function registerPublicRoutes(
     },
     async (request): Promise<AreaListResponse> => {
       const token = bearerToken(headerValue(request, "authorization"));
-      return services.directory.list(token);
+      return services.directory.list(request.gameContext!, token);
     },
   );
 }

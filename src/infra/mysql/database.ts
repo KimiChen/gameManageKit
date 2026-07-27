@@ -38,11 +38,24 @@ export class Database {
     }
   }
 
-  async ready(expectedSchemaVersion: number): Promise<boolean> {
+  async ready(
+    expectedSchemaVersion: number,
+    expectedGameIds: readonly string[] = [],
+  ): Promise<boolean> {
     const [rows] = await this.pool.query<RowDataPacket[]>(
       "SELECT MAX(version) AS version FROM schema_migrations",
     );
-    return Number(rows[0]?.version ?? 0) >= expectedSchemaVersion;
+    if (Number(rows[0]?.version ?? 0) !== expectedSchemaVersion) {
+      return false;
+    }
+    if (expectedGameIds.length === 0) {
+      return true;
+    }
+    const [games] = await this.pool.query<RowDataPacket[]>(
+      "SELECT game_id FROM games WHERE game_id IN (?)",
+      [[...expectedGameIds]],
+    );
+    return new Set(games.map((row) => String(row.game_id))).size === expectedGameIds.length;
   }
 
   async close(): Promise<void> {

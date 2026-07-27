@@ -4,35 +4,39 @@ import {
   type AdminAccountRequest,
   type AdminAccountResponse,
 } from "@gono/game-manage-kit-contract";
-import type { GameManageKitConfig } from "../../config.js";
 import type {
   AdminAccountService,
   AdminAction,
 } from "../../domain/account/admin.js";
+import type { GameRegistry } from "../../domain/game/registry.js";
 import { GameManageKitError } from "../../errors.js";
-import type { TokenBucketLimiter } from "../../infra/security/security.js";
+import type { MetricsRegistry } from "../../infra/observability/metrics.js";
 import { normalizeIp } from "../../infra/security/security.js";
 import {
-  authenticateAdmin,
+  authorizeAdminGame,
   errorResponseSchemas,
   fastifyPath,
+  gameParamsSchema,
   schemaRef,
 } from "../common.js";
 
 export interface AdminRouteServices {
+  readonly games: GameRegistry;
   readonly admin: Pick<AdminAccountService, "execute">;
-  readonly adminLimiter: Pick<TokenBucketLimiter, "allow">;
+  readonly metrics: MetricsRegistry;
 }
 
 interface AccountParams {
+  gameId: string;
   userId: string;
 }
 
 const accountParamsSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["userId"],
+  required: ["gameId", "userId"],
   properties: {
+    gameId: gameParamsSchema.properties.gameId,
     userId: {
       type: "string",
       minLength: 1,
@@ -44,7 +48,6 @@ const accountParamsSchema = {
 
 function registerAction(
   app: FastifyInstance,
-  config: GameManageKitConfig,
   services: AdminRouteServices,
   action: AdminAction,
   path: string,
@@ -53,7 +56,7 @@ function registerAction(
     fastifyPath(path),
     {
       preHandler: async (request) => {
-        authenticateAdmin(request, config);
+        authorizeAdminGame(request, services.games);
       },
       schema: {
         params: accountParamsSchema,
@@ -65,12 +68,15 @@ function registerAction(
       },
     },
     async (request): Promise<AdminAccountResponse> => {
-      const operatorId = authenticateAdmin(request, config);
+      const game = request.gameContext!;
+      const operatorId = request.adminIdentity!.operatorId;
       const ip = normalizeIp(request.ip);
-      if (!services.adminLimiter.allow(`${operatorId}:${ip ?? request.ip}`)) {
+      if (!game.adminLimiter.allow(`${game.gameId}:${operatorId}:${ip ?? request.ip}`)) {
+        services.metrics.recordRateLimit(game.gameId, "admin");
         throw new GameManageKitError(429, "RATE_LIMITED");
       }
       return services.admin.execute({
+        gameId: game.gameId,
         action,
         userId: request.params.userId,
         operationId: request.body.operationId,
@@ -85,9 +91,8 @@ function registerAction(
 
 export function registerAdminRoutes(
   app: FastifyInstance,
-  config: GameManageKitConfig,
   services: AdminRouteServices,
 ): void {
-  registerAction(app, config, services, "ban", GameManageKitPath.BanAccount);
-  registerAction(app, config, services, "revoke", GameManageKitPath.RevokeAccount);
+  registerAction(app, services, "ban", GameManageKitPath.BanAccount);
+  registerAction(app, services, "revoke", GameManageKitPath.RevokeAccount);
 }

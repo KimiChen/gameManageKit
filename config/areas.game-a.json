@@ -1,0 +1,32 @@
+{
+  "isOps": false,
+  "servers": [
+    {
+      "serverId": 1,
+      "name": "A 一区",
+      "tag": "new",
+      "status": "smooth",
+      "openTime": 1700000000,
+      "gameHttpUrl": "https://game-a.example.invalid",
+      "gameWsUrl": "wss://game-a.example.invalid"
+    },
+    {
+      "serverId": 2,
+      "name": "A 二区",
+      "tag": "normal",
+      "status": "busy",
+      "openTime": 1705000000,
+      "gameHttpUrl": "https://game-a.example.invalid",
+      "gameWsUrl": "wss://game-a.example.invalid"
+    },
+    {
+      "serverId": 9,
+      "name": "A 维护服",
+      "tag": "maintenance",
+      "status": "maintenance",
+      "openTime": 1710000000,
+      "gameHttpUrl": "https://game-a.example.invalid",
+      "gameWsUrl": "wss://game-a.example.invalid"
+    }
+  ]
+}

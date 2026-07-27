@@ -3,6 +3,35 @@ import { isIP } from "node:net";
 
 const digest = (value: string): Buffer => createHash("sha256").update(value).digest();
 
+export interface SafeErrorDetails {
+  readonly errorName: string;
+  readonly errorCode?: string;
+  readonly errorNumber?: number;
+}
+
+export function safeErrorDetails(error: unknown): SafeErrorDetails {
+  const candidate = typeof error === "object" && error !== null
+    ? error as { name?: unknown; code?: unknown; errno?: unknown }
+    : {};
+  const rawName = typeof candidate.name === "string" ? candidate.name : typeof error;
+  const errorName = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(rawName)
+    ? rawName
+    : "UnknownError";
+  const errorCode = typeof candidate.code === "string"
+    && /^[A-Z][A-Z0-9_]{0,63}$/.test(candidate.code)
+    ? candidate.code
+    : undefined;
+  const rawNumber = Number(candidate.errno);
+  const errorNumber = Number.isSafeInteger(rawNumber)
+    ? rawNumber
+    : undefined;
+  return {
+    errorName,
+    ...(errorCode ? { errorCode } : {}),
+    ...(errorNumber !== undefined ? { errorNumber } : {}),
+  };
+}
+
 export function safeSecretEqual(actual: string | null | undefined, expected: string | null | undefined): boolean {
   return Boolean(actual && expected) && timingSafeEqual(digest(actual ?? ""), digest(expected ?? ""));
 }
@@ -45,15 +74,22 @@ export class TokenBucketLimiter {
     private readonly capacity: number,
     private readonly refillPerSecond: number,
     private readonly now: () => number = Date.now,
+    private readonly maximumBuckets = 10_000,
   ) {}
 
   allow(key: string): boolean {
     const nowMs = this.now();
-    if (this.buckets.size >= 10_000 && nowMs - this.lastSweepMs >= 1_000) {
-      this.sweep(nowMs);
-    }
     let bucket = this.buckets.get(key);
     if (!bucket) {
+      if (
+        this.buckets.size >= this.maximumBuckets
+        && nowMs - this.lastSweepMs >= 1_000
+      ) {
+        this.sweep(nowMs);
+      }
+      if (this.buckets.size >= this.maximumBuckets) {
+        return false;
+      }
       bucket = { tokens: this.capacity, lastMs: nowMs };
       this.buckets.set(key, bucket);
     }

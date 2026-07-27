@@ -1,12 +1,35 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import test, { type TestContext } from "node:test";
 import type { AreaListResponse, LoginResponse } from "@gono/game-manage-kit-contract";
 import { buildApps, type GameManageKitServices } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
+import { GameRegistry } from "../../src/domain/game/registry.js";
+import {
+  authorizeAdminGame,
+  authorizeServiceGame,
+  createHttpApp,
+  listRegisteredRoutes,
+  resolveGameContext,
+} from "../../src/http/common.js";
+import { MetricsRegistry } from "../../src/infra/observability/metrics.js";
+
+const TENANT_ENV = {
+  GAME_A_WX_APPID: "game-a-app",
+  GAME_A_WX_SECRET: "game-a-wx-secret",
+  GAME_B_WX_APPID: "game-b-app",
+  GAME_B_WX_SECRET: "game-b-wx-secret",
+  GAME_A_SERVICE_SECRET: "game-a-service-secret",
+  GAME_B_SERVICE_SECRET: "game-b-service-secret",
+  GAME_A_ADMIN_SECRET: "game-a-admin-secret",
+  GAME_B_ADMIN_SECRET: "game-b-admin-secret",
+} as const;
 
 const LOGIN: LoginResponse = {
   userId: "u_1",
-  accessToken: "u_1.0123456789abcdef",
+  accessToken: "game-a.u_1.0123456789abcdef0123456789abcdef0123456789abcdef",
   isNewAccount: true,
 };
 
@@ -20,15 +43,58 @@ const AREAS: AreaListResponse = {
       tag: "normal",
       status: "smooth",
       openTime: 1_700_000_000,
-      gameHttpUrl: "http://127.0.0.1:2568",
-      gameWsUrl: "ws://127.0.0.1:2568",
+      gameHttpUrl: "https://game-a.example.invalid",
+      gameWsUrl: "wss://game-a.example.invalid",
     },
   ],
   myServerIds: [],
 };
 
-function services(): GameManageKitServices {
+function config(nodeEnv: "development" | "production" = "development") {
+  return loadConfig({
+    NODE_ENV: nodeEnv,
+    GAME_MANAGE_KIT_MYSQL_URL: "mysql://root@127.0.0.1:3306/game_manage_kit_test",
+    AUTH_DEV_ENABLED: nodeEnv === "development" ? "1" : "0",
+    GAME_MANAGE_KIT_LOG_ENABLED: "0",
+  });
+}
+
+async function gameRegistry(production = false): Promise<GameRegistry> {
+  return GameRegistry.load("config/games.json", {
+    production,
+    env: TENANT_ENV,
+  });
+}
+
+async function registryWithStatuses(t: TestContext): Promise<GameRegistry> {
+  const document = JSON.parse(await readFile("config/games.json", "utf8")) as {
+    games: Array<{ status: string; directoryPath: string }>;
+  };
+  document.games[0]!.status = "maintenance";
+  document.games[1]!.status = "disabled";
+  for (const game of document.games) {
+    game.directoryPath = resolve("config", game.directoryPath);
+  }
+  const directory = await mkdtemp(join(tmpdir(), "game-http-status-"));
+  t.after(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+  const path = join(directory, "games.json");
+  await writeFile(path, JSON.stringify(document), "utf8");
+  return GameRegistry.load(path, {
+    production: true,
+    env: TENANT_ENV,
+  });
+}
+
+function services(
+  games: GameRegistry,
+  overrides: Partial<GameManageKitServices> = {},
+): GameManageKitServices {
+  const metrics = new MetricsRegistry(games.list().map((game) => game.gameId));
   return {
+    games,
+    metrics,
     login: {
       async loginWechat() {
         return { ok: true, response: LOGIN };
@@ -61,94 +127,124 @@ function services(): GameManageKitServices {
         };
       },
     },
-    adminLimiter: {
-      allow() {
-        return true;
-      },
-    },
     readiness: {
       async ready() {
         return true;
       },
     },
+    ...overrides,
   };
 }
 
-test("public/internal 双监听只暴露各自业务路由", async (t) => {
-  const config = loadConfig({
-    NODE_ENV: "development",
-    GAME_MANAGE_KIT_MYSQL_URL: "mysql://root@127.0.0.1:3316/game_manage_kit_test",
-    GAME_MANAGE_KIT_SERVICE_SECRET: "service-current",
-    GAME_MANAGE_KIT_SERVICE_SECRET_PREVIOUS: "service-previous",
-    GAME_MANAGE_KIT_ADMIN_SECRET: "admin-current",
-    AUTH_DEV_ENABLED: "1",
-    GAME_MANAGE_KIT_LOG_ENABLED: "0",
-  });
-  const apps = buildApps(config, services());
+test("public/internal 双监听只暴露各自多游戏业务路由", async (t) => {
+  const games = await gameRegistry();
+  const apps = buildApps(config(), services(games));
   t.after(async () => {
     await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);
   });
 
   const publicLogin = await apps.publicApp.inject({
     method: "POST",
-    url: "/v1/sessions/dev",
+    url: "/v1/games/game-a/sessions/dev",
     payload: { devKey: "route-test", serverId: 1 },
   });
   assert.equal(publicLogin.statusCode, 200);
   assert.deepEqual(publicLogin.json(), LOGIN);
 
+  for (const oldPath of [
+    "/v1/sessions/dev",
+    "/v1/areas",
+    "/v1/internal/sessions/verify",
+    "/v1/admin/accounts/u_1/ban",
+  ]) {
+    const response = await apps.publicApp.inject({ method: "GET", url: oldPath });
+    assert.equal(response.statusCode, 404, oldPath);
+  }
+
   const hiddenInternal = await apps.publicApp.inject({
     method: "POST",
-    url: "/v1/internal/sessions/verify",
+    url: "/v1/games/game-a/internal/sessions/verify",
     payload: { accessToken: LOGIN.accessToken, serverId: 1 },
   });
   assert.equal(hiddenInternal.statusCode, 404);
 
   const hiddenAdmin = await apps.publicApp.inject({
     method: "POST",
-    url: "/v1/admin/accounts/u_1/ban",
+    url: "/v1/games/game-a/admin/accounts/u_1/ban",
     payload: { operationId: "op-1", reason: "test" },
   });
   assert.equal(hiddenAdmin.statusCode, 404);
 
   const hiddenPublic = await apps.internalApp.inject({
     method: "POST",
-    url: "/v1/sessions/dev",
+    url: "/v1/games/game-a/sessions/dev",
     payload: { devKey: "route-test", serverId: 1 },
   });
   assert.equal(hiddenPublic.statusCode, 404);
 
   const unauthenticated = await apps.internalApp.inject({
     method: "POST",
-    url: "/v1/internal/sessions/verify",
+    url: "/v1/games/game-a/internal/sessions/verify",
     payload: { accessToken: LOGIN.accessToken, serverId: 1 },
   });
   assert.equal(unauthenticated.statusCode, 401);
   assert.equal(unauthenticated.json().code, "SERVICE_AUTH_REQUIRED");
 
+  const serviceHeaders = {
+    "x-service-id": "game-a-service",
+    "x-service-secret": TENANT_ENV.GAME_A_SERVICE_SECRET,
+  };
   const authenticated = await apps.internalApp.inject({
     method: "POST",
-    url: "/v1/internal/sessions/verify",
-    headers: {
-      "x-service-id": "game-server",
-      "x-service-secret": "service-previous",
-    },
+    url: "/v1/games/game-a/internal/sessions/verify",
+    headers: serviceHeaders,
     payload: { accessToken: LOGIN.accessToken, serverId: 1 },
   });
   assert.equal(authenticated.statusCode, 200);
   assert.equal(authenticated.json().valid, true);
 
+  const crossGameService = await apps.internalApp.inject({
+    method: "POST",
+    url: "/v1/games/game-b/internal/sessions/verify",
+    headers: serviceHeaders,
+    payload: { accessToken: LOGIN.accessToken, serverId: 1 },
+  });
+  assert.equal(crossGameService.statusCode, 403);
+  assert.equal(crossGameService.json().code, "GAME_ACCESS_DENIED");
+
   const admin = await apps.internalApp.inject({
     method: "POST",
-    url: "/v1/admin/accounts/u_1/revoke",
+    url: "/v1/games/game-a/admin/accounts/u_1/revoke",
     headers: {
-      "x-operator-id": "gm-test",
-      "x-admin-secret": "admin-current",
+      "x-operator-id": "game-a-admin",
+      "x-admin-secret": TENANT_ENV.GAME_A_ADMIN_SECRET,
     },
     payload: { operationId: "op-2", reason: "test" },
   });
   assert.equal(admin.statusCode, 200);
   assert.equal(admin.json().status, "revoked");
+
+  const crossGameAdmin = await apps.internalApp.inject({
+    method: "POST",
+    url: "/v1/games/game-b/admin/accounts/u_1/revoke",
+    headers: {
+      "x-operator-id": "game-a-admin",
+      "x-admin-secret": TENANT_ENV.GAME_A_ADMIN_SECRET,
+    },
+    payload: { operationId: "op-3", reason: "test" },
+  });
+  assert.equal(crossGameAdmin.statusCode, 403);
+  assert.equal(crossGameAdmin.json().code, "GAME_ACCESS_DENIED");
+
+  const publicMetrics = await apps.publicApp.inject({ method: "GET", url: "/metrics" });
+  assert.equal(publicMetrics.statusCode, 404);
+  const metrics = await apps.internalApp.inject({
+    method: "GET",
+    url: "/metrics",
+    headers: serviceHeaders,
+  });
+  assert.equal(metrics.statusCode, 200);
+  assert.match(metrics.headers["content-type"] ?? "", /^text\/plain/);
 
   for (const app of [apps.publicApp, apps.internalApp]) {
     const live = await app.inject({ method: "GET", url: "/livez" });
@@ -161,41 +257,114 @@ test("public/internal 双监听只暴露各自业务路由", async (t) => {
   }
 });
 
-test("生产环境不注册 dev-login 路由", async (t) => {
-  const config = loadConfig({
-    NODE_ENV: "production",
-    GAME_MANAGE_KIT_MYSQL_URL: "mysql://root@127.0.0.1:3316/game_manage_kit_test",
-    GAME_MANAGE_KIT_SERVICE_SECRET: "service-current",
-    GAME_MANAGE_KIT_ADMIN_SECRET: "admin-current",
-    WX_APPID: "production-app",
-    WX_SECRET: "production-secret",
-    GAME_MANAGE_KIT_LOG_ENABLED: "0",
-  });
-  const apps = buildApps(config, services());
+test("生产环境加载默认双游戏目录且 dev-login 固定返回 404", async (t) => {
+  const games = await gameRegistry(true);
+  const apps = buildApps(config("production"), services(games));
   t.after(async () => {
     await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);
   });
 
+  assert.deepEqual(games.list().map((game) => game.gameId), ["game-a", "game-b"]);
+  assert.equal(
+    listRegisteredRoutes(apps.publicApp).some((route) => (
+      route.method === "POST"
+      && route.path === "/v1/games/:gameId/sessions/dev"
+    )),
+    true,
+  );
   const response = await apps.publicApp.inject({
     method: "POST",
-    url: "/v1/sessions/dev",
+    url: "/v1/games/game-a/sessions/dev",
     payload: { devKey: "must-not-exist", serverId: 1 },
   });
   assert.equal(response.statusCode, 404);
   assert.equal(response.json().code, "NOT_FOUND");
+
+  for (const request of [
+    {
+      url: "/v1/games/INVALID/sessions/dev",
+      payload: {},
+    },
+    {
+      url: "/v1/games/missing-game/sessions/dev",
+      payload: { devKey: "must-not-exist", serverId: 1 },
+    },
+  ]) {
+    const hidden = await apps.publicApp.inject({
+      method: "POST",
+      ...request,
+    });
+    assert.equal(hidden.statusCode, 404);
+    assert.equal(hidden.json().code, "NOT_FOUND");
+  }
+});
+
+test("HTTP 映射非法、未知、维护和停用游戏状态", async (t) => {
+  const games = await registryWithStatuses(t);
+  const apps = buildApps(config(), services(games));
+  t.after(async () => {
+    await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);
+  });
+
+  const invalid = await apps.publicApp.inject({
+    method: "GET",
+    url: "/v1/games/INVALID/areas",
+  });
+  assert.equal(invalid.statusCode, 400);
+  assert.equal(invalid.json().code, "INVALID_PAYLOAD");
+
+  const unknown = await apps.publicApp.inject({
+    method: "GET",
+    url: "/v1/games/missing-game/areas",
+  });
+  assert.equal(unknown.statusCode, 404);
+  assert.equal(unknown.json().code, "GAME_NOT_FOUND");
+
+  const maintenance = await apps.publicApp.inject({
+    method: "GET",
+    url: "/v1/games/game-a/areas",
+  });
+  assert.equal(maintenance.statusCode, 503);
+  assert.equal(maintenance.json().code, "GAME_DISABLED");
+
+  const disabled = await apps.publicApp.inject({
+    method: "GET",
+    url: "/v1/games/game-b/areas",
+  });
+  assert.equal(disabled.statusCode, 403);
+  assert.equal(disabled.json().code, "GAME_DISABLED");
+});
+
+test("/readyz 将未就绪和检查异常都映射为 503", async (t) => {
+  const games = await gameRegistry();
+  let shouldThrow = false;
+  const apps = buildApps(config(), services(games, {
+    readiness: {
+      async ready() {
+        if (shouldThrow) {
+          throw new Error("database unavailable");
+        }
+        return false;
+      },
+    },
+  }));
+  t.after(async () => {
+    await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);
+  });
+
+  const notReady = await apps.publicApp.inject({ method: "GET", url: "/readyz" });
+  assert.equal(notReady.statusCode, 503);
+  assert.deepEqual(notReady.json(), { ready: false });
+
+  shouldThrow = true;
+  const failed = await apps.publicApp.inject({ method: "GET", url: "/readyz" });
+  assert.equal(failed.statusCode, 503);
+  assert.deepEqual(failed.json(), { ready: false });
 });
 
 test("未映射异常只返回统一错误，不泄漏内部文本", async (t) => {
-  const config = loadConfig({
-    NODE_ENV: "development",
-    GAME_MANAGE_KIT_MYSQL_URL: "mysql://root:database-password@127.0.0.1:3316/game_manage_kit_test",
-    GAME_MANAGE_KIT_SERVICE_SECRET: "service-current",
-    GAME_MANAGE_KIT_ADMIN_SECRET: "admin-current",
-    AUTH_DEV_ENABLED: "1",
-    GAME_MANAGE_KIT_LOG_ENABLED: "0",
-  });
-  const failingServices: GameManageKitServices = {
-    ...services(),
+  const games = await gameRegistry();
+  const failingServices = services(games, {
     directory: {
       async list() {
         throw new Error(
@@ -203,65 +372,161 @@ test("未映射异常只返回统一错误，不泄漏内部文本", async (t) =
         );
       },
     },
-  };
-  const apps = buildApps(config, failingServices);
+  });
+  const apps = buildApps(config(), failingServices);
   t.after(async () => {
     await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);
   });
 
-  const response = await apps.publicApp.inject({ method: "GET", url: "/v1/areas" });
+  const response = await apps.publicApp.inject({
+    method: "GET",
+    url: "/v1/games/game-a/areas",
+  });
   assert.equal(response.statusCode, 500);
   assert.equal(response.json().code, "INTERNAL");
   assert.equal(response.body.includes("database-password"), false);
   assert.equal(response.body.includes("secret-token"), false);
 });
 
-test("Admin 使用独立令牌桶，限流时不执行领域写入", async (t) => {
-  const config = loadConfig({
-    NODE_ENV: "development",
-    GAME_MANAGE_KIT_MYSQL_URL: "mysql://root@127.0.0.1:3316/game_manage_kit_test",
-    GAME_MANAGE_KIT_SERVICE_SECRET: "service-current",
-    GAME_MANAGE_KIT_ADMIN_SECRET: "admin-current",
-    AUTH_DEV_ENABLED: "1",
-    GAME_MANAGE_KIT_LOG_ENABLED: "0",
-  });
-  let executed = false;
-  const limitedServices: GameManageKitServices = {
-    ...services(),
+test("Admin 按游戏使用独立令牌桶且不影响 Public 登录", async (t) => {
+  const games = await gameRegistry();
+  let executed = 0;
+  const limitedServices = services(games, {
     admin: {
       async execute() {
-        executed = true;
+        executed += 1;
         return { accountExists: true, status: "banned" };
       },
     },
-    adminLimiter: {
-      allow() {
-        return false;
-      },
-    },
-  };
-  const apps = buildApps(config, limitedServices);
+  });
+  const apps = buildApps(config(), limitedServices);
   t.after(async () => {
     await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);
   });
 
-  const response = await apps.internalApp.inject({
+  const headers = {
+    "x-operator-id": "game-a-admin",
+    "x-admin-secret": TENANT_ENV.GAME_A_ADMIN_SECRET,
+  };
+  for (let index = 0; index < 10; index += 1) {
+    const response = await apps.internalApp.inject({
+      method: "POST",
+      url: "/v1/games/game-a/admin/accounts/u_1/ban",
+      headers,
+      payload: { operationId: `limited-op-${index}`, reason: "test" },
+    });
+    assert.equal(response.statusCode, 200);
+  }
+  const limited = await apps.internalApp.inject({
     method: "POST",
-    url: "/v1/admin/accounts/u_1/ban",
-    headers: {
-      "x-operator-id": "gm-test",
-      "x-admin-secret": "admin-current",
-    },
-    payload: { operationId: "limited-op", reason: "test" },
+    url: "/v1/games/game-a/admin/accounts/u_1/ban",
+    headers,
+    payload: { operationId: "limited-op-final", reason: "test" },
   });
-  assert.equal(response.statusCode, 429);
-  assert.equal(response.json().code, "RATE_LIMITED");
-  assert.equal(executed, false);
+  assert.equal(limited.statusCode, 429);
+  assert.equal(limited.json().code, "RATE_LIMITED");
+  assert.equal(executed, 10);
 
   const publicLogin = await apps.publicApp.inject({
     method: "POST",
-    url: "/v1/sessions/dev",
+    url: "/v1/games/game-a/sessions/dev",
     payload: { devKey: "still-independent", serverId: 1 },
   });
   assert.equal(publicLogin.statusCode, 200);
+});
+
+test("结构化完成日志包含可信身份字段且异常文本、token 和 secret 不泄漏", async (t) => {
+  const games = await gameRegistry();
+  const records: Array<Record<string, unknown>> = [];
+  const app = createHttpApp(loadConfig({
+    NODE_ENV: "development",
+    GAME_MANAGE_KIT_MYSQL_URL:
+      "mysql://root:database-password@127.0.0.1:3306/game_manage_kit_log_test",
+    GAME_MANAGE_KIT_LOG_ENABLED: "1",
+  }), {
+    write(message) {
+      records.push(JSON.parse(message) as Record<string, unknown>);
+    },
+  });
+  t.after(async () => {
+    await app.close();
+  });
+
+  app.get<{ Params: { gameId: string } }>(
+    "/public/:gameId",
+    {
+      preHandler: async (request) => {
+        resolveGameContext(request, games);
+      },
+    },
+    async () => {
+      throw new Error(
+        "mysql://root:database-password@127.0.0.1/private "
+        + "accessToken=secret-token",
+      );
+    },
+  );
+  app.get<{ Params: { gameId: string } }>(
+    "/service/:gameId",
+    {
+      preHandler: async (request) => {
+        authorizeServiceGame(request, games);
+      },
+    },
+    async () => ({ ok: true }),
+  );
+  app.get<{ Params: { gameId: string } }>(
+    "/admin/:gameId",
+    {
+      preHandler: async (request) => {
+        authorizeAdminGame(request, games);
+      },
+    },
+    async () => ({ ok: true }),
+  );
+
+  const failure = await app.inject({ method: "GET", url: "/public/game-a" });
+  assert.equal(failure.statusCode, 500);
+  const service = await app.inject({
+    method: "GET",
+    url: "/service/game-a",
+    headers: {
+      "x-service-id": "game-a-service",
+      "x-service-secret": TENANT_ENV.GAME_A_SERVICE_SECRET,
+    },
+  });
+  assert.equal(service.statusCode, 200);
+  const admin = await app.inject({
+    method: "GET",
+    url: "/admin/game-a",
+    headers: {
+      "x-operator-id": "game-a-admin",
+      "x-admin-secret": TENANT_ENV.GAME_A_ADMIN_SECRET,
+    },
+  });
+  assert.equal(admin.statusCode, 200);
+
+  const serialized = JSON.stringify(records);
+  for (const secret of [
+    "database-password",
+    "secret-token",
+    TENANT_ENV.GAME_A_SERVICE_SECRET,
+    TENANT_ENV.GAME_A_ADMIN_SECRET,
+  ]) {
+    assert.equal(serialized.includes(secret), false, secret);
+  }
+  const completed = records.filter((record) => (
+    record.msg === "[gameManageKit] request completed"
+  ));
+  assert.equal(completed.some((record) => (
+    record.gameId === "game-a" && record.serviceId === "game-a-service"
+  )), true);
+  assert.equal(completed.some((record) => (
+    record.gameId === "game-a" && record.operatorId === "game-a-admin"
+  )), true);
+  assert.equal(records.some((record) => (
+    record.msg === "[gameManageKit] 未映射异常"
+    && record.gameId === "game-a"
+    && record.errorName === "Error"
+  )), true);
 });

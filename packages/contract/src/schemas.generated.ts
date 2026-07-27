@@ -1,5 +1,42 @@
 // Generated from openapi/openapi.yaml. Do not edit.
 export const GameManageKitSchemas = {
+  "GameId": {
+    "type": "string",
+    "minLength": 2,
+    "maxLength": 32,
+    "pattern": "^[a-z][a-z0-9-]{1,31}$",
+    "$id": "GameId"
+  },
+  "GameStatus": {
+    "type": "string",
+    "enum": [
+      "enabled",
+      "maintenance",
+      "disabled"
+    ],
+    "$id": "GameStatus"
+  },
+  "ErrorCode": {
+    "type": "string",
+    "enum": [
+      "INVALID_PAYLOAD",
+      "AUTH_REQUIRED",
+      "ACCOUNT_BANNED",
+      "NOT_FOUND",
+      "RATE_LIMITED",
+      "UPSTREAM_UNAVAILABLE",
+      "SERVICE_AUTH_REQUIRED",
+      "SERVICE_FORBIDDEN",
+      "OPERATION_CONFLICT",
+      "INTERNAL",
+      "GAME_NOT_FOUND",
+      "GAME_DISABLED",
+      "GAME_ACCESS_DENIED",
+      "SERVER_NOT_FOUND",
+      "SERVER_DISABLED"
+    ],
+    "$id": "ErrorCode"
+  },
   "ErrorResponse": {
     "type": "object",
     "additionalProperties": false,
@@ -9,7 +46,7 @@ export const GameManageKitSchemas = {
     ],
     "properties": {
       "code": {
-        "type": "string"
+        "$ref": "ErrorCode#"
       },
       "requestId": {
         "type": "string"

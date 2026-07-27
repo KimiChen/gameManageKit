@@ -4,6 +4,9 @@ export type { components, operations, paths } from "./types.generated.js";
 
 import type { components } from "./types.generated.js";
 
+export type GameId = components["schemas"]["GameId"];
+export type GameStatus = components["schemas"]["GameStatus"];
+export type GameManageKitErrorCode = components["schemas"]["ErrorCode"];
 export type ErrorResponse = components["schemas"]["ErrorResponse"];
 export type WxLoginRequest = components["schemas"]["WxLoginRequest"];
 export type DevLoginRequest = components["schemas"]["DevLoginRequest"];
