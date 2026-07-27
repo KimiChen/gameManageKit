@@ -1,3 +1,4 @@
+import { randomBytes as cryptoRandomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import type { RowDataPacket } from "mysql2/promise";
 import { loadConfig } from "./config.js";
@@ -6,7 +7,8 @@ import { hashAdminPassword } from "./infra/security/admin-password.js";
 
 const OPERATOR_ID_PATTERN = /^[a-z][a-z0-9_.-]{2,63}$/u;
 const GAME_ID_PATTERN = /^[a-z][a-z0-9-]{1,31}$/u;
-const MAX_PASSWORD_INPUT_BYTES = 1_026;
+const GENERATED_PASSWORD_BYTES = 12;
+const GENERATED_PASSWORD_LENGTH = 16;
 
 export interface AdminCreateOptions {
   readonly operatorId: string;
@@ -77,63 +79,24 @@ export function parseAdminCreateArgs(args: readonly string[]): AdminCreateOption
   });
 }
 
-async function readHiddenPassword(): Promise<string> {
-  if (!process.stdin.isTTY) {
-    process.stdin.setEncoding("utf8");
-    let input = "";
-    for await (const chunk of process.stdin) {
-      input += chunk;
-      if (Buffer.byteLength(input, "utf8") > MAX_PASSWORD_INPUT_BYTES) {
-        throw new Error("管理员密码输入超过允许长度");
-      }
-    }
-    return input.replace(/\r?\n$/u, "");
+export function generateAdminPassword(
+  randomBytes: (size: number) => Buffer = cryptoRandomBytes,
+): string {
+  const entropy = randomBytes(GENERATED_PASSWORD_BYTES);
+  if (
+    !Buffer.isBuffer(entropy)
+    || entropy.length !== GENERATED_PASSWORD_BYTES
+  ) {
+    throw new TypeError("管理员密码随机源必须返回 12 字节 Buffer");
   }
-
-  process.stderr.write("管理员密码（输入不会显示）: ");
-  process.stdin.setEncoding("utf8");
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
-  return new Promise<string>((resolve, reject) => {
-    let password = "";
-    let finished = false;
-    const cleanup = (): void => {
-      process.stdin.off("data", onData);
-      process.stdin.setRawMode(false);
-      process.stdin.pause();
-      process.stderr.write("\n");
-    };
-    const onData = (chunk: string): void => {
-      for (const character of chunk) {
-        if (finished) {
-          return;
-        }
-        if (character === "\u0003") {
-          finished = true;
-          cleanup();
-          reject(new Error("已取消"));
-        } else if (character === "\r" || character === "\n") {
-          finished = true;
-          cleanup();
-          resolve(password);
-        } else if (character === "\u007f" || character === "\b") {
-          password = [...password].slice(0, -1).join("");
-        } else if (character === "\u001b") {
-          finished = true;
-          cleanup();
-          reject(new Error("密码输入不支持终端控制序列"));
-        } else {
-          password += character;
-          if (Buffer.byteLength(password, "utf8") > 1_024) {
-            finished = true;
-            cleanup();
-            reject(new Error("管理员密码输入超过允许长度"));
-          }
-        }
-      }
-    };
-    process.stdin.on("data", onData);
-  });
+  const password = entropy.toString("base64url");
+  if (
+    password.length !== GENERATED_PASSWORD_LENGTH
+    || !/^[A-Za-z0-9_-]+$/u.test(password)
+  ) {
+    throw new Error("管理员密码生成失败");
+  }
+  return password;
 }
 
 export async function createAdminOperator(
@@ -177,7 +140,7 @@ export async function createAdminOperator(
 
 async function main(): Promise<void> {
   const options = parseAdminCreateArgs(process.argv.slice(2));
-  const password = await readHiddenPassword();
+  const password = generateAdminPassword();
   const config = loadConfig();
   const database = new Database(config.mysqlUrl, Math.min(config.mysqlPoolSize, 2));
   try {
@@ -185,6 +148,7 @@ async function main(): Promise<void> {
     process.stdout.write(
       `管理员 ${options.operatorId} 已创建，可访问 ${options.gameIds.join(",")}。\n`,
     );
+    process.stdout.write(`初始密码（仅显示一次）: ${password}\n`);
   } finally {
     await database.close();
   }

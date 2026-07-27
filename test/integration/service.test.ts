@@ -6,7 +6,10 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import mysql, { type RowDataPacket } from "mysql2/promise";
-import { createAdminOperator } from "../../src/admin-create.js";
+import {
+  createAdminOperator,
+  generateAdminPassword,
+} from "../../src/admin-create.js";
 import { createRuntime } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
 import { GameRegistry } from "../../src/domain/game/registry.js";
@@ -127,7 +130,9 @@ test("多游戏迁移、认证、数据与运行态完整隔离", async () => {
     });
     runtime = await createRuntime(config, { games });
     const { publicApp, internalApp } = runtime.apps;
-    const webAdminPassword = "integration admin password";
+    const webAdminPassword = generateAdminPassword(
+      () => Buffer.alloc(12, 0x42),
+    );
     await createAdminOperator(runtime.database, {
       operatorId: "ops_integration",
       displayName: "Integration Admin",

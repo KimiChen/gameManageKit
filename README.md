@@ -53,16 +53,15 @@ Public 登录与 Admin 写操作分别使用独立的进程内令牌桶；多实
 LB/WAF 承担。
 
 管理员网页位于 Internal/Admin origin 的 `/admin/`。完成 migration 并至少启动一次
-服务以同步游戏配置后，使用隐藏 TTY 输入创建个人管理员：
+服务以同步游戏配置后，创建个人管理员：
 
 ```bash
-npm run admin:create -- \
-  --operator-id ops_kimi \
-  --display-name Kimi \
-  --games game-a,game-b
+npm run admin:create -- --operator-id ops_kimi --display-name Kimi --games game-a,game-b
 ```
 
-管理员密码不允许作为命令行参数。网页登录不会接收或保存游戏配置里的 Admin Secret。
+命令使用系统加密随机源生成 16 位初始密码，并仅在创建成功后显示一次；请立即交付给
+对应管理员并存入受控密码管理器。管理员密码不允许作为命令行参数。网页登录不会接收
+或保存游戏配置里的 Admin Secret。
 账号权限、HTTPS 反向代理、Cookie 和会话失效要求见
 [管理员控制台运维指南](docs/admin-console.md)。
 

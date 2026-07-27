@@ -236,7 +236,7 @@ admin_sessions
 npm run admin:create -- --operator-id ops_kimi --games game-a,game-b
 ```
 
-密码必须从 TTY 隐藏输入或标准输入读取，不允许作为命令行参数进入 Shell history。第一版不提供网页注册入口。
+创建命令使用 Node.js `crypto.randomBytes` 生成 12 字节随机值，并以 16 位 Base64URL 初始密码仅显示一次，不要求用户输入，也不允许密码作为命令行参数进入 Shell history。第一版不提供网页注册入口。
 
 ## 9. 会话与请求安全
 

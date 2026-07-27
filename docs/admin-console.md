@@ -9,14 +9,13 @@
 先完成数据库 migration 和游戏同步，再在可信终端执行：
 
 ```bash
-npm run admin:create -- \
-  --operator-id ops_kimi \
-  --display-name Kimi \
-  --games game-a,game-b
+npm run admin:create -- --operator-id ops_kimi --display-name Kimi --games game-a,game-b
 ```
 
-命令会在 TTY 中隐藏密码输入。不要增加密码命令行参数，也不要把密码写入
-Shell history、环境变量、配置文件或 Git。只需查看账号时增加 `--read-only`。
+命令使用 Node.js `crypto.randomBytes` 生成 16 位 Base64URL 初始密码（12 字节、
+约 96 bit 随机性），创建成功后仅在当前终端显示一次，不要求用户输入密码。请立即
+安全交付并存入受控密码管理器；不要把密码写入 Shell history、环境变量、配置文件或
+Git。只需查看账号时增加 `--read-only`。
 创建命令拒绝覆盖已有管理员，并写入 `operator_created/cli` 安全审计。第一版不提供
 网页权限编辑；需要修改管理员时应使用受控数据库运维事务，并同时递增
 `auth_version`、删除该管理员的 `admin_sessions`、写入对应安全审计。
@@ -24,10 +23,7 @@ Shell history、环境变量、配置文件或 Git。只需查看账号时增加
 生产构建完成后可使用：
 
 ```bash
-node --env-file=.env.production dist/admin-create.js \
-  --operator-id ops_kimi \
-  --display-name Kimi \
-  --games game-a,game-b
+node --env-file=.env.production dist/admin-create.js --operator-id ops_kimi --display-name Kimi --games game-a,game-b
 ```
 
 ## 同源与 TLS
