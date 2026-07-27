@@ -1,0 +1,558 @@
+openapi: 3.1.0
+info:
+  title: gameManageKit API
+  version: 1.0.0
+  description: 单游戏、HTTP-only、MySQL-only 的账号门户服务。
+servers:
+  - url: https://portal.example.com
+    description: Public
+  - url: http://game-manage-kit.internal:2571
+    description: Internal
+tags:
+  - name: Public
+  - name: Internal
+  - name: Admin
+  - name: System
+paths:
+  /v1/sessions/wechat:
+    post:
+      operationId: wxLogin
+      tags: [Public]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WxLoginRequest'
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/sessions/dev:
+    post:
+      operationId: devLogin
+      tags: [Public]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DevLoginRequest'
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+  /v1/areas:
+    get:
+      operationId: listAreas
+      tags: [Public]
+      security:
+        - {}
+        - UserBearer: []
+      responses:
+        '200':
+          description: 选服目录
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AreaListResponse'
+        '500':
+          $ref: '#/components/responses/Internal'
+  /v1/internal/sessions/verify:
+    post:
+      operationId: verifySession
+      tags: [Internal]
+      security:
+        - ServiceId: []
+          ServiceSecret: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifySessionRequest'
+      responses:
+        '200':
+          description: 校验结果；身份失败也返回 200
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifySessionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/ServiceUnauthorized'
+        '500':
+          $ref: '#/components/responses/Internal'
+  /v1/internal/characters/{userId}/{serverId}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+      - $ref: '#/components/parameters/ServerId'
+    put:
+      operationId: registerCharacter
+      tags: [Internal]
+      security:
+        - ServiceId: []
+          ServiceSecret: []
+      responses:
+        '200':
+          description: 幂等登记成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterCharacterResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/ServiceUnauthorized'
+        '500':
+          $ref: '#/components/responses/Internal'
+    get:
+      operationId: hasCharacter
+      tags: [Internal]
+      security:
+        - ServiceId: []
+          ServiceSecret: []
+      responses:
+        '200':
+          description: 是否存在角色
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HasCharacterResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/ServiceUnauthorized'
+        '500':
+          $ref: '#/components/responses/Internal'
+  /v1/admin/accounts/{userId}/ban:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    post:
+      operationId: banAccount
+      tags: [Admin]
+      security:
+        - AdminSecret: []
+          OperatorId: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminAccountRequest'
+      responses:
+        '200':
+          description: 封号结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminAccountResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/ServiceUnauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+  /v1/admin/accounts/{userId}/revoke:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    post:
+      operationId: revokeAccount
+      tags: [Admin]
+      security:
+        - AdminSecret: []
+          OperatorId: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminAccountRequest'
+      responses:
+        '200':
+          description: 撤销结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminAccountResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/ServiceUnauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+  /livez:
+    get:
+      operationId: livez
+      tags: [System]
+      responses:
+        '200':
+          description: 进程存活
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveResponse'
+  /readyz:
+    get:
+      operationId: readyz
+      tags: [System]
+      responses:
+        '200':
+          description: 依赖就绪
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '503':
+          description: 未就绪
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+  /version:
+    get:
+      operationId: version
+      tags: [System]
+      responses:
+        '200':
+          description: 版本信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+components:
+  securitySchemes:
+    UserBearer:
+      type: http
+      scheme: bearer
+    ServiceId:
+      type: apiKey
+      in: header
+      name: x-service-id
+    ServiceSecret:
+      type: apiKey
+      in: header
+      name: x-service-secret
+    AdminSecret:
+      type: apiKey
+      in: header
+      name: x-admin-secret
+    OperatorId:
+      type: apiKey
+      in: header
+      name: x-operator-id
+  parameters:
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 32
+        pattern: '^u_[0-9]+$'
+    ServerId:
+      name: serverId
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 65535
+  responses:
+    BadRequest:
+      description: 入参不合法
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: 用户身份无效
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnauthorized:
+      description: 服务身份无效
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: 禁止访问
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: 不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: 操作冲突
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RateLimited:
+      description: 请求过频
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Internal:
+      description: 内部错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unavailable:
+      description: 上游不可用
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, requestId]
+      properties:
+        code:
+          type: string
+        requestId:
+          type: string
+    WxLoginRequest:
+      type: object
+      additionalProperties: false
+      required: [code, serverId]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 128
+        serverId:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        deviceId:
+          type:
+            - string
+            - 'null'
+          maxLength: 64
+    DevLoginRequest:
+      type: object
+      additionalProperties: false
+      required: [devKey, serverId]
+      properties:
+        devKey:
+          type: string
+          minLength: 1
+          maxLength: 32
+          pattern: '^[a-zA-Z0-9_-]+$'
+        serverId:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        deviceId:
+          type:
+            - string
+            - 'null'
+          maxLength: 64
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [userId, accessToken, isNewAccount]
+      properties:
+        userId:
+          type: string
+        accessToken:
+          type: string
+        isNewAccount:
+          type: boolean
+    AreaServer:
+      type: object
+      additionalProperties: false
+      required: [serverId, name, tag, status, openTime, gameHttpUrl, gameWsUrl]
+      properties:
+        serverId:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        tag:
+          type: string
+          enum: [normal, new, full, maintenance]
+        status:
+          type: string
+          enum: [smooth, busy, maintenance]
+        openTime:
+          type: integer
+          minimum: 0
+        gameHttpUrl:
+          type: string
+        gameWsUrl:
+          type: string
+    AreaListResponse:
+      type: object
+      additionalProperties: false
+      required: [isOps, hash, servers, myServerIds]
+      properties:
+        isOps:
+          type: boolean
+        hash:
+          type: string
+        servers:
+          type: array
+          items:
+            $ref: '#/components/schemas/AreaServer'
+        myServerIds:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+            maximum: 65535
+    VerifySessionRequest:
+      type: object
+      additionalProperties: false
+      required: [accessToken, serverId]
+      properties:
+        accessToken:
+          type: string
+          minLength: 1
+          maxLength: 256
+        serverId:
+          type: integer
+          minimum: 0
+          maximum: 65535
+    VerifySessionResponse:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [valid, userId, issuedAtMs]
+          properties:
+            valid:
+              const: true
+            userId:
+              type: string
+            issuedAtMs:
+              type: integer
+              minimum: 0
+        - type: object
+          additionalProperties: false
+          required: [valid, reason]
+          properties:
+            valid:
+              const: false
+            reason:
+              type: string
+              enum: [NOT_FOUND, MISMATCH, BANNED, DEREGISTERED, EXPIRED]
+    RegisterCharacterResponse:
+      type: object
+      additionalProperties: false
+      required: [registered]
+      properties:
+        registered:
+          const: true
+    HasCharacterResponse:
+      type: object
+      additionalProperties: false
+      required: [exists]
+      properties:
+        exists:
+          type: boolean
+    AdminAccountRequest:
+      type: object
+      additionalProperties: false
+      required: [operationId, reason]
+      properties:
+        operationId:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[a-zA-Z0-9_.:-]+$'
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 255
+    AdminAccountResponse:
+      type: object
+      additionalProperties: false
+      required: [accountExists, status]
+      properties:
+        accountExists:
+          type: boolean
+        status:
+          type: string
+          enum: [banned, revoked, not_found]
+    LiveResponse:
+      type: object
+      additionalProperties: false
+      required: [ok]
+      properties:
+        ok:
+          const: true
+    ReadyResponse:
+      type: object
+      additionalProperties: false
+      required: [ready]
+      properties:
+        ready:
+          type: boolean
+    VersionResponse:
+      type: object
+      additionalProperties: false
+      required: [service, serviceVersion, contractVersion, schemaVersion, gitSha]
+      properties:
+        service:
+          const: game-manage-kit
+        serviceVersion:
+          type: string
+        contractVersion:
+          type: string
+        schemaVersion:
+          type: integer
+        gitSha:
+          type: string

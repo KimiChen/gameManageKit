@@ -1,0 +1,32 @@
+{
+  "isOps": false,
+  "servers": [
+    {
+      "serverId": 1,
+      "name": "一区·启程",
+      "tag": "normal",
+      "status": "smooth",
+      "openTime": 1700000000,
+      "gameHttpUrl": "http://127.0.0.1:2568",
+      "gameWsUrl": "ws://127.0.0.1:2568"
+    },
+    {
+      "serverId": 2,
+      "name": "二区·同行",
+      "tag": "full",
+      "status": "busy",
+      "openTime": 1705000000,
+      "gameHttpUrl": "http://127.0.0.1:2568",
+      "gameWsUrl": "ws://127.0.0.1:2568"
+    },
+    {
+      "serverId": 3,
+      "name": "三区·并肩",
+      "tag": "new",
+      "status": "smooth",
+      "openTime": 1710000000,
+      "gameHttpUrl": "http://127.0.0.1:2568",
+      "gameWsUrl": "ws://127.0.0.1:2568"
+    }
+  ]
+}

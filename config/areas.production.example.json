@@ -1,0 +1,14 @@
+{
+  "isOps": false,
+  "servers": [
+    {
+      "serverId": 1,
+      "name": "一区·启程",
+      "tag": "normal",
+      "status": "smooth",
+      "openTime": 1700000000,
+      "gameHttpUrl": "https://game.example.com",
+      "gameWsUrl": "wss://game.example.com"
+    }
+  ]
+}

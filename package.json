@@ -1,0 +1,39 @@
+{
+  "name": "game-manage-kit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "gameManageKit 游戏独立账号门户服务（HTTP-only，MySQL-only）",
+  "type": "module",
+  "workspaces": [
+    "packages/contract"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prepare:contract": "npm run generate:contract && npm --workspace @gono/game-manage-kit-contract run build",
+    "dev": "npm run prepare:contract && tsx watch src/main.ts",
+    "build": "npm run generate:contract && npm --workspace @gono/game-manage-kit-contract run build && tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "typecheck": "npm run prepare:contract && tsc --noEmit && npm --workspace @gono/game-manage-kit-contract run typecheck",
+    "test": "npm run prepare:contract && node --import tsx --test test/unit/*.test.ts test/contract/*.test.ts",
+    "test:int": "npm run build && node --import tsx --test --test-concurrency=1 test/integration/*.test.ts",
+    "generate:contract": "tsx scripts/generate-contract.ts",
+    "verify:contract": "tsx scripts/generate-contract.ts --check",
+    "check:contract-breaking": "tsx scripts/check-contract-breaking.ts",
+    "migrate": "tsx src/migrate.ts",
+    "migrate:prod": "node dist/migrate.js"
+  },
+  "dependencies": {
+    "@gono/game-manage-kit-contract": "1.0.0",
+    "fastify": "^5.0.0",
+    "mysql2": "^3.22.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.14",
+    "openapi-typescript": "^7.10.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "yaml": "^2.8.1"
+  }
+}
