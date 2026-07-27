@@ -95,6 +95,19 @@
           <rect x="3" y="5" width="18" height="14" rx="2"></rect>
           <path d="M7 9h10M7 13h6"></path>
         </symbol>
+        <symbol id="gamepad" viewBox="0 0 24 24">
+          <path
+            d="M8.5 7h7a5.5 5.5 0 0 1 5.2 7.3l-1.1 3.2a2.2 2.2 0 0 1-3.7.8L14.6 17H9.4l-1.3 1.3a2.2 2.2 0 0 1-3.7-.8l-1.1-3.2A5.5 5.5 0 0 1 8.5 7Z"
+          ></path>
+          <path d="M8 11v4M6 13h4M16 12h.01M18 14h.01"></path>
+        </symbol>
+        <symbol id="plus" viewBox="0 0 24 24">
+          <path d="M12 5v14M5 12h14"></path>
+        </symbol>
+        <symbol id="edit" viewBox="0 0 24 24">
+          <path d="M12 20h9"></path>
+          <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"></path>
+        </symbol>
       </defs>
     </svg>
 
@@ -286,6 +299,9 @@
               <a class="wsk-active" href="#accounts" aria-current="page">
                 账号管理
               </a>
+              <a id="accounts-games-link" href="#games" hidden>
+                游戏项目
+              </a>
               <button class="gmk-nav-action" id="sidebar-logout" type="button">
                 退出登录
               </button>
@@ -438,7 +454,610 @@
           </div>
         </div>
       </section>
+
+      <section class="wsk-page gmk-admin-view" id="games-view" data-view="games" hidden>
+        <div class="wsk-reference-shell">
+          <aside class="gmk-sidebar">
+            <nav class="wsk-reference-nav" aria-label="管理员导航">
+              <div class="wsk-reference-brand">
+                <strong>运营管理</strong>
+                <span>OPERATIONS</span>
+              </div>
+              <a id="games-accounts-link" href="#accounts">
+                账号管理
+              </a>
+              <a class="wsk-active" href="#games" aria-current="page">
+                游戏项目
+              </a>
+              <button class="gmk-nav-action" id="games-sidebar-logout" type="button">
+                退出登录
+              </button>
+            </nav>
+          </aside>
+
+          <div class="wsk-reference-content gmk-admin-content">
+            <div class="wsk-page-head gmk-games-page-head">
+              <div>
+                <p class="wsk-panel-title">GAME PROJECTS</p>
+                <h1 tabindex="-1">游戏项目</h1>
+                <p>新增游戏项目，维护运行状态和下发给客户端的游戏列表。</p>
+              </div>
+              <button class="wsk-button" id="game-create-button" type="button">
+                <svg class="wsk-icon" aria-hidden="true"><use href="#plus"></use></svg>
+                新增游戏
+              </button>
+            </div>
+
+            <section class="wsk-section" aria-labelledby="game-list-title">
+              <div class="wsk-section-head">
+                <div>
+                  <h2 id="game-list-title">全部游戏</h2>
+                  <p class="wsk-help">
+                    只有配置完成且未停用的游戏才能下发；停用是不可逆操作。
+                  </p>
+                </div>
+              </div>
+
+              <p class="wsk-sr-only" id="games-live-status" aria-live="polite"></p>
+
+              <div class="gmk-games-state" id="games-loading" aria-live="polite">
+                <span class="wsk-spinner gmk-large-spinner" aria-hidden="true"></span>
+                <h3>正在读取游戏项目</h3>
+                <p>请稍候。</p>
+              </div>
+
+              <div
+                class="wsk-alert wsk-danger gmk-games-alert"
+                id="games-error"
+                role="alert"
+                tabindex="-1"
+                hidden
+              >
+                <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+                <div>
+                  <strong>游戏项目加载失败</strong>
+                  <p id="games-error-message"></p>
+                  <button
+                    class="wsk-button wsk-secondary gmk-inline-retry"
+                    id="games-retry"
+                    type="button"
+                  >
+                    重新加载
+                  </button>
+                </div>
+              </div>
+
+              <div class="gmk-games-state gmk-empty-state" id="games-empty" hidden>
+                <span class="gmk-state-icon" aria-hidden="true">
+                  <svg class="wsk-icon"><use href="#gamepad"></use></svg>
+                </span>
+                <h3>还没有游戏项目</h3>
+                <p>创建第一个游戏项目后，可继续补齐部署配置并启用。</p>
+                <button class="wsk-button wsk-secondary" id="games-empty-create" type="button">
+                  新增游戏
+                </button>
+              </div>
+
+              <div class="gmk-game-grid" id="games-list" role="list" hidden></div>
+            </section>
+          </div>
+        </div>
+      </section>
     </main>
+
+    <dialog
+      class="wsk-dialog"
+      id="game-dialog"
+      aria-labelledby="game-dialog-title"
+      aria-describedby="game-dialog-description"
+    >
+      <form id="game-form" autocomplete="off">
+        <div class="wsk-dialog-head">
+          <div>
+            <p class="wsk-panel-title" id="game-dialog-kind">CREATE GAME</p>
+            <h2 id="game-dialog-title">新增游戏</h2>
+          </div>
+          <button
+            class="wsk-icon-button"
+            id="game-dialog-close"
+            type="button"
+            aria-label="关闭游戏编辑窗口"
+            title="关闭"
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#x"></use></svg>
+          </button>
+        </div>
+        <div class="wsk-dialog-body">
+          <p class="wsk-help" id="game-dialog-description">
+            新游戏将以维护中的草稿状态创建，完成部署配置后才能启用。
+          </p>
+
+          <div class="wsk-field">
+            <label class="wsk-label" for="game-id">
+              游戏 ID
+              <span class="gmk-required" aria-hidden="true">*</span>
+            </label>
+            <input
+              class="wsk-control"
+              id="game-id"
+              name="gameId"
+              type="text"
+              autocapitalize="none"
+              spellcheck="false"
+              minlength="2"
+              maxlength="32"
+              pattern="[a-z][a-z0-9\-]{1,31}"
+              placeholder="例如：space-adventure"
+              aria-describedby="game-id-help"
+              required
+            />
+            <p class="wsk-help" id="game-id-help">
+              2–32 个小写字母、数字或连字符，以字母开头；创建后不可修改。
+            </p>
+          </div>
+
+          <div class="wsk-field">
+            <label class="wsk-label" for="game-name">
+              游戏名称
+              <span class="gmk-required" aria-hidden="true">*</span>
+            </label>
+            <input
+              class="wsk-control"
+              id="game-name"
+              name="name"
+              type="text"
+              maxlength="256"
+              placeholder="玩家和运营可识别的名称"
+              aria-describedby="game-name-help"
+              required
+            />
+            <p class="wsk-help" id="game-name-help">
+              最多 128 个 Unicode 字符。
+            </p>
+          </div>
+
+          <div class="wsk-field">
+            <label class="wsk-label" for="game-description">游戏说明</label>
+            <textarea
+              class="wsk-textarea"
+              id="game-description"
+              name="description"
+              maxlength="1000"
+              placeholder="可选，用于说明项目用途或当前阶段"
+              aria-describedby="game-description-help"
+            ></textarea>
+            <p class="wsk-help" id="game-description-help">
+              最多 500 个 Unicode 字符。
+            </p>
+          </div>
+
+          <div class="wsk-field">
+            <label class="wsk-label" for="game-status">运行状态</label>
+            <div class="wsk-select-wrap">
+              <select
+                class="wsk-select"
+                id="game-status"
+                name="status"
+                aria-describedby="game-status-help"
+              >
+                <option value="enabled">已启用</option>
+                <option value="maintenance">维护中</option>
+                <option value="disabled">已停用</option>
+              </select>
+              <svg class="wsk-icon" aria-hidden="true">
+                <use href="#chevron"></use>
+              </svg>
+            </div>
+            <p class="wsk-help" id="game-status-help"></p>
+          </div>
+
+          <div class="gmk-client-settings">
+            <div class="wsk-field">
+              <label class="gmk-confirm-label" for="game-client-visible">
+                <input
+                  id="game-client-visible"
+                  name="clientVisible"
+                  type="checkbox"
+                  aria-describedby="game-client-visible-help"
+                />
+                下发给客户端
+              </label>
+              <p class="wsk-help" id="game-client-visible-help">
+                只有配置完成且未停用的游戏可以出现在客户端游戏列表。
+              </p>
+            </div>
+
+            <div class="wsk-field">
+              <label class="wsk-label" for="game-sort-order">展示顺序</label>
+              <input
+                class="wsk-control"
+                id="game-sort-order"
+                name="sortOrder"
+                type="number"
+                inputmode="numeric"
+                min="0"
+                max="65535"
+                step="1"
+                value="0"
+                aria-describedby="game-sort-order-help"
+                required
+              />
+              <p class="wsk-help" id="game-sort-order-help">
+                0–65535，数值越小越靠前。
+              </p>
+            </div>
+          </div>
+
+          <div
+            class="wsk-alert wsk-warning gmk-disable-confirm"
+            id="game-disable-warning"
+            hidden
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+            <div>
+              <strong>停用后不能恢复</strong>
+              <label class="gmk-confirm-label" for="game-disable-confirm">
+                <input id="game-disable-confirm" type="checkbox" />
+                我已确认永久停用这个游戏
+              </label>
+            </div>
+          </div>
+
+          <div
+            class="wsk-alert wsk-danger"
+            id="game-form-error"
+            role="alert"
+            tabindex="-1"
+            hidden
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+            <div>
+              <strong>游戏项目未保存</strong>
+              <p id="game-form-error-message"></p>
+            </div>
+          </div>
+        </div>
+        <div class="wsk-dialog-foot">
+          <button class="wsk-button wsk-secondary" id="game-cancel" type="button">
+            取消
+          </button>
+          <button class="wsk-button" id="game-submit" type="submit">
+            <span class="wsk-spinner" data-button-spinner aria-hidden="true" hidden></span>
+            <span data-button-label>新增游戏</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog
+      class="wsk-dialog gmk-server-dialog"
+      id="server-dialog"
+      aria-labelledby="server-dialog-title"
+      aria-describedby="server-dialog-description"
+    >
+      <div>
+        <div class="wsk-dialog-head">
+          <div>
+            <p class="wsk-panel-title">GAME SERVERS</p>
+            <h2 id="server-dialog-title">管理区服</h2>
+          </div>
+          <button
+            class="wsk-icon-button"
+            id="server-dialog-close"
+            type="button"
+            aria-label="关闭区服管理窗口"
+            title="关闭"
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#x"></use></svg>
+          </button>
+        </div>
+
+        <div class="wsk-dialog-body">
+          <p class="wsk-help" id="server-dialog-description">
+            查看和维护该游戏向客户端提供的区服。
+          </p>
+
+          <div class="wsk-alert wsk-info gmk-server-policy">
+            <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
+            <div>
+              <strong>客户端下发与登录规则</strong>
+              <p>未开放不下发且不可登录；维护中可下发但不可登录。</p>
+            </div>
+          </div>
+
+          <div class="gmk-server-toolbar">
+            <div>
+              <strong id="server-game-label"></strong>
+              <p class="wsk-help" id="server-summary">正在读取区服…</p>
+            </div>
+            <button class="wsk-button" id="server-create-button" type="button">
+              <svg class="wsk-icon" aria-hidden="true"><use href="#plus"></use></svg>
+              新增区服
+            </button>
+          </div>
+
+          <p class="wsk-sr-only" id="servers-live-status" aria-live="polite"></p>
+
+          <div class="gmk-servers-state" id="servers-loading" aria-live="polite">
+            <span class="wsk-spinner gmk-large-spinner" aria-hidden="true"></span>
+            <h3>正在读取区服</h3>
+            <p>请稍候。</p>
+          </div>
+
+          <div
+            class="wsk-alert wsk-danger"
+            id="servers-error"
+            role="alert"
+            tabindex="-1"
+            hidden
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+            <div>
+              <strong>区服加载失败</strong>
+              <p id="servers-error-message"></p>
+              <button
+                class="wsk-button wsk-secondary gmk-inline-retry"
+                id="servers-retry"
+                type="button"
+              >
+                重新加载
+              </button>
+            </div>
+          </div>
+
+          <div class="gmk-servers-state gmk-empty-state" id="servers-empty" hidden>
+            <span class="gmk-state-icon" aria-hidden="true">
+              <svg class="wsk-icon"><use href="#sessions"></use></svg>
+            </span>
+            <h3>还没有区服</h3>
+            <p>新增区服并开放后，才会按规则下发给客户端。</p>
+            <button
+              class="wsk-button wsk-secondary"
+              id="servers-empty-create"
+              type="button"
+            >
+              新增区服
+            </button>
+          </div>
+
+          <div class="gmk-server-list" id="servers-list" role="list" hidden></div>
+
+          <section
+            class="gmk-server-editor"
+            id="server-editor"
+            aria-labelledby="server-editor-title"
+            hidden
+          >
+            <form id="server-form" autocomplete="off">
+              <div class="gmk-server-editor-head">
+                <div>
+                  <p class="wsk-panel-title" id="server-editor-kind">CREATE SERVER</p>
+                  <h3 id="server-editor-title">新增区服</h3>
+                </div>
+                <button
+                  class="wsk-icon-button"
+                  id="server-editor-close"
+                  type="button"
+                  aria-label="收起区服编辑表单"
+                  title="收起"
+                >
+                  <svg class="wsk-icon" aria-hidden="true"><use href="#x"></use></svg>
+                </button>
+              </div>
+
+              <div class="gmk-server-form-grid">
+                <div class="wsk-field">
+                  <label class="wsk-label" for="server-id">
+                    区服 ID
+                    <span class="gmk-required" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    class="wsk-control"
+                    id="server-id"
+                    name="serverId"
+                    type="number"
+                    inputmode="numeric"
+                    min="0"
+                    max="65535"
+                    step="1"
+                    aria-describedby="server-id-help"
+                    required
+                  />
+                  <p class="wsk-help" id="server-id-help">
+                    0–65535 的整数，创建后不可修改。
+                  </p>
+                </div>
+
+                <div class="wsk-field">
+                  <label class="wsk-label" for="server-name">
+                    区服名称
+                    <span class="gmk-required" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    class="wsk-control"
+                    id="server-name"
+                    name="name"
+                    type="text"
+                    maxlength="128"
+                    aria-describedby="server-name-help"
+                    placeholder="例如：星海一区"
+                    required
+                  />
+                  <p class="wsk-help" id="server-name-help">
+                    最多 64 个 Unicode 字符。
+                  </p>
+                </div>
+
+                <div class="wsk-field">
+                  <label class="wsk-label" for="server-tag">区服标签</label>
+                  <div class="wsk-select-wrap">
+                    <select class="wsk-select" id="server-tag" name="tag">
+                      <option value="normal">普通</option>
+                      <option value="new">新服</option>
+                      <option value="full">爆满</option>
+                      <option value="maintenance">维护</option>
+                    </select>
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#chevron"></use>
+                    </svg>
+                  </div>
+                </div>
+
+                <div class="wsk-field">
+                  <label class="wsk-label" for="server-status">负载状态</label>
+                  <div class="wsk-select-wrap">
+                    <select
+                      class="wsk-select"
+                      id="server-status"
+                      name="status"
+                      aria-describedby="server-status-help"
+                    >
+                      <option value="smooth">流畅</option>
+                      <option value="busy">繁忙</option>
+                      <option value="maintenance">维护中</option>
+                    </select>
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#chevron"></use>
+                    </svg>
+                  </div>
+                  <p class="wsk-help" id="server-status-help">
+                    维护中的区服仍会下发，但玩家不可登录。
+                  </p>
+                </div>
+
+                <div class="wsk-field">
+                  <label class="wsk-label" for="server-open-time">
+                    开放时间
+                    <span class="gmk-required" aria-hidden="true">*</span>
+                  </label>
+                  <input
+                    class="wsk-control"
+                    id="server-open-time"
+                    name="openTime"
+                    type="datetime-local"
+                    step="1"
+                    aria-describedby="server-open-time-help"
+                    required
+                  />
+                  <p class="wsk-help" id="server-open-time-help">
+                    页面会按本地时间显示，保存时转换为 Unix 秒。
+                  </p>
+                </div>
+
+                <div class="wsk-field">
+                  <label class="wsk-label" for="server-sort-order">展示顺序</label>
+                  <input
+                    class="wsk-control"
+                    id="server-sort-order"
+                    name="sortOrder"
+                    type="number"
+                    inputmode="numeric"
+                    min="0"
+                    max="65535"
+                    step="1"
+                    value="0"
+                    required
+                  />
+                  <p class="wsk-help">0–65535，数值越小越靠前。</p>
+                </div>
+              </div>
+
+              <div class="wsk-field">
+                <label class="wsk-label" for="server-http-url">
+                  游戏 HTTP URL
+                  <span class="gmk-required" aria-hidden="true">*</span>
+                </label>
+                <input
+                  class="wsk-control"
+                  id="server-http-url"
+                  name="gameHttpUrl"
+                  type="url"
+                  inputmode="url"
+                  maxlength="2048"
+                  placeholder="https://game.example.com"
+                  aria-describedby="server-http-url-help"
+                  required
+                />
+                <p class="wsk-help" id="server-http-url-help">
+                  生产环境请使用 https://；本地开发可使用 loopback HTTP 地址。
+                </p>
+              </div>
+
+              <div class="wsk-field">
+                <label class="wsk-label" for="server-ws-url">
+                  游戏 WebSocket URL
+                  <span class="gmk-required" aria-hidden="true">*</span>
+                </label>
+                <input
+                  class="wsk-control"
+                  id="server-ws-url"
+                  name="gameWsUrl"
+                  type="text"
+                  inputmode="url"
+                  maxlength="2048"
+                  placeholder="wss://game.example.com/socket"
+                  aria-describedby="server-ws-url-help"
+                  autocapitalize="none"
+                  spellcheck="false"
+                  required
+                />
+                <p class="wsk-help" id="server-ws-url-help">
+                  生产环境请使用 wss://；本地开发可使用 loopback WebSocket 地址。
+                </p>
+              </div>
+
+              <div class="gmk-server-publish-settings">
+                <label class="gmk-confirm-label" for="server-is-open">
+                  <input
+                    id="server-is-open"
+                    name="isOpen"
+                    type="checkbox"
+                    aria-describedby="server-is-open-help"
+                  />
+                  开放区服
+                </label>
+                <p class="wsk-help" id="server-is-open-help">
+                  未开放不下发且不可登录。
+                </p>
+              </div>
+
+              <div
+                class="wsk-alert wsk-danger"
+                id="server-form-error"
+                role="alert"
+                tabindex="-1"
+                hidden
+              >
+                <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+                <div>
+                  <strong>区服未保存</strong>
+                  <p id="server-form-error-message"></p>
+                </div>
+              </div>
+
+              <div class="gmk-server-editor-actions">
+                <button
+                  class="wsk-button wsk-secondary"
+                  id="server-cancel"
+                  type="button"
+                >
+                  取消
+                </button>
+                <button class="wsk-button" id="server-submit" type="submit">
+                  <span
+                    class="wsk-spinner"
+                    data-button-spinner
+                    aria-hidden="true"
+                    hidden
+                  ></span>
+                  <span data-button-label>新增区服</span>
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      </div>
+    </dialog>
 
     <dialog
       class="wsk-dialog"

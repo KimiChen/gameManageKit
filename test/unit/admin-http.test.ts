@@ -60,11 +60,113 @@ async function fixture() {
     operatorId: "ops_kimi",
     displayName: "Kimi",
     authVersion: 1,
-    games: [{ gameId: "game-a", canOperateAccounts: true }],
+    canManageGames: true,
+    games: [{
+      gameId: "game-a",
+      name: "示例游戏 A",
+      status: "enabled",
+      configurationState: "configured",
+      canOperateAccounts: true,
+    }],
     expiresAt: "2026-07-28T18:00:00.000Z",
   } as const;
+  const gameProject = {
+    gameId: "game-a",
+    name: "示例游戏 A",
+    description: "",
+    status: "enabled" as const,
+    configurationState: "configured" as const,
+    clientVisible: true,
+    sortOrder: 0,
+    revision: 1,
+    createdAt: "2026-07-28T00:00:00.000Z",
+    updatedAt: "2026-07-28T00:00:00.000Z",
+  };
+  const gameServer = {
+    gameId: "game-a",
+    serverId: 1,
+    name: "A 一区",
+    tag: "new" as const,
+    status: "smooth" as const,
+    openTime: 1_700_000_000,
+    gameHttpUrl: "https://game-a.example.invalid",
+    gameWsUrl: "wss://game-a.example.invalid",
+    isOpen: true,
+    sortOrder: 0,
+    revision: 1,
+    createdAt: "2026-07-28T00:00:00.000Z",
+    updatedAt: "2026-07-28T00:00:00.000Z",
+  };
   const services: GameManageKitServices = {
     games,
+    gameProjects: {
+      async resolve(gameId) {
+        return games.resolve(gameId);
+      },
+      async listForClient() {
+        return [{
+          gameId: gameProject.gameId,
+          name: gameProject.name,
+          description: gameProject.description,
+          status: gameProject.status,
+        }];
+      },
+      async list(authorization) {
+        await authorization.authorize({} as PoolConnection);
+        return [gameProject];
+      },
+      async create(input, authorization) {
+        await authorization.authorize({} as PoolConnection);
+        return {
+          ...gameProject,
+          gameId: input.gameId,
+          name: input.name,
+          description: input.description,
+          status: "maintenance",
+          configurationState: "draft",
+          clientVisible: false,
+          revision: 1,
+        };
+      },
+      async update(gameId, input, authorization) {
+        await authorization.authorize({} as PoolConnection);
+        return {
+          ...gameProject,
+          gameId,
+          name: input.name,
+          description: input.description,
+          status: input.status,
+          clientVisible: input.clientVisible,
+          sortOrder: input.sortOrder,
+          revision: input.revision + 1,
+        };
+      },
+    },
+    gameServers: {
+      async list(_gameId, authorization) {
+        await authorization.authorize({} as PoolConnection);
+        return [gameServer];
+      },
+      async create(gameId, input, authorization) {
+        await authorization.authorize({} as PoolConnection);
+        return {
+          ...gameServer,
+          ...input,
+          gameId,
+          revision: 1,
+        };
+      },
+      async update(gameId, serverId, input, authorization) {
+        await authorization.authorize({} as PoolConnection);
+        return {
+          ...gameServer,
+          ...input,
+          gameId,
+          serverId,
+          revision: input.revision + 1,
+        };
+      },
+    },
     metrics: new MetricsRegistry(games.list().map((game) => game.gameId)),
     login: {
       async loginWechat() {
@@ -119,6 +221,9 @@ async function fixture() {
         assert.equal(current, identity);
         assert.equal(gameId, "game-a");
         calls.queryAuthorization += 1;
+      },
+      async requireGameManagement(_connection, current) {
+        assert.equal(current, identity);
       },
     },
     admin: {
@@ -208,6 +313,7 @@ test("管理员认证端点设置严格 Cookie、实时会话并完成退出", a
       status: "enabled",
       canOperateAccounts: true,
     }],
+    canManageGames: true,
     expiresAt: "2026-07-28T18:00:00.000Z",
   });
   assert.equal(session.headers["cache-control"], "no-store");
@@ -231,6 +337,146 @@ test("管理员认证端点设置严格 Cookie、实时会话并完成退出", a
   assert.equal(logout.statusCode, 204);
   assert.equal(calls.logout, 1);
   assert.match(String(logout.headers["set-cookie"]), /Max-Age=0/u);
+});
+
+test("游戏项目列表、新增和编辑仅接受具备全局权限的 Cookie 管理员", async (t) => {
+  const { apps } = await fixture();
+  t.after(async () => {
+    await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);
+  });
+
+  const listed = await apps.internalApp.inject({
+    method: "GET",
+    url: "/v1/admin/games",
+    headers: { cookie: COOKIE },
+  });
+  assert.equal(listed.statusCode, 200, listed.body);
+  assert.equal(listed.json().games[0].gameId, "game-a");
+
+  const missingOrigin = await apps.internalApp.inject({
+    method: "POST",
+    url: "/v1/admin/games",
+    headers: { cookie: COOKIE },
+    payload: {
+      gameId: "new-game",
+      name: "新游戏",
+      description: "等待接入",
+    },
+  });
+  assert.equal(missingOrigin.statusCode, 403);
+  assert.equal(missingOrigin.json().code, "ORIGIN_FORBIDDEN");
+
+  const created = await apps.internalApp.inject({
+    method: "POST",
+    url: "/v1/admin/games",
+    headers: { cookie: COOKIE, origin: ORIGIN },
+    payload: {
+      gameId: "new-game",
+      name: "新游戏",
+      description: "等待接入",
+    },
+  });
+  assert.equal(created.statusCode, 201, created.body);
+  assert.deepEqual({
+    gameId: created.json().gameId,
+    status: created.json().status,
+    configurationState: created.json().configurationState,
+    clientVisible: created.json().clientVisible,
+  }, {
+    gameId: "new-game",
+    status: "maintenance",
+    configurationState: "draft",
+    clientVisible: false,
+  });
+
+  const updated = await apps.internalApp.inject({
+    method: "PATCH",
+    url: "/v1/admin/games/game-a",
+    headers: { cookie: COOKIE, origin: ORIGIN },
+    payload: {
+      name: "游戏 A 新名称",
+      description: "客户端展示说明",
+      status: "maintenance",
+      clientVisible: true,
+      sortOrder: 12,
+      revision: 1,
+    },
+  });
+  assert.equal(updated.statusCode, 200, updated.body);
+  assert.deepEqual({
+    name: updated.json().name,
+    status: updated.json().status,
+    clientVisible: updated.json().clientVisible,
+    sortOrder: updated.json().sortOrder,
+    revision: updated.json().revision,
+  }, {
+    name: "游戏 A 新名称",
+    status: "maintenance",
+    clientVisible: true,
+    sortOrder: 12,
+    revision: 2,
+  });
+});
+
+test("区服列表、新增和编辑复用游戏管理权限并校验写请求 Origin", async (t) => {
+  const { apps } = await fixture();
+  t.after(async () => {
+    await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);
+  });
+
+  const listed = await apps.internalApp.inject({
+    method: "GET",
+    url: "/v1/admin/games/game-a/servers",
+    headers: { cookie: COOKIE },
+  });
+  assert.equal(listed.statusCode, 200, listed.body);
+  assert.equal(listed.json().servers[0].serverId, 1);
+
+  const payload = {
+    serverId: 2,
+    name: "A 二区",
+    tag: "normal",
+    status: "busy",
+    openTime: 1_800_000_000,
+    gameHttpUrl: "https://game-a.example.invalid",
+    gameWsUrl: "wss://game-a.example.invalid",
+    isOpen: false,
+    sortOrder: 2,
+  };
+  const denied = await apps.internalApp.inject({
+    method: "POST",
+    url: "/v1/admin/games/game-a/servers",
+    headers: { cookie: COOKIE },
+    payload,
+  });
+  assert.equal(denied.statusCode, 403);
+  assert.equal(denied.json().code, "ORIGIN_FORBIDDEN");
+
+  const created = await apps.internalApp.inject({
+    method: "POST",
+    url: "/v1/admin/games/game-a/servers",
+    headers: { cookie: COOKIE, origin: ORIGIN },
+    payload,
+  });
+  assert.equal(created.statusCode, 201, created.body);
+  assert.equal(created.json().serverId, 2);
+  assert.equal(created.json().revision, 1);
+
+  const updated = await apps.internalApp.inject({
+    method: "PATCH",
+    url: "/v1/admin/games/game-a/servers/2",
+    headers: { cookie: COOKIE, origin: ORIGIN },
+    payload: {
+      ...payload,
+      serverId: undefined,
+      name: "A 二区维护",
+      status: "maintenance",
+      revision: 1,
+    },
+  });
+  assert.equal(updated.statusCode, 200, updated.body);
+  assert.equal(updated.json().status, "maintenance");
+  assert.equal(updated.json().revision, 2);
 });
 
 test("Cookie 管理员查询与写操作隔离身份、Origin 和游戏权限", async (t) => {

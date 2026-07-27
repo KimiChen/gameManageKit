@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: gameManageKit API
-  version: 1.0.0
+  version: 1.2.0
   description: 多游戏、HTTP-only、MySQL-only 的账号门户服务。
 servers:
   - url: https://portal.example.com
@@ -71,6 +71,217 @@ paths:
           $ref: '#/components/responses/AdminUnauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/games:
+    get:
+      operationId: listAdminGames
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      responses:
+        '200':
+          description: 返回全部游戏项目及其配置状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameProjectListResponse'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    post:
+      operationId: createAdminGame
+      description: 创建草稿游戏项目；必须使用管理员 Cookie 会话，并校验请求 Origin。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGameProjectRequest'
+      responses:
+        '201':
+          description: 游戏项目已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameProject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/games/{gameId}:
+    parameters:
+      - $ref: '#/components/parameters/GameId'
+    patch:
+      operationId: updateAdminGame
+      description: 按 revision 编辑游戏项目；gameId 不可修改，且必须校验请求 Origin。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGameProjectRequest'
+      responses:
+        '200':
+          description: 游戏项目已更新
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameProject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/games/{gameId}/servers:
+    parameters:
+      - $ref: '#/components/parameters/GameId'
+    get:
+      operationId: listAdminGameServers
+      description: 返回指定游戏的全部区服，包括尚未开放给客户端的区服。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      responses:
+        '200':
+          description: 游戏区服列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagedGameServerListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    post:
+      operationId: createAdminGameServer
+      description: 为指定游戏新增区服；必须使用管理员 Cookie 会话，并校验请求 Origin。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGameServerRequest'
+      responses:
+        '201':
+          description: 游戏区服已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagedGameServer'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/games/{gameId}/servers/{serverId}:
+    parameters:
+      - $ref: '#/components/parameters/GameId'
+      - $ref: '#/components/parameters/ServerId'
+    patch:
+      operationId: updateAdminGameServer
+      description: 按 revision 编辑区服；gameId 与 serverId 不可修改，且必须校验请求 Origin。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGameServerRequest'
+      responses:
+        '200':
+          description: 游戏区服已更新
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagedGameServer'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/games:
+    get:
+      operationId: listClientGames
+      description: 返回允许客户端发现的游戏；仅包含 enabled 或 maintenance 状态。
+      tags: [Public]
+      security: []
+      responses:
+        '200':
+          description: 客户端游戏列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientGameListResponse'
         '500':
           $ref: '#/components/responses/Internal'
         '503':
@@ -145,6 +356,7 @@ paths:
       - $ref: '#/components/parameters/GameId'
     get:
       operationId: listAreas
+      description: 仅下发 isOpen=true 的区服；维护区服仍返回供客户端展示，但不可登录。
       tags: [Public]
       security:
         - {}
@@ -545,6 +757,9 @@ components:
     GameStatus:
       type: string
       enum: [enabled, maintenance, disabled]
+    GameConfigurationState:
+      type: string
+      enum: [draft, configured]
     ErrorCode:
       type: string
       enum:
@@ -565,6 +780,8 @@ components:
         - SERVER_DISABLED
         - ADMIN_AUTH_REQUIRED
         - ORIGIN_FORBIDDEN
+        - GAME_PROJECT_CONFLICT
+        - GAME_SERVER_CONFLICT
     ErrorResponse:
       type: object
       additionalProperties: false
@@ -773,18 +990,293 @@ components:
     AdminSessionResponse:
       type: object
       additionalProperties: false
-      required: [operator, games, expiresAt]
+      required: [operator, games, canManageGames, expiresAt]
       properties:
         operator:
           $ref: '#/components/schemas/AdminOperator'
         games:
           type: array
-          maxItems: 1024
           items:
             $ref: '#/components/schemas/AdminGameAccess'
+        canManageGames:
+          type: boolean
         expiresAt:
           type: string
           format: date-time
+    GameProject:
+      type: object
+      additionalProperties: false
+      required:
+        - gameId
+        - name
+        - description
+        - status
+        - configurationState
+        - clientVisible
+        - sortOrder
+        - revision
+        - createdAt
+        - updatedAt
+      properties:
+        gameId:
+          $ref: '#/components/schemas/GameId'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 500
+        status:
+          $ref: '#/components/schemas/GameStatus'
+        configurationState:
+          $ref: '#/components/schemas/GameConfigurationState'
+        clientVisible:
+          type: boolean
+        sortOrder:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        revision:
+          type: integer
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    GameProjectListResponse:
+      type: object
+      additionalProperties: false
+      required: [games]
+      properties:
+        games:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameProject'
+    CreateGameProjectRequest:
+      type: object
+      additionalProperties: false
+      required: [gameId, name, description]
+      properties:
+        gameId:
+          $ref: '#/components/schemas/GameId'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 500
+    UpdateGameProjectRequest:
+      type: object
+      additionalProperties: false
+      required: [name, description, status, clientVisible, sortOrder, revision]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 500
+        status:
+          $ref: '#/components/schemas/GameStatus'
+        clientVisible:
+          type: boolean
+        sortOrder:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        revision:
+          type: integer
+          minimum: 1
+    ManagedGameServer:
+      type: object
+      additionalProperties: false
+      required:
+        - gameId
+        - serverId
+        - name
+        - tag
+        - status
+        - openTime
+        - gameHttpUrl
+        - gameWsUrl
+        - isOpen
+        - sortOrder
+        - revision
+        - createdAt
+        - updatedAt
+      properties:
+        gameId:
+          $ref: '#/components/schemas/GameId'
+        serverId:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        tag:
+          type: string
+          enum: [normal, new, full, maintenance]
+        status:
+          type: string
+          enum: [smooth, busy, maintenance]
+        openTime:
+          type: integer
+          minimum: 0
+        gameHttpUrl:
+          type: string
+          format: uri
+          maxLength: 2048
+        gameWsUrl:
+          type: string
+          format: uri
+          maxLength: 2048
+        isOpen:
+          type: boolean
+        sortOrder:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        revision:
+          type: integer
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ManagedGameServerListResponse:
+      type: object
+      additionalProperties: false
+      required: [servers]
+      properties:
+        servers:
+          type: array
+          maxItems: 65536
+          items:
+            $ref: '#/components/schemas/ManagedGameServer'
+    CreateGameServerRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - serverId
+        - name
+        - tag
+        - status
+        - openTime
+        - gameHttpUrl
+        - gameWsUrl
+        - isOpen
+        - sortOrder
+      properties:
+        serverId:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        tag:
+          type: string
+          enum: [normal, new, full, maintenance]
+        status:
+          type: string
+          enum: [smooth, busy, maintenance]
+        openTime:
+          type: integer
+          minimum: 0
+        gameHttpUrl:
+          type: string
+          format: uri
+          maxLength: 2048
+        gameWsUrl:
+          type: string
+          format: uri
+          maxLength: 2048
+        isOpen:
+          type: boolean
+        sortOrder:
+          type: integer
+          minimum: 0
+          maximum: 65535
+    UpdateGameServerRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - tag
+        - status
+        - openTime
+        - gameHttpUrl
+        - gameWsUrl
+        - isOpen
+        - sortOrder
+        - revision
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        tag:
+          type: string
+          enum: [normal, new, full, maintenance]
+        status:
+          type: string
+          enum: [smooth, busy, maintenance]
+        openTime:
+          type: integer
+          minimum: 0
+        gameHttpUrl:
+          type: string
+          format: uri
+          maxLength: 2048
+        gameWsUrl:
+          type: string
+          format: uri
+          maxLength: 2048
+        isOpen:
+          type: boolean
+        sortOrder:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        revision:
+          type: integer
+          minimum: 1
+    ClientGameSummary:
+      type: object
+      additionalProperties: false
+      required: [gameId, name, description, status]
+      properties:
+        gameId:
+          $ref: '#/components/schemas/GameId'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 500
+        status:
+          type: string
+          enum: [enabled, maintenance]
+    ClientGameListResponse:
+      type: object
+      additionalProperties: false
+      required: [games]
+      properties:
+        games:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClientGameSummary'
     AdminAccountDetailResponse:
       type: object
       additionalProperties: false

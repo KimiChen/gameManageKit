@@ -6,8 +6,11 @@ import mysql, {
 
 const REQUIRED_SCHEMA_TABLES = Object.freeze([
   "games",
+  "game_directory_settings",
+  "game_servers",
   "admin_operators",
   "admin_game_access",
+  "admin_game_audit",
   "admin_sessions",
   "admin_auth_audit",
   "accounts",

@@ -6,31 +6,80 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS games (
-  game_id    VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-  status     ENUM('enabled', 'maintenance', 'disabled') NOT NULL DEFAULT 'enabled',
-  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+  game_id            VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  name               VARCHAR(128) NOT NULL,
+  description        VARCHAR(500) NOT NULL DEFAULT '',
+  status             ENUM('enabled', 'maintenance', 'disabled')
+    NOT NULL DEFAULT 'maintenance',
+  configuration_state ENUM('draft', 'configured') NOT NULL DEFAULT 'draft',
+  client_visible     TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  sort_order         SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  revision           BIGINT UNSIGNED NOT NULL DEFAULT 1,
+  created_at         DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at         DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
     ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (game_id),
   CONSTRAINT chk_games_game_id
     CHECK (REGEXP_LIKE(game_id, '^[a-z][a-z0-9-]{1,31}$', 'c')),
+  CONSTRAINT chk_games_name
+    CHECK (CHAR_LENGTH(name) BETWEEN 1 AND 128),
+  CONSTRAINT chk_games_description
+    CHECK (CHAR_LENGTH(description) <= 500),
   CONSTRAINT chk_games_status
-    CHECK (status IN ('enabled', 'maintenance', 'disabled'))
+    CHECK (status IN ('enabled', 'maintenance', 'disabled')),
+  CONSTRAINT chk_games_configuration_state
+    CHECK (configuration_state IN ('draft', 'configured')),
+  CONSTRAINT chk_games_draft_status
+    CHECK (configuration_state <> 'draft' OR status <> 'enabled'),
+  CONSTRAINT chk_games_client_visible
+    CHECK (client_visible IN (0, 1)),
+  CONSTRAINT chk_games_client_visibility
+    CHECK (
+      client_visible = 0
+      OR (configuration_state = 'configured' AND status <> 'disabled')
+    ),
+  CONSTRAINT chk_games_revision
+    CHECK (revision > 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS admin_operators (
-  operator_id   VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-  display_name  VARCHAR(128) NOT NULL,
-  password_hash VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-  status        ENUM('enabled', 'disabled') NOT NULL DEFAULT 'enabled',
-  auth_version  BIGINT UNSIGNED NOT NULL DEFAULT 1,
-  created_at    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  updated_at    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+  operator_id      VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  display_name     VARCHAR(128) NOT NULL,
+  password_hash    VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  status           ENUM('enabled', 'disabled') NOT NULL DEFAULT 'enabled',
+  auth_version     BIGINT UNSIGNED NOT NULL DEFAULT 1,
+  can_manage_games TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  created_at       DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at       DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
     ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (operator_id),
   CONSTRAINT chk_admin_operator_id
     CHECK (REGEXP_LIKE(operator_id, '^[a-z][a-z0-9_.-]{2,63}$', 'c')),
-  CONSTRAINT chk_admin_operator_auth_version CHECK (auth_version > 0)
+  CONSTRAINT chk_admin_operator_auth_version CHECK (auth_version > 0),
+  CONSTRAINT chk_admin_operator_manage_games
+    CHECK (can_manage_games IN (0, 1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS admin_game_audit (
+  id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  game_id     VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  operator_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  action      ENUM('create', 'update') NOT NULL,
+  before_data JSON NULL,
+  after_data  JSON NOT NULL,
+  ip          VARBINARY(16) NULL,
+  created_at  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  KEY idx_admin_game_audit_game_time (game_id, created_at),
+  KEY idx_admin_game_audit_operator_time (operator_id, created_at),
+  CONSTRAINT fk_admin_game_audit_game
+    FOREIGN KEY (game_id) REFERENCES games (game_id)
+    ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT fk_admin_game_audit_operator
+    FOREIGN KEY (operator_id) REFERENCES admin_operators (operator_id)
+    ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CONSTRAINT chk_admin_game_audit_action
+    CHECK (action IN ('create', 'update'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS admin_game_access (

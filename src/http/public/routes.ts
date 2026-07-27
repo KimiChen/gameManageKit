@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import {
   GameManageKitPath,
   type AreaListResponse,
+  type ClientGameListResponse,
   type DevLoginRequest,
   type LoginResponse,
   type WxLoginRequest,
@@ -12,6 +13,7 @@ import { normalizeIp } from "../../infra/security/security.js";
 import type { LoginResult, LoginService } from "../../domain/account/login.js";
 import type { DirectoryService } from "../../domain/directory/service.js";
 import type { GameRegistry } from "../../domain/game/registry.js";
+import type { GameProjectService } from "../../domain/game/projects.js";
 import {
   errorResponseSchemas,
   fastifyPath,
@@ -23,6 +25,10 @@ import {
 
 export interface PublicRouteServices {
   readonly games: GameRegistry;
+  readonly gameProjects: Pick<
+    GameProjectService,
+    "listForClient" | "resolve"
+  >;
   readonly login: Pick<LoginService, "loginWechat" | "loginDev">;
   readonly directory: Pick<DirectoryService, "list">;
 }
@@ -62,8 +68,24 @@ export function registerPublicRoutes(
   services: PublicRouteServices,
 ): void {
   const preHandler = async (request: Parameters<typeof resolveGameContext>[0]): Promise<void> => {
-    resolveGameContext(request, services.games);
+    await resolveGameContext(request, services.gameProjects);
   };
+
+  app.get(
+    GameManageKitPath.ListClientGames,
+    {
+      schema: {
+        response: {
+          200: schemaRef("ClientGameListResponse"),
+          ...errorResponseSchemas,
+        },
+      },
+    },
+    async (_request, reply): Promise<ClientGameListResponse> => {
+      void reply.header("cache-control", "no-store");
+      return { games: [...await services.gameProjects.listForClient()] };
+    },
+  );
 
   app.post<{ Params: GameParams; Body: WxLoginRequest }>(
     fastifyPath(GameManageKitPath.WxLogin),

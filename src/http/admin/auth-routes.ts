@@ -30,7 +30,7 @@ export interface AdminAuthRouteServices {
   readonly adminAuth: Pick<
     AdminAuthService,
     "login" | "authenticate" | "logout" | "requireAccountOperation"
-    | "requireGameAccess"
+    | "requireGameAccess" | "requireGameManagement"
   >;
 }
 
@@ -56,16 +56,17 @@ function sessionResponse(
     },
     games: identity.games.flatMap((access) => {
       const game = games.get(access.gameId);
-      return game
+      return game && access.configurationState === "configured"
         ? [{
-            gameId: game.gameId,
-            name: game.name,
-            status: game.status,
+            gameId: access.gameId,
+            name: access.name,
+            status: access.status,
             canOperateAccounts:
-              access.canOperateAccounts && game.status === "enabled",
+              access.canOperateAccounts && access.status === "enabled",
           }]
         : [];
     }),
+    canManageGames: identity.canManageGames,
     expiresAt: identity.expiresAt,
   };
 }

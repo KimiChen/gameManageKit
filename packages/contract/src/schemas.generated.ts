@@ -16,6 +16,14 @@ export const GameManageKitSchemas = {
     ],
     "$id": "GameStatus"
   },
+  "GameConfigurationState": {
+    "type": "string",
+    "enum": [
+      "draft",
+      "configured"
+    ],
+    "$id": "GameConfigurationState"
+  },
   "ErrorCode": {
     "type": "string",
     "enum": [
@@ -35,7 +43,9 @@ export const GameManageKitSchemas = {
       "SERVER_NOT_FOUND",
       "SERVER_DISABLED",
       "ADMIN_AUTH_REQUIRED",
-      "ORIGIN_FORBIDDEN"
+      "ORIGIN_FORBIDDEN",
+      "GAME_PROJECT_CONFLICT",
+      "GAME_SERVER_CONFLICT"
     ],
     "$id": "ErrorCode"
   },
@@ -412,6 +422,7 @@ export const GameManageKitSchemas = {
     "required": [
       "operator",
       "games",
+      "canManageGames",
       "expiresAt"
     ],
     "properties": {
@@ -420,10 +431,12 @@ export const GameManageKitSchemas = {
       },
       "games": {
         "type": "array",
-        "maxItems": 1024,
         "items": {
           "$ref": "AdminGameAccess#"
         }
+      },
+      "canManageGames": {
+        "type": "boolean"
       },
       "expiresAt": {
         "type": "string",
@@ -431,6 +444,426 @@ export const GameManageKitSchemas = {
       }
     },
     "$id": "AdminSessionResponse"
+  },
+  "GameProject": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "gameId",
+      "name",
+      "description",
+      "status",
+      "configurationState",
+      "clientVisible",
+      "sortOrder",
+      "revision",
+      "createdAt",
+      "updatedAt"
+    ],
+    "properties": {
+      "gameId": {
+        "$ref": "GameId#"
+      },
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "description": {
+        "type": "string",
+        "maxLength": 500
+      },
+      "status": {
+        "$ref": "GameStatus#"
+      },
+      "configurationState": {
+        "$ref": "GameConfigurationState#"
+      },
+      "clientVisible": {
+        "type": "boolean"
+      },
+      "sortOrder": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65535
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "createdAt": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "updatedAt": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "$id": "GameProject"
+  },
+  "GameProjectListResponse": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "games"
+    ],
+    "properties": {
+      "games": {
+        "type": "array",
+        "items": {
+          "$ref": "GameProject#"
+        }
+      }
+    },
+    "$id": "GameProjectListResponse"
+  },
+  "CreateGameProjectRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "gameId",
+      "name",
+      "description"
+    ],
+    "properties": {
+      "gameId": {
+        "$ref": "GameId#"
+      },
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "description": {
+        "type": "string",
+        "maxLength": 500
+      }
+    },
+    "$id": "CreateGameProjectRequest"
+  },
+  "UpdateGameProjectRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "name",
+      "description",
+      "status",
+      "clientVisible",
+      "sortOrder",
+      "revision"
+    ],
+    "properties": {
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "description": {
+        "type": "string",
+        "maxLength": 500
+      },
+      "status": {
+        "$ref": "GameStatus#"
+      },
+      "clientVisible": {
+        "type": "boolean"
+      },
+      "sortOrder": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65535
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "$id": "UpdateGameProjectRequest"
+  },
+  "ManagedGameServer": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "gameId",
+      "serverId",
+      "name",
+      "tag",
+      "status",
+      "openTime",
+      "gameHttpUrl",
+      "gameWsUrl",
+      "isOpen",
+      "sortOrder",
+      "revision",
+      "createdAt",
+      "updatedAt"
+    ],
+    "properties": {
+      "gameId": {
+        "$ref": "GameId#"
+      },
+      "serverId": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65535
+      },
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "tag": {
+        "type": "string",
+        "enum": [
+          "normal",
+          "new",
+          "full",
+          "maintenance"
+        ]
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "smooth",
+          "busy",
+          "maintenance"
+        ]
+      },
+      "openTime": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "gameHttpUrl": {
+        "type": "string",
+        "format": "uri",
+        "maxLength": 2048
+      },
+      "gameWsUrl": {
+        "type": "string",
+        "format": "uri",
+        "maxLength": 2048
+      },
+      "isOpen": {
+        "type": "boolean"
+      },
+      "sortOrder": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65535
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "createdAt": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "updatedAt": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "$id": "ManagedGameServer"
+  },
+  "ManagedGameServerListResponse": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "servers"
+    ],
+    "properties": {
+      "servers": {
+        "type": "array",
+        "maxItems": 65536,
+        "items": {
+          "$ref": "ManagedGameServer#"
+        }
+      }
+    },
+    "$id": "ManagedGameServerListResponse"
+  },
+  "CreateGameServerRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "serverId",
+      "name",
+      "tag",
+      "status",
+      "openTime",
+      "gameHttpUrl",
+      "gameWsUrl",
+      "isOpen",
+      "sortOrder"
+    ],
+    "properties": {
+      "serverId": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65535
+      },
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "tag": {
+        "type": "string",
+        "enum": [
+          "normal",
+          "new",
+          "full",
+          "maintenance"
+        ]
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "smooth",
+          "busy",
+          "maintenance"
+        ]
+      },
+      "openTime": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "gameHttpUrl": {
+        "type": "string",
+        "format": "uri",
+        "maxLength": 2048
+      },
+      "gameWsUrl": {
+        "type": "string",
+        "format": "uri",
+        "maxLength": 2048
+      },
+      "isOpen": {
+        "type": "boolean"
+      },
+      "sortOrder": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65535
+      }
+    },
+    "$id": "CreateGameServerRequest"
+  },
+  "UpdateGameServerRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "name",
+      "tag",
+      "status",
+      "openTime",
+      "gameHttpUrl",
+      "gameWsUrl",
+      "isOpen",
+      "sortOrder",
+      "revision"
+    ],
+    "properties": {
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "tag": {
+        "type": "string",
+        "enum": [
+          "normal",
+          "new",
+          "full",
+          "maintenance"
+        ]
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "smooth",
+          "busy",
+          "maintenance"
+        ]
+      },
+      "openTime": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "gameHttpUrl": {
+        "type": "string",
+        "format": "uri",
+        "maxLength": 2048
+      },
+      "gameWsUrl": {
+        "type": "string",
+        "format": "uri",
+        "maxLength": 2048
+      },
+      "isOpen": {
+        "type": "boolean"
+      },
+      "sortOrder": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65535
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "$id": "UpdateGameServerRequest"
+  },
+  "ClientGameSummary": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "gameId",
+      "name",
+      "description",
+      "status"
+    ],
+    "properties": {
+      "gameId": {
+        "$ref": "GameId#"
+      },
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "description": {
+        "type": "string",
+        "maxLength": 500
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "enabled",
+          "maintenance"
+        ]
+      }
+    },
+    "$id": "ClientGameSummary"
+  },
+  "ClientGameListResponse": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "games"
+    ],
+    "properties": {
+      "games": {
+        "type": "array",
+        "items": {
+          "$ref": "ClientGameSummary#"
+        }
+      }
+    },
+    "$id": "ClientGameListResponse"
   },
   "AdminAccountDetailResponse": {
     "type": "object",

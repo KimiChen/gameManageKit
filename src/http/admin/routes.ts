@@ -25,6 +25,7 @@ import type {
   GameContext,
   GameRegistry,
 } from "../../domain/game/registry.js";
+import type { GameProjectService } from "../../domain/game/projects.js";
 import { GameManageKitError } from "../../errors.js";
 import type { MetricsRegistry } from "../../infra/observability/metrics.js";
 import { normalizeIp } from "../../infra/security/security.js";
@@ -46,6 +47,7 @@ import {
 
 export interface AdminRouteServices {
   readonly games: GameRegistry;
+  readonly gameProjects: Pick<GameProjectService, "resolve">;
   readonly admin: Pick<
     AdminAccountService,
     "find" | "execute" | "auditDenied"
@@ -142,7 +144,7 @@ async function authorizeSecret(
     }, "game_access_denied");
     throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
   }
-  const game = resolveGameContext(request, services.games);
+  const game = await resolveGameContext(request, services.gameProjects);
   return {
     game,
     operatorId: identity.operatorId,
@@ -196,7 +198,7 @@ async function authorizeRequest(
     }
     throw error;
   }
-  const game = resolveGameContext(request, services.games);
+  const game = await resolveGameContext(request, services.gameProjects);
   if (requireOperate) {
     try {
       requireAdminAccountCapability(identity, game.gameId);

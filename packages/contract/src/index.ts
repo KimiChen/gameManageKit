@@ -23,6 +23,26 @@ export type AdminLoginRequest = components["schemas"]["AdminLoginRequest"];
 export type AdminOperator = components["schemas"]["AdminOperator"];
 export type AdminGameAccess = components["schemas"]["AdminGameAccess"];
 export type AdminSessionResponse = components["schemas"]["AdminSessionResponse"];
+export type GameConfigurationState =
+  components["schemas"]["GameConfigurationState"];
+export type GameProject = components["schemas"]["GameProject"];
+export type GameProjectListResponse =
+  components["schemas"]["GameProjectListResponse"];
+export type CreateGameProjectRequest =
+  components["schemas"]["CreateGameProjectRequest"];
+export type UpdateGameProjectRequest =
+  components["schemas"]["UpdateGameProjectRequest"];
+export type ManagedGameServer =
+  components["schemas"]["ManagedGameServer"];
+export type ManagedGameServerListResponse =
+  components["schemas"]["ManagedGameServerListResponse"];
+export type CreateGameServerRequest =
+  components["schemas"]["CreateGameServerRequest"];
+export type UpdateGameServerRequest =
+  components["schemas"]["UpdateGameServerRequest"];
+export type ClientGameSummary = components["schemas"]["ClientGameSummary"];
+export type ClientGameListResponse =
+  components["schemas"]["ClientGameListResponse"];
 export type AdminAccountDetailResponse =
   components["schemas"]["AdminAccountDetailResponse"];
 export type LiveResponse = components["schemas"]["LiveResponse"];

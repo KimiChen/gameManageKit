@@ -7,7 +7,9 @@ import { CharacterService } from "./domain/character/service.js";
 import {
   DirectoryService,
 } from "./domain/directory/service.js";
+import { GameProjectService } from "./domain/game/projects.js";
 import { GameRegistry } from "./domain/game/registry.js";
+import { GameServerService } from "./domain/game/servers.js";
 import { SessionService } from "./domain/session/service.js";
 import { Database } from "./infra/mysql/database.js";
 import { MetricsRegistry } from "./infra/observability/metrics.js";
@@ -22,6 +24,10 @@ import {
   registerAdminRoutes,
   type AdminRouteServices,
 } from "./http/admin/routes.js";
+import {
+  registerAdminGameRoutes,
+  type AdminGameRouteServices,
+} from "./http/admin/game-routes.js";
 import { registerAdminWebRoutes } from "./http/admin/web.js";
 import {
   registerInternalRoutes,
@@ -40,13 +46,14 @@ import {
   type MetricsRouteServices,
 } from "./http/metrics/routes.js";
 
-export interface GameManageKitServices
-  extends PublicRouteServices,
-  InternalRouteServices,
-  AdminAuthRouteServices,
-  AdminRouteServices,
-  SystemRouteServices,
-  MetricsRouteServices {}
+export type GameManageKitServices =
+  & PublicRouteServices
+  & InternalRouteServices
+  & AdminAuthRouteServices
+  & AdminGameRouteServices
+  & AdminRouteServices
+  & SystemRouteServices
+  & MetricsRouteServices;
 
 export interface GameManageKitApps {
   readonly publicApp: FastifyInstance;
@@ -58,6 +65,8 @@ export interface Runtime {
   readonly adminAuth: AdminAuthService;
   readonly database: Database;
   readonly games: GameRegistry;
+  readonly gameProjects: GameProjectService;
+  readonly gameServers: GameServerService;
   readonly metrics: MetricsRegistry;
 }
 
@@ -72,6 +81,7 @@ export function buildApps(
   const internalApp = createHttpApp(config);
   registerInternalRoutes(internalApp, services);
   registerAdminAuthRoutes(internalApp, config, services);
+  registerAdminGameRoutes(internalApp, config, services);
   registerAdminRoutes(internalApp, config, services);
   registerAdminWebRoutes(internalApp);
   registerMetricsRoutes(internalApp, services);
@@ -101,6 +111,11 @@ export async function createRuntime(
       );
     }
     await games.sync(database.pool);
+    const gameProjects = new GameProjectService(database, games);
+    const gameServers = new GameServerService(
+      database,
+      config.nodeEnv === "production",
+    );
     const gameIds = games.list().map((game) => game.gameId);
     const metrics = new MetricsRegistry(gameIds);
     const sessions = new SessionService(database.pool, metrics);
@@ -115,6 +130,8 @@ export async function createRuntime(
     const adminAuth = new AdminAuthService(database);
     const services: GameManageKitServices = {
       games,
+      gameProjects,
+      gameServers,
       metrics,
       login,
       directory,
@@ -134,6 +151,8 @@ export async function createRuntime(
       adminAuth,
       database,
       games,
+      gameProjects,
+      gameServers,
       metrics,
     };
   } catch (error) {

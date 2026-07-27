@@ -15,6 +15,7 @@ export interface AdminCreateOptions {
   readonly displayName: string;
   readonly gameIds: readonly string[];
   readonly canOperateAccounts: boolean;
+  readonly canManageGames?: boolean;
 }
 
 function optionValue(args: readonly string[], index: number, name: string): string {
@@ -30,6 +31,7 @@ export function parseAdminCreateArgs(args: readonly string[]): AdminCreateOption
   let displayName: string | null = null;
   let gameList: string | null = null;
   let canOperateAccounts = true;
+  let canManageGames = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -44,6 +46,8 @@ export function parseAdminCreateArgs(args: readonly string[]): AdminCreateOption
       index += 1;
     } else if (argument === "--read-only") {
       canOperateAccounts = false;
+    } else if (argument === "--manage-games") {
+      canManageGames = true;
     } else {
       throw new Error(`不支持的参数 ${argument ?? ""}`);
     }
@@ -65,17 +69,21 @@ export function parseAdminCreateArgs(args: readonly string[]): AdminCreateOption
     .map((value) => value.trim())
     .filter(Boolean);
   if (
-    gameIds.length === 0
+    (gameIds.length === 0 && !canManageGames)
     || new Set(gameIds).size !== gameIds.length
     || gameIds.some((gameId) => !GAME_ID_PATTERN.test(gameId))
   ) {
-    throw new Error("games 必须是无重复的合法 gameId 逗号列表");
+    throw new Error(
+      "games 必须是无重复的合法 gameId 逗号列表；"
+      + "仅管理游戏项目时可配合 --manage-games 省略",
+    );
   }
   return Object.freeze({
     operatorId: normalizedOperatorId,
     displayName: normalizedDisplayName,
     gameIds: Object.freeze(gameIds),
     canOperateAccounts,
+    canManageGames,
   });
 }
 
@@ -106,20 +114,28 @@ export async function createAdminOperator(
 ): Promise<void> {
   const passwordHash = await hashAdminPassword(password);
   await database.transaction(async (connection) => {
-    const [games] = await connection.query<RowDataPacket[]>(
-      "SELECT game_id FROM games WHERE game_id IN (?) FOR SHARE",
-      [[...options.gameIds]],
-    );
-    const known = new Set(games.map((row) => String(row.game_id)));
-    const missing = options.gameIds.filter((gameId) => !known.has(gameId));
-    if (missing.length > 0) {
-      throw new Error(`未知 gameId: ${missing.join(",")}`);
+    if (options.gameIds.length > 0) {
+      const [games] = await connection.query<RowDataPacket[]>(
+        "SELECT game_id FROM games WHERE game_id IN (?) FOR SHARE",
+        [[...options.gameIds]],
+      );
+      const known = new Set(games.map((row) => String(row.game_id)));
+      const missing = options.gameIds.filter((gameId) => !known.has(gameId));
+      if (missing.length > 0) {
+        throw new Error(`未知 gameId: ${missing.join(",")}`);
+      }
     }
     await connection.execute(
       `INSERT INTO admin_operators
-         (operator_id, display_name, password_hash, status, auth_version)
-       VALUES (?, ?, ?, 'enabled', 1)`,
-      [options.operatorId, options.displayName, passwordHash],
+         (operator_id, display_name, password_hash, status, auth_version,
+          can_manage_games)
+       VALUES (?, ?, ?, 'enabled', 1, ?)`,
+      [
+        options.operatorId,
+        options.displayName,
+        passwordHash,
+        options.canManageGames ? 1 : 0,
+      ],
     );
     for (const gameId of options.gameIds) {
       await connection.execute(
@@ -146,7 +162,13 @@ async function main(): Promise<void> {
   try {
     await createAdminOperator(database, options, password);
     process.stdout.write(
-      `管理员 ${options.operatorId} 已创建，可访问 ${options.gameIds.join(",")}。\n`,
+      `管理员 ${options.operatorId} 已创建，`
+      + (
+        options.gameIds.length > 0
+          ? `可访问 ${options.gameIds.join(",")}。`
+          : "未分配账号管理游戏。"
+      )
+      + "\n",
     );
     process.stdout.write(`初始密码（仅显示一次）: ${password}\n`);
   } finally {

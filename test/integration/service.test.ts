@@ -95,10 +95,13 @@ test("多游戏迁移、认证、数据与运行态完整隔离", async () => {
       );
       assert.deepEqual(
         versions.map((row) => [Number(row.version), String(row.name)]),
-        [[1, "0001_initial.sql"]],
+        [
+          [1, "0001_initial.sql"],
+          [2, "0002_game_servers.sql"],
+        ],
       );
       const [tables] = await check.query<RowDataPacket[]>("SHOW TABLES");
-      assert.equal(tables.length, 11);
+      assert.equal(tables.length, 14);
       const [sessionKeyColumns] = await check.query<RowDataPacket[]>(
         "SHOW COLUMNS FROM accounts LIKE 'session_key'",
       );
@@ -130,6 +133,21 @@ test("多游戏迁移、认证、数据与运行态完整隔离", async () => {
     });
     runtime = await createRuntime(config, { games });
     const { publicApp, internalApp } = runtime.apps;
+    const [seededDirectories] = await runtime.database.pool.query<RowDataPacket[]>(
+      `SELECT d.game_id, d.is_ops, COUNT(s.server_id) AS server_count
+         FROM game_directory_settings d
+         LEFT JOIN game_servers s ON s.game_id = d.game_id
+        GROUP BY d.game_id, d.is_ops
+        ORDER BY d.game_id`,
+    );
+    assert.deepEqual(seededDirectories.map((row) => ({
+      gameId: String(row.game_id),
+      isOps: Number(row.is_ops),
+      serverCount: Number(row.server_count),
+    })), [
+      { gameId: "game-a", isOps: 0, serverCount: 3 },
+      { gameId: "game-b", isOps: 1, serverCount: 2 },
+    ]);
     const webAdminPassword = generateAdminPassword(
       () => Buffer.alloc(12, 0x42),
     );
@@ -138,6 +156,7 @@ test("多游戏迁移、认证、数据与运行态完整隔离", async () => {
       displayName: "Integration Admin",
       gameIds: ["game-a"],
       canOperateAccounts: true,
+      canManageGames: true,
     }, webAdminPassword);
     const webLogin = async (password = webAdminPassword): Promise<string> => {
       const response = await internalApp.inject({
@@ -221,6 +240,306 @@ test("多游戏迁移、认证、数据与运行态完整隔离", async () => {
       webSession.json().games.map((game: { gameId: string }) => game.gameId),
       ["game-a"],
     );
+    assert.equal(webSession.json().canManageGames, true);
+    const initialClientGames = await publicApp.inject({
+      method: "GET",
+      url: "/v1/games",
+    });
+    assert.equal(initialClientGames.statusCode, 200);
+    assert.deepEqual(
+      initialClientGames.json().games.map(
+        (game: { gameId: string }) => game.gameId,
+      ),
+      ["game-a", "game-b"],
+    );
+    const managedGames = await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/games",
+      headers: { cookie: adminCookie },
+    });
+    assert.equal(managedGames.statusCode, 200, managedGames.body);
+    const gameAProject = managedGames.json().games.find(
+      (game: { gameId: string }) => game.gameId === "game-a",
+    );
+    assert.equal(gameAProject.configurationState, "configured");
+    assert.equal(gameAProject.clientVisible, true);
+
+    const createdProject = await internalApp.inject({
+      method: "POST",
+      url: "/v1/admin/games",
+      headers: { cookie: adminCookie, origin: config.adminOrigin },
+      payload: {
+        gameId: "game-c",
+        name: "游戏 C",
+        description: "等待技术配置",
+      },
+    });
+    assert.equal(createdProject.statusCode, 201, createdProject.body);
+    assert.deepEqual({
+      status: createdProject.json().status,
+      configurationState: createdProject.json().configurationState,
+      clientVisible: createdProject.json().clientVisible,
+      revision: createdProject.json().revision,
+    }, {
+      status: "maintenance",
+      configurationState: "draft",
+      clientVisible: false,
+      revision: 1,
+    });
+
+    const updatedDraft = await internalApp.inject({
+      method: "PATCH",
+      url: "/v1/admin/games/game-c",
+      headers: { cookie: adminCookie, origin: config.adminOrigin },
+      payload: {
+        name: "游戏 C（筹备中）",
+        description: "尚未写入部署配置",
+        status: "maintenance",
+        clientVisible: false,
+        sortOrder: 30,
+        revision: 1,
+      },
+    });
+    assert.equal(updatedDraft.statusCode, 200, updatedDraft.body);
+    assert.equal(updatedDraft.json().revision, 2);
+    const staleDraftUpdate = await internalApp.inject({
+      method: "PATCH",
+      url: "/v1/admin/games/game-c",
+      headers: { cookie: adminCookie, origin: config.adminOrigin },
+      payload: {
+        name: "旧版本覆盖",
+        description: "",
+        status: "maintenance",
+        clientVisible: false,
+        sortOrder: 0,
+        revision: 1,
+      },
+    });
+    assert.equal(staleDraftUpdate.statusCode, 409);
+    assert.equal(
+      staleDraftUpdate.json().code,
+      "GAME_PROJECT_CONFLICT",
+    );
+    const clientGamesAfterDraft = await publicApp.inject({
+      method: "GET",
+      url: "/v1/games",
+    });
+    assert.equal(
+      clientGamesAfterDraft.json().games.some(
+        (game: { gameId: string }) => game.gameId === "game-c",
+      ),
+      false,
+    );
+
+    const maintenanceGameA = await internalApp.inject({
+      method: "PATCH",
+      url: "/v1/admin/games/game-a",
+      headers: { cookie: adminCookie, origin: config.adminOrigin },
+      payload: {
+        name: gameAProject.name,
+        description: "维护公告",
+        status: "maintenance",
+        clientVisible: true,
+        sortOrder: 0,
+        revision: gameAProject.revision,
+      },
+    });
+    assert.equal(maintenanceGameA.statusCode, 200, maintenanceGameA.body);
+    const maintainedClientGames = await publicApp.inject({
+      method: "GET",
+      url: "/v1/games",
+    });
+    assert.equal(
+      maintainedClientGames.json().games.find(
+        (game: { gameId: string }) => game.gameId === "game-a",
+      ).status,
+      "maintenance",
+    );
+    const maintenanceLogin = await publicApp.inject({
+      method: "POST",
+      url: "/v1/games/game-a/sessions/dev",
+      payload: { devKey: "maintenance-game", serverId: 1 },
+    });
+    assert.equal(maintenanceLogin.statusCode, 503);
+    assert.equal(maintenanceLogin.json().code, "GAME_DISABLED");
+    const restoredGameA = await internalApp.inject({
+      method: "PATCH",
+      url: "/v1/admin/games/game-a",
+      headers: { cookie: adminCookie, origin: config.adminOrigin },
+      payload: {
+        name: gameAProject.name,
+        description: "",
+        status: "enabled",
+        clientVisible: true,
+        sortOrder: 0,
+        revision: maintenanceGameA.json().revision,
+      },
+    });
+    assert.equal(restoredGameA.statusCode, 200, restoredGameA.body);
+
+    const initialManagedServers = await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/games/game-a/servers",
+      headers: { cookie: adminCookie },
+    });
+    assert.equal(
+      initialManagedServers.statusCode,
+      200,
+      initialManagedServers.body,
+    );
+    assert.deepEqual(
+      initialManagedServers.json().servers.map(
+        (server: { serverId: number }) => server.serverId,
+      ),
+      [1, 2, 9],
+    );
+    const gameAServer2 = initialManagedServers.json().servers.find(
+      (server: { serverId: number }) => server.serverId === 2,
+    );
+
+    const draftServer = await internalApp.inject({
+      method: "POST",
+      url: "/v1/admin/games/game-c/servers",
+      headers: { cookie: adminCookie, origin: config.adminOrigin },
+      payload: {
+        serverId: 7,
+        name: "C 预备服",
+        tag: "new",
+        status: "smooth",
+        openTime: 1_800_000_000,
+        gameHttpUrl: "http://127.0.0.1:28080",
+        gameWsUrl: "ws://127.0.0.1:28081",
+        isOpen: false,
+        sortOrder: 7,
+      },
+    });
+    assert.equal(draftServer.statusCode, 201, draftServer.body);
+    assert.deepEqual({
+      gameId: draftServer.json().gameId,
+      serverId: draftServer.json().serverId,
+      isOpen: draftServer.json().isOpen,
+      revision: draftServer.json().revision,
+    }, {
+      gameId: "game-c",
+      serverId: 7,
+      isOpen: false,
+      revision: 1,
+    });
+    const duplicateDraftServer = await internalApp.inject({
+      method: "POST",
+      url: "/v1/admin/games/game-c/servers",
+      headers: { cookie: adminCookie, origin: config.adminOrigin },
+      payload: {
+        serverId: 7,
+        name: "重复区服",
+        tag: "normal",
+        status: "smooth",
+        openTime: 1_800_000_001,
+        gameHttpUrl: "https://game-c.example.invalid",
+        gameWsUrl: "wss://game-c.example.invalid",
+        isOpen: false,
+        sortOrder: 8,
+      },
+    });
+    assert.equal(duplicateDraftServer.statusCode, 409);
+    assert.equal(
+      duplicateDraftServer.json().code,
+      "GAME_SERVER_CONFLICT",
+    );
+    const listedDraftServers = await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/games/game-c/servers",
+      headers: { cookie: adminCookie },
+    });
+    assert.equal(listedDraftServers.statusCode, 200);
+    assert.equal(listedDraftServers.json().servers.length, 1);
+
+    const closeServer2Payload = {
+      name: gameAServer2.name,
+      tag: gameAServer2.tag,
+      status: gameAServer2.status,
+      openTime: gameAServer2.openTime,
+      gameHttpUrl: gameAServer2.gameHttpUrl,
+      gameWsUrl: gameAServer2.gameWsUrl,
+      isOpen: false,
+      sortOrder: gameAServer2.sortOrder,
+      revision: gameAServer2.revision,
+    };
+    const closedServer2 = await internalApp.inject({
+      method: "PATCH",
+      url: "/v1/admin/games/game-a/servers/2",
+      headers: { cookie: adminCookie, origin: config.adminOrigin },
+      payload: closeServer2Payload,
+    });
+    assert.equal(closedServer2.statusCode, 200, closedServer2.body);
+    assert.equal(closedServer2.json().isOpen, false);
+    assert.equal(closedServer2.json().revision, 2);
+    const staleServerUpdate = await internalApp.inject({
+      method: "PATCH",
+      url: "/v1/admin/games/game-a/servers/2",
+      headers: { cookie: adminCookie, origin: config.adminOrigin },
+      payload: closeServer2Payload,
+    });
+    assert.equal(staleServerUpdate.statusCode, 409);
+    assert.equal(staleServerUpdate.json().code, "GAME_SERVER_CONFLICT");
+    const areasWithClosedServer = await publicApp.inject({
+      method: "GET",
+      url: "/v1/games/game-a/areas",
+    });
+    assert.deepEqual(
+      areasWithClosedServer.json().servers.map(
+        (server: { serverId: number }) => server.serverId,
+      ),
+      [1, 9],
+    );
+    const closedServerLogin = await publicApp.inject({
+      method: "POST",
+      url: "/v1/games/game-a/sessions/dev",
+      payload: { devKey: "closed-server", serverId: 2 },
+    });
+    assert.equal(closedServerLogin.statusCode, 403);
+    assert.equal(closedServerLogin.json().code, "SERVER_DISABLED");
+
+    await games.sync(runtime.database.pool);
+    const [preservedServerRows] =
+      await runtime.database.pool.query<RowDataPacket[]>(
+        `SELECT is_open
+           FROM game_servers
+          WHERE game_id = 'game-a' AND server_id = 2`,
+      );
+    assert.equal(Number(preservedServerRows[0]?.is_open), 0);
+
+    const reopenedServer2 = await internalApp.inject({
+      method: "PATCH",
+      url: "/v1/admin/games/game-a/servers/2",
+      headers: { cookie: adminCookie, origin: config.adminOrigin },
+      payload: {
+        ...closeServer2Payload,
+        isOpen: true,
+        revision: closedServer2.json().revision,
+      },
+    });
+    assert.equal(reopenedServer2.statusCode, 200, reopenedServer2.body);
+    assert.equal(reopenedServer2.json().isOpen, true);
+
+    const [gameAudit] = await runtime.database.pool.query<RowDataPacket[]>(
+      `SELECT game_id, action
+         FROM admin_game_audit
+        WHERE operator_id = 'ops_integration'
+        ORDER BY id`,
+    );
+    assert.deepEqual(
+      gameAudit.map((row) => [String(row.game_id), String(row.action)]),
+      [
+        ["game-c", "create"],
+        ["game-c", "update"],
+        ["game-a", "update"],
+        ["game-a", "update"],
+        ["game-c", "server_create"],
+        ["game-a", "server_update"],
+        ["game-a", "server_update"],
+      ],
+    );
     const [creationAudit] = await runtime.database.pool.query<RowDataPacket[]>(
       `SELECT event, reason
          FROM admin_auth_audit
@@ -236,9 +555,9 @@ test("多游戏迁移、认证、数据与运行态完整隔离", async () => {
     assert.equal(ready.statusCode, 200);
     assert.deepEqual(ready.json(), { ready: true });
     assert.equal(await runtime.database.ready(0, ["game-a", "game-b"]), false);
-    assert.equal(await runtime.database.ready(2, ["game-a", "game-b"]), false);
+    assert.equal(await runtime.database.ready(1, ["game-a", "game-b"]), false);
     assert.equal(
-      await runtime.database.ready(1, ["game-a", "game-b", "missing-game"]),
+      await runtime.database.ready(2, ["game-a", "game-b", "missing-game"]),
       false,
     );
 

@@ -492,7 +492,15 @@ test("GameRegistry sync 幂等写入 games 与每游戏序列", async () => {
       return [[], []];
     },
     async execute(sql: string, params: unknown) {
-      statements.push({ sql: sql.replace(/\s+/g, " ").trim(), params });
+      const compactSql = sql.replace(/\s+/g, " ").trim();
+      statements.push({ sql: compactSql, params });
+      return [{
+        affectedRows: compactSql.startsWith(
+          "INSERT IGNORE INTO game_directory_settings",
+        )
+          ? 1
+          : 0,
+      }, []];
     },
     async commit() {
       committed = true;
@@ -513,30 +521,50 @@ test("GameRegistry sync 幂等写入 games 与每游戏序列", async () => {
   assert.equal(began, true);
   assert.equal(committed, true);
   assert.equal(released, true);
-  assert.equal(statements.length, 4);
-  assert.deepEqual(statements.map(({ params }) => params), [
-    ["game-a", "enabled"],
-    ["game-a"],
-    ["game-b", "enabled"],
-    ["game-b"],
-  ]);
+  assert.equal(statements.length, 11);
   assert.equal(statements[0]?.sql.includes("INSERT INTO games"), true);
   assert.equal(statements[1]?.sql.includes("INSERT INTO seq"), true);
+  assert.deepEqual(statements[2]?.params, ["game-a", 0]);
+  assert.equal(
+    statements[2]?.sql.includes("INSERT IGNORE INTO game_directory_settings"),
+    true,
+  );
+  assert.deepEqual(statements[3]?.params, [
+    "game-a",
+    1,
+    "A 一区",
+    "new",
+    "smooth",
+    1_700_000_000,
+    "https://game-a.example.invalid",
+    "wss://game-a.example.invalid",
+    0,
+  ]);
+  assert.equal(statements[3]?.sql.includes("INSERT INTO game_servers"), true);
+  assert.deepEqual(statements[8]?.params, ["game-b", 1]);
+  assert.equal(statements[9]?.sql.includes("INSERT INTO game_servers"), true);
 });
 
-test("GameRegistry sync 拒绝遗漏历史游戏或重新启用 disabled gameId", async () => {
+test("GameRegistry sync 允许未接入草稿并拒绝遗漏已接入游戏", async () => {
   const registry = await GameRegistry.load("config/games.json", {
     production: true,
     env: REGISTRY_ENV,
   });
-  const poolWithRows = (rows: Array<{ game_id: string; status: string }>) => ({
+  const poolWithRows = (rows: Array<{
+    game_id: string;
+    name: string;
+    status: string;
+    configuration_state: "draft" | "configured";
+  }>) => ({
     async getConnection() {
       return {
         async beginTransaction() {},
         async query() {
           return [rows, []];
         },
-        async execute() {},
+        async execute() {
+          return [{ affectedRows: 0 }, []];
+        },
         async commit() {},
         async rollback() {},
         release() {},
@@ -546,16 +574,48 @@ test("GameRegistry sync 拒绝遗漏历史游戏或重新启用 disabled gameId"
 
   await assert.rejects(
     registry.sync(poolWithRows([
-      { game_id: "game-a", status: "enabled" },
-      { game_id: "retired-game", status: "disabled" },
+      {
+        game_id: "game-a",
+        name: "游戏 A",
+        status: "enabled",
+        configuration_state: "configured",
+      },
+      {
+        game_id: "retired-game",
+        name: "退役游戏",
+        status: "disabled",
+        configuration_state: "configured",
+      },
     ])),
     /游戏配置缺少已登记 gameId retired-game/,
   );
-  await assert.rejects(
+  await assert.doesNotReject(
     registry.sync(poolWithRows([
-      { game_id: "game-a", status: "disabled" },
-      { game_id: "game-b", status: "enabled" },
+      {
+        game_id: "game-a",
+        name: "游戏 A",
+        status: "disabled",
+        configuration_state: "configured",
+      },
+      {
+        game_id: "game-b",
+        name: "游戏 B",
+        status: "enabled",
+        configuration_state: "configured",
+      },
+      {
+        game_id: "draft-game",
+        name: "待接入",
+        status: "maintenance",
+        configuration_state: "draft",
+      },
     ])),
-    /已停用 gameId 不允许重新启用: game-a/,
+  );
+  assert.throws(
+    () => registry.resolve("game-a"),
+    (error: unknown) => (
+      error instanceof GameManageKitError
+      && error.code === "GAME_DISABLED"
+    ),
   );
 });

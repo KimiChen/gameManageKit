@@ -11,6 +11,7 @@ import type {
   GameRegistry,
   ServiceIdentity,
 } from "../domain/game/registry.js";
+import type { GameProjectService } from "../domain/game/projects.js";
 import type { AdminSessionIdentity } from "../domain/admin/auth.js";
 import { GameManageKitError } from "../errors.js";
 import { safeErrorDetails } from "../infra/security/security.js";
@@ -123,38 +124,38 @@ export function authenticateAdmin(
   return identity;
 }
 
-export function resolveGameContext(
+export async function resolveGameContext(
   request: FastifyRequest,
-  registry: GameRegistry,
-): GameContext {
+  projects: Pick<GameProjectService, "resolve">,
+): Promise<GameContext> {
   const gameId = (request.params as { gameId?: unknown }).gameId;
   if (typeof gameId !== "string") {
     throw new GameManageKitError(404, "GAME_NOT_FOUND");
   }
-  const knownGame = registry.get(gameId);
-  if (knownGame) {
-    request.gameContext = knownGame;
-    request.log = request.log.child({ gameId: knownGame.gameId });
-  }
-  return registry.resolve(gameId);
+  const game = await projects.resolve(gameId);
+  request.gameContext = game;
+  request.log = request.log.child({ gameId: game.gameId });
+  return game;
 }
 
-export function authorizeServiceGame(
+export async function authorizeServiceGame(
   request: FastifyRequest,
   registry: GameRegistry,
-): void {
-  const game = resolveGameContext(request, registry);
+  projects: Pick<GameProjectService, "resolve">,
+): Promise<void> {
+  const game = await resolveGameContext(request, projects);
   const identity = authenticateService(request, registry);
   if (!registry.canAccess(identity, game.gameId)) {
     throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
   }
 }
 
-export function authorizeAdminGame(
+export async function authorizeAdminGame(
   request: FastifyRequest,
   registry: GameRegistry,
-): void {
-  const game = resolveGameContext(request, registry);
+  projects: Pick<GameProjectService, "resolve">,
+): Promise<void> {
+  const game = await resolveGameContext(request, projects);
   const identity = authenticateAdmin(request, registry);
   if (!registry.canAccess(identity, game.gameId)) {
     throw new GameManageKitError(403, "GAME_ACCESS_DENIED");

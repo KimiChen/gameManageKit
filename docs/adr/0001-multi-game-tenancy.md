@@ -40,8 +40,9 @@ OpenAPI、配置加载器和数据库 `CHECK` 约束必须使用同一规则。�
 
 ### 启动快照与密钥边界
 
-`GameRegistry` 从 `GAME_MANAGE_KIT_GAMES_CONFIG` 指向的 JSON 文件加载一次启动快照。
-变更配置后重启实例，不在本阶段实现热加载。每个游戏定义至少包含：
+`GameRegistry` 从 `GAME_MANAGE_KIT_GAMES_CONFIG` 指向的 JSON 文件加载一次技术配置
+快照。变更微信、限流或机器身份配置后重启实例，不对这些对象实现热加载。每个游戏
+定义至少包含：
 
 ```ts
 interface GameDefinition {
@@ -62,19 +63,32 @@ interface GameDefinition {
 }
 ```
 
-普通元数据、区服目录路径和策略参数可以出现在配置文件中。微信 AppID 和 Secret 分别
+区服目录路径用于首次接入的种子数据，策略参数可以出现在配置文件中。微信 AppID 和 Secret 分别
 通过 `appIdEnv`、`secretEnv` 引用环境变量或 Secret Manager 注入，不能把凭据值写入
 配置文件、`games` 表、普通业务表或日志。每个游戏分别实例化微信客户端、熔断器和
 限流器，避免故障状态跨游戏传播。
 
-配置中的每个游戏在启动时同步到 `games(game_id, status)`，并确保存在
-`seq(game_id, 'user_id')`。`games` 表是关系完整性的租户父表；运行时快照是连接信息和
-策略的真源。配置含重复或非法 `gameId`、非法 URL、缺失密钥、非法 TTL/限流值时，启动
-失败。
+数据库 `games` 表同时是关系完整性的租户父表和非敏感项目目录，保存 `name`、
+`description`、`status`、`configuration_state`、客户端下发设置和 `revision`。网页
+新增项目时只创建 `draft + maintenance` 记录，不创建序列，也不能进入业务路由。部署
+配置首次包含该 `gameId` 且服务重启通过完整 Registry 校验后，启动事务将项目标为
+`configured` 并创建 `seq(game_id, 'user_id')`。直接通过部署配置接入的游戏会自动创建
+为 `configured`。
 
-`disabled` 是终态。退役游戏必须永久保留在配置中并设为 `disabled`；启动同步会拒绝
-遗漏数据库中已经登记的游戏，也会拒绝把已停用的 `gameId` 重新设为 `enabled` 或
-`maintenance`。这样旧账号、会话和角色数据不会因标识复用而重新暴露。
+当 `game_directory_settings` 尚无该 `gameId` 时，启动事务从 `directoryPath` 一次性
+导入 `isOps` 和全部区服，区服默认开放，并按文件顺序生成展示顺序。完成首次导入后，
+`game_directory_settings` 和 `game_servers` 是区服目录的唯一真源；启动不再用文件
+覆盖数据库。后台可即时修改区服展示字段、URL、开放状态和顺序。
+
+技术运行参数以 Registry 快照为真源；展示元数据、运行状态、客户端下发列表和区服
+目录以数据库为真源。每个业务请求读取数据库中的当前状态，因此同库多实例看到一致
+状态；当前请求解析出的 `GameContext` 再结合 Registry 中的微信客户端和限流器。配置
+含重复或非法 `gameId`、非法 URL、缺失密钥、非法 TTL/限流值时，启动失败。
+
+`disabled` 是终态。退役游戏必须永久保留技术配置；启动同步允许配置暂时缺少
+`draft`，但拒绝遗漏任何 `configured` 游戏。网页和数据库约束共同禁止草稿启用、
+草稿下发、停用游戏下发及恢复已停用 `gameId`。这样旧账号、会话和角色数据不会因
+标识复用而重新暴露。
 
 ### 调用方授权范围
 
@@ -87,8 +101,9 @@ Public 请求也必须先解析路径中的 `gameId`。访问令牌包含 `gameI
 
 ### 数据访问不变量
 
-`accounts`、`account_sessions`、`char_registry`、`login_audit` 和 `seq` 的每次业务
-读写都必须显式接收并使用 `gameId`：
+`accounts`、`account_sessions`、`char_registry`、`login_audit`、`seq`、
+`game_directory_settings` 和 `game_servers` 的每次业务读写都必须显式接收并使用
+`gameId`：
 
 - `SELECT`、`UPDATE`、`DELETE` 必须在条件中包含 `game_id`；
 - `INSERT` 必须显式写入 `game_id`；
@@ -97,15 +112,18 @@ Public 请求也必须先解析路径中的 `gameId`。访问令牌包含 `gameI
 - 不得仅凭 `userId`、`openid`、`operationId`、`serverId` 或 token 推断租户；
 - 日志、审计、缓存键、限流键和幂等键都必须包含 `gameId`。
 
-数据库通过外键阻止为不存在的游戏创建账号、会话、角色、审计和序列记录。会话和角色
-使用 `(game_id, user_id)` 外键确认账号归属。区服目录来自配置快照，无法建立数据库
-外键，因此登录和角色登记必须在写库前通过当前游戏的目录校验 `serverId` 及其状态。
-审计允许记录不存在的目标账号，所以 `login_audit.user_id` 不引用账号表。
+数据库通过外键阻止为不存在的游戏创建账号、会话、角色、区服、审计和序列记录。会话
+和角色使用 `(game_id, user_id)` 外键确认账号归属；区服使用
+`(game_id, server_id)` 作为租户内唯一标识。登录和角色登记仍须在写库前校验区服：
+`is_open=0` 或 `status='maintenance'` 都不可用。公开目录只下发 `is_open=1` 的区服，
+其中维护区服保留在响应中供客户端展示状态。审计允许记录不存在的目标账号，所以
+`login_audit.user_id` 不引用账号表。
 
 ### 初始结构重建
 
-`0001_initial.sql` 被直接改写，不提供历史数据迁移。已经执行过旧版 migration 的开发库
-必须删除并重建，因为 `schema_migrations` 中已有版本 `1` 时不会重放该文件：
+`0001_initial.sql` 曾在开发阶段直接改写，不提供更早结构的历史数据迁移。已经执行过
+缺少游戏项目字段的旧版 `0001` 的开发库必须删除并重建，因为
+`schema_migrations` 中已有版本 `1` 时不会重放该文件：
 
 ```sql
 DROP DATABASE game_manage_kit;
@@ -113,14 +131,17 @@ CREATE DATABASE game_manage_kit
   CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 ```
 
-随后使用指向新数据库的 `GAME_MANAGE_KIT_MYSQL_URL` 执行 `npm run migrate`。生产环境不得
-对已有数据库执行上述删除流程。
+随后使用指向新数据库的 `GAME_MANAGE_KIT_MYSQL_URL` 执行 `npm run migrate`。已经具备
+新版 `0001` 游戏项目字段的数据库可直接执行 `npm run migrate`，由
+`0002_game_servers.sql` 增加区服结构并保留管理员与项目数据。生产环境不得对已有
+数据库执行上述删除流程。
 
 ## 结果
 
 - 同一 `openid`、`unionid`、`userId`、`operationId` 和 `serverId` 可以在不同游戏中
   重复而不冲突。
 - 每个领域服务和 SQL 调用都需要增加 `gameId` 参数，遗漏租户条件应视为安全缺陷。
-- 游戏配置变更需要重启，但实现简单、状态确定；如未来确需动态运营配置，再单独决策。
+- 技术接入配置变更需要重启；展示元数据、运行状态、客户端下发设置和区服目录由数据库
+  即时生效。
 - `accounts.session_key` 不再保存微信明文会话密钥；若未来出现明确用途，需要另行设计
   加密、访问控制和清理策略。

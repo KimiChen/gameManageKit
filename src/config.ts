@@ -1,6 +1,6 @@
 import { isIP } from "node:net";
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 export const TOKEN_BYTES = 24;
 
 export interface GameManageKitConfig {

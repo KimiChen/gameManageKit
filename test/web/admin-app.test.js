@@ -6,20 +6,31 @@ import {
   InvalidApiPayloadError,
   accountStatusPresentation,
   accountPath,
+  canPublishGameToClient,
   canPerformAccountAction,
+  canSelectGameStatus,
+  chooseAdminView,
   chooseInitialGame,
   createLatestRequestGuard,
   createAdminApi,
   createOperationIntent,
+  dateTimeLocalToUnixSeconds,
   describeApiError,
+  gameProjectPath,
+  gameServerPath,
   isSessionExpired,
   isCompletedLogout,
   isValidAdminPasswordInput,
   isValidUserId,
   normalizeAccount,
+  normalizeGameProject,
+  normalizeGameProjectList,
+  normalizeGameServer,
+  normalizeGameServerList,
   normalizeOperationResult,
   normalizeSession,
   reuseOrCreateOperationIntent,
+  unixSecondsToDateTimeLocal,
 } from "../../web/admin/app.js";
 import { resetPasswordControl } from "../../web/admin/wsk.js";
 
@@ -57,7 +68,39 @@ const validSession = () => ({
       canOperateAccounts: false,
     },
   ],
+  canManageGames: true,
   expiresAt: "2026-07-28T18:00:00.000Z",
+});
+
+const validGameProject = (overrides = {}) => ({
+  gameId: "game-a",
+  name: "游戏 A",
+  description: "示例游戏项目",
+  status: "enabled",
+  configurationState: "configured",
+  clientVisible: true,
+  sortOrder: 10,
+  revision: 3,
+  createdAt: "2026-07-27T10:00:00.000Z",
+  updatedAt: "2026-07-28T10:00:00.000Z",
+  ...overrides,
+});
+
+const validGameServer = (overrides = {}) => ({
+  gameId: "game-a",
+  serverId: 1,
+  name: "星海一区",
+  tag: "new",
+  status: "smooth",
+  openTime: 1_785_220_200,
+  gameHttpUrl: "https://game.example.com/api",
+  gameWsUrl: "wss://game.example.com/socket",
+  isOpen: true,
+  sortOrder: 10,
+  revision: 3,
+  createdAt: "2026-07-27T10:00:00.000Z",
+  updatedAt: "2026-07-28T10:00:00.000Z",
+  ...overrides,
 });
 
 test("管理员页面只引用本地资源且不包含共享 Secret", async () => {
@@ -74,6 +117,20 @@ test("管理员页面只引用本地资源且不包含共享 Secret", async () =
   assert.match(html, /id="operator-password"[\s\S]+?minlength="12"/u);
   assert.match(html, /id="operation-reason"[\s\S]+?maxlength="255"/u);
   assert.match(html, /aria-labelledby="operation-dialog-title"/u);
+  assert.match(html, /href="#games"/u);
+  assert.match(html, /id="game-dialog"[\s\S]+?aria-labelledby="game-dialog-title"/u);
+  assert.match(html, /id="game-id"[\s\S]+?minlength="2"[\s\S]+?maxlength="32"/u);
+  assert.match(html, /id="game-name"[\s\S]+?maxlength="256"/u);
+  assert.match(html, /id="game-description"[\s\S]+?maxlength="1000"/u);
+  assert.match(html, /id="game-client-visible"/u);
+  assert.match(html, /id="game-sort-order"[\s\S]+?max="65535"/u);
+  assert.match(html, /id="server-dialog"[\s\S]+?aria-labelledby="server-dialog-title"/u);
+  assert.match(html, /id="server-id"[\s\S]+?max="65535"/u);
+  assert.match(html, /id="server-name"[\s\S]+?maxlength="128"/u);
+  assert.match(html, /id="server-open-time"[\s\S]+?type="datetime-local"/u);
+  assert.match(html, /id="server-http-url"[\s\S]+?maxlength="2048"/u);
+  assert.match(html, /id="server-ws-url"[\s\S]+?maxlength="2048"/u);
+  assert.match(html, /未开放不下发且不可登录；维护中可下发但不可登录。/u);
   assert.match(html, /href="\/admin\/wsk\.css"/u);
   assert.match(html, /href="\/admin\/admin\.css"/u);
   assert.match(html, /src="\/admin\/app\.js"/u);
@@ -104,6 +161,7 @@ test("会话响应按管理员和游戏权限严格校验", () => {
     session.games.map((game) => game.gameId),
     ["game-a", "game-b"],
   );
+  assert.equal(session.canManageGames, true);
   assert.equal(Object.isFrozen(session), true);
   assert.equal(Object.isFrozen(session.games), true);
   assert.equal(
@@ -135,6 +193,13 @@ test("会话响应按管理员和游戏权限严格校验", () => {
     InvalidApiPayloadError,
   );
 
+  const invalidManageCapability = validSession();
+  invalidManageCapability.canManageGames = "yes";
+  assert.throws(
+    () => normalizeSession(invalidManageCapability),
+    InvalidApiPayloadError,
+  );
+
   const invalidExpiry = validSession();
   invalidExpiry.expiresAt = "tomorrow";
   assert.throws(
@@ -150,6 +215,190 @@ test("多游戏必须主动选择，单游戏才自动选中", () => {
   assert.equal(chooseInitialGame(games, "missing"), null);
   assert.equal(chooseInitialGame([games[0]]), "game-a");
   assert.equal(chooseInitialGame([]), null);
+});
+
+test("管理员路由按账号权限和游戏管理权限选择可访问页面", () => {
+  const session = normalizeSession(validSession());
+  assert.equal(chooseAdminView(null, "#games"), "login");
+  assert.equal(chooseAdminView(session, "#games"), "games");
+  assert.equal(chooseAdminView(session, "#unknown"), "accounts");
+  assert.equal(
+    chooseAdminView(Object.freeze({
+      ...session,
+      games: Object.freeze([]),
+    }), "#accounts"),
+    "games",
+  );
+  assert.equal(
+    chooseAdminView(Object.freeze({
+      ...session,
+      games: Object.freeze([]),
+      canManageGames: false,
+    }), "#games"),
+    "no-access",
+  );
+  assert.equal(
+    chooseAdminView(Object.freeze({
+      ...session,
+      canManageGames: false,
+    }), "#games"),
+    "accounts",
+  );
+});
+
+test("游戏项目响应严格校验状态、配置和客户端下发约束", () => {
+  const game = normalizeGameProject(validGameProject());
+  assert.equal(game.gameId, "game-a");
+  assert.equal(game.clientVisible, true);
+  assert.equal(game.sortOrder, 10);
+  assert.equal(Object.isFrozen(game), true);
+  assert.equal(
+    normalizeGameProject(validGameProject({
+      name: "😀".repeat(128),
+      description: "😀".repeat(500),
+    })).description,
+    "😀".repeat(500),
+  );
+
+  const list = normalizeGameProjectList({
+    games: [
+      validGameProject(),
+      validGameProject({
+        gameId: "game-b",
+        status: "maintenance",
+        configurationState: "draft",
+        clientVisible: false,
+      }),
+    ],
+  });
+  assert.equal(list.games.length, 2);
+  assert.equal(Object.isFrozen(list.games), true);
+  assert.equal(
+    normalizeGameProjectList({
+      games: Array.from({ length: 1_025 }, (_, index) => (
+        validGameProject({ gameId: `game-${index}` })
+      )),
+    }).games.length,
+    1_025,
+  );
+
+  assert.throws(
+    () => normalizeGameProject(validGameProject({
+      configurationState: "draft",
+      status: "enabled",
+      clientVisible: false,
+    })),
+    InvalidApiPayloadError,
+  );
+  assert.throws(
+    () => normalizeGameProject(validGameProject({
+      status: "disabled",
+      clientVisible: true,
+    })),
+    InvalidApiPayloadError,
+  );
+  assert.throws(
+    () => normalizeGameProject(validGameProject({ sortOrder: 65_536 })),
+    InvalidApiPayloadError,
+  );
+  assert.throws(
+    () => normalizeGameProject(validGameProject({
+      description: "😀".repeat(501),
+    })),
+    InvalidApiPayloadError,
+  );
+  assert.throws(
+    () => normalizeGameProjectList({
+      games: [validGameProject(), validGameProject()],
+    }),
+    InvalidApiPayloadError,
+  );
+});
+
+test("区服响应严格校验游戏归属、枚举、URL 和乐观锁字段", () => {
+  const server = normalizeGameServer(validGameServer(), "game-a", 1);
+  assert.equal(server.name, "星海一区");
+  assert.equal(server.isOpen, true);
+  assert.equal(Object.isFrozen(server), true);
+  assert.equal(
+    normalizeGameServer(validGameServer({ name: "😀".repeat(64) })).name,
+    "😀".repeat(64),
+  );
+
+  const list = normalizeGameServerList({
+    servers: [
+      validGameServer(),
+      validGameServer({
+        serverId: 2,
+        name: "星海二区",
+        tag: "maintenance",
+        status: "maintenance",
+        isOpen: false,
+      }),
+    ],
+  }, "game-a");
+  assert.equal(list.servers.length, 2);
+  assert.equal(Object.isFrozen(list.servers), true);
+
+  for (const invalid of [
+    validGameServer({ gameId: "game-b" }),
+    validGameServer({ serverId: 65_536 }),
+    validGameServer({ name: "😀".repeat(65) }),
+    validGameServer({ tag: "hot" }),
+    validGameServer({ status: "offline" }),
+    validGameServer({ openTime: -1 }),
+    validGameServer({ gameHttpUrl: "ftp://game.example.com" }),
+    validGameServer({ gameHttpUrl: "https://user@example.com" }),
+    validGameServer({ gameWsUrl: "wss://game.example.com/socket#debug" }),
+    validGameServer({ isOpen: 1 }),
+    validGameServer({ sortOrder: 65_536 }),
+    validGameServer({ revision: 0 }),
+  ]) {
+    assert.throws(
+      () => normalizeGameServer(invalid, "game-a"),
+      InvalidApiPayloadError,
+    );
+  }
+  assert.throws(
+    () => normalizeGameServerList({
+      servers: [validGameServer(), validGameServer()],
+    }, "game-a"),
+    InvalidApiPayloadError,
+  );
+});
+
+test("区服开放时间在 datetime-local 与 Unix 秒之间无损转换", () => {
+  const unixSeconds = 1_785_220_200;
+  const localValue = unixSecondsToDateTimeLocal(unixSeconds);
+  assert.match(localValue, /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$/u);
+  assert.equal(dateTimeLocalToUnixSeconds(localValue), unixSeconds);
+  assert.equal(dateTimeLocalToUnixSeconds("2026-02-30T12:00:00"), null);
+  assert.equal(dateTimeLocalToUnixSeconds("1969-12-31T23:59:59"), null);
+  assert.equal(dateTimeLocalToUnixSeconds("not-a-date"), null);
+});
+
+test("游戏状态与客户端下发遵守草稿和永久停用规则", () => {
+  const draft = validGameProject({
+    status: "maintenance",
+    configurationState: "draft",
+    clientVisible: false,
+  });
+  assert.equal(canSelectGameStatus(draft, "enabled"), false);
+  assert.equal(canSelectGameStatus(draft, "maintenance"), true);
+  assert.equal(canPublishGameToClient(draft), false);
+
+  const configured = validGameProject();
+  assert.equal(canSelectGameStatus(configured, "maintenance"), true);
+  assert.equal(canPublishGameToClient(configured), true);
+  assert.equal(canPublishGameToClient(configured, "maintenance"), true);
+  assert.equal(canPublishGameToClient(configured, "disabled"), false);
+
+  const disabled = validGameProject({
+    status: "disabled",
+    clientVisible: false,
+  });
+  assert.equal(canSelectGameStatus(disabled, "disabled"), true);
+  assert.equal(canSelectGameStatus(disabled, "enabled"), false);
 });
 
 test("登录密码校验与服务端 Unicode 和字节边界一致", () => {
@@ -298,6 +547,148 @@ test("路径参数编码且 operationId 在同一次重试中保持不变", asyn
   });
   assert.notEqual(replaced, intent);
   assert.equal(replaced.operationId, "5b31f2c1-7f8a-4480-815e-a074c63b1ae3");
+});
+
+test("游戏项目 API 使用固定集合路径和精确新增编辑请求", async () => {
+  assert.equal(gameProjectPath(), "/v1/admin/games");
+  assert.equal(gameProjectPath("game/a"), "/v1/admin/games/game%2Fa");
+
+  const requests = [];
+  const created = validGameProject({
+    gameId: "new-game",
+    name: "新游戏",
+    description: "首轮草稿",
+    status: "maintenance",
+    configurationState: "draft",
+    clientVisible: false,
+    sortOrder: 0,
+    revision: 1,
+  });
+  const updated = validGameProject({
+    name: "游戏 A 新名称",
+    description: "已更新",
+    status: "maintenance",
+    clientVisible: true,
+    sortOrder: 20,
+    revision: 4,
+  });
+  const responses = [
+    jsonResponse({ games: [validGameProject()] }),
+    jsonResponse(created, { status: 201 }),
+    jsonResponse(updated),
+  ];
+  const api = createAdminApi(async (path, init) => {
+    requests.push({ path, init });
+    return responses.shift();
+  });
+
+  const games = await api.listGames();
+  const createResult = await api.createGame({
+    gameId: "new-game",
+    name: "新游戏",
+    description: "首轮草稿",
+  });
+  const updateResult = await api.updateGame("game-a", {
+    name: "游戏 A 新名称",
+    description: "已更新",
+    status: "maintenance",
+    clientVisible: true,
+    sortOrder: 20,
+    revision: 3,
+  });
+
+  assert.equal(games.length, 1);
+  assert.equal(createResult.configurationState, "draft");
+  assert.equal(updateResult.revision, 4);
+  assert.deepEqual(
+    requests.map((request) => [request.path, request.init.method]),
+    [
+      ["/v1/admin/games", "GET"],
+      ["/v1/admin/games", "POST"],
+      ["/v1/admin/games/game-a", "PATCH"],
+    ],
+  );
+  assert.deepEqual(JSON.parse(requests[1].init.body), {
+    gameId: "new-game",
+    name: "新游戏",
+    description: "首轮草稿",
+  });
+  assert.deepEqual(JSON.parse(requests[2].init.body), {
+    name: "游戏 A 新名称",
+    description: "已更新",
+    status: "maintenance",
+    clientVisible: true,
+    sortOrder: 20,
+    revision: 3,
+  });
+});
+
+test("区服 API 路径编码并发送精确的新增编辑请求", async () => {
+  assert.equal(
+    gameServerPath("game/a"),
+    "/v1/admin/games/game%2Fa/servers",
+  );
+  assert.equal(
+    gameServerPath("game/a", 7),
+    "/v1/admin/games/game%2Fa/servers/7",
+  );
+
+  const requests = [];
+  const created = validGameServer({ revision: 1 });
+  const updated = validGameServer({
+    name: "星海一区（维护）",
+    status: "maintenance",
+    revision: 4,
+  });
+  const responses = [
+    jsonResponse({ servers: [validGameServer()] }),
+    jsonResponse(created, { status: 201 }),
+    jsonResponse(updated),
+  ];
+  const api = createAdminApi(async (path, init) => {
+    requests.push({ path, init });
+    return responses.shift();
+  });
+  const createInput = {
+    serverId: 1,
+    name: "星海一区",
+    tag: "new",
+    status: "smooth",
+    openTime: 1_785_220_200,
+    gameHttpUrl: "https://game.example.com/api",
+    gameWsUrl: "wss://game.example.com/socket",
+    isOpen: true,
+    sortOrder: 10,
+  };
+  const updateInput = {
+    name: "星海一区（维护）",
+    tag: "new",
+    status: "maintenance",
+    openTime: 1_785_220_200,
+    gameHttpUrl: "https://game.example.com/api",
+    gameWsUrl: "wss://game.example.com/socket",
+    isOpen: true,
+    sortOrder: 10,
+    revision: 3,
+  };
+
+  const servers = await api.listGameServers("game-a");
+  const createResult = await api.createGameServer("game-a", createInput);
+  const updateResult = await api.updateGameServer("game-a", 1, updateInput);
+
+  assert.equal(servers.length, 1);
+  assert.equal(createResult.revision, 1);
+  assert.equal(updateResult.revision, 4);
+  assert.deepEqual(
+    requests.map((request) => [request.path, request.init.method]),
+    [
+      ["/v1/admin/games/game-a/servers", "GET"],
+      ["/v1/admin/games/game-a/servers", "POST"],
+      ["/v1/admin/games/game-a/servers/1", "PATCH"],
+    ],
+  );
+  assert.deepEqual(JSON.parse(requests[1].init.body), createInput);
+  assert.deepEqual(JSON.parse(requests[2].init.body), updateInput);
 });
 
 test("API 客户端使用同源 Cookie、正确方法和 JSON 请求", async () => {

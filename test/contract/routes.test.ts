@@ -39,8 +39,53 @@ const OLD_SINGLE_GAME_OPERATIONS = [
 ] as const;
 
 function serviceStubs(games: GameRegistry): GameManageKitServices {
+  const project = {
+    gameId: "game-a",
+    name: "示例游戏 A",
+    description: "",
+    status: "enabled" as const,
+    configurationState: "configured" as const,
+    clientVisible: true,
+    sortOrder: 0,
+    revision: 1,
+    createdAt: "2026-07-28T00:00:00.000Z",
+    updatedAt: "2026-07-28T00:00:00.000Z",
+  };
   return {
     games,
+    gameProjects: {
+      async resolve(gameId) {
+        return games.resolve(gameId);
+      },
+      async listForClient() {
+        return [{
+          gameId: project.gameId,
+          name: project.name,
+          description: project.description,
+          status: project.status,
+        }];
+      },
+      async list() {
+        return [project];
+      },
+      async create() {
+        return project;
+      },
+      async update() {
+        return project;
+      },
+    },
+    gameServers: {
+      async list() {
+        return [];
+      },
+      async create() {
+        throw new Error("测试未调用");
+      },
+      async update() {
+        throw new Error("测试未调用");
+      },
+    },
     metrics: new MetricsRegistry(games.list().map((game) => game.gameId)),
     login: {
       async loginWechat() {
@@ -88,6 +133,7 @@ function serviceStubs(games: GameRegistry): GameManageKitServices {
           operatorId: "ops_contract",
           displayName: "Contract",
           authVersion: 1,
+          canManageGames: true,
           games: [],
           expiresAt: "2026-07-28T18:00:00.000Z",
         };
@@ -97,6 +143,7 @@ function serviceStubs(games: GameRegistry): GameManageKitServices {
           operatorId: "ops_contract",
           displayName: "Contract",
           authVersion: 1,
+          canManageGames: true,
           games: [],
           expiresAt: "2026-07-28T18:00:00.000Z",
         };
@@ -104,6 +151,7 @@ function serviceStubs(games: GameRegistry): GameManageKitServices {
       async logout() {},
       async requireAccountOperation() {},
       async requireGameAccess() {},
+      async requireGameManagement() {},
     },
     readiness: {
       async ready() {

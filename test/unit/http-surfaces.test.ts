@@ -95,8 +95,53 @@ function services(
   overrides: Partial<GameManageKitServices> = {},
 ): GameManageKitServices {
   const metrics = new MetricsRegistry(games.list().map((game) => game.gameId));
+  const gameAProject = {
+    gameId: "game-a",
+    name: "示例游戏 A",
+    description: "",
+    status: "enabled" as const,
+    configurationState: "configured" as const,
+    clientVisible: true,
+    sortOrder: 0,
+    revision: 1,
+    createdAt: "2026-07-28T00:00:00.000Z",
+    updatedAt: "2026-07-28T00:00:00.000Z",
+  };
   return {
     games,
+    gameProjects: {
+      async resolve(gameId) {
+        return games.resolve(gameId);
+      },
+      async listForClient() {
+        return [{
+          gameId: gameAProject.gameId,
+          name: gameAProject.name,
+          description: gameAProject.description,
+          status: gameAProject.status,
+        }];
+      },
+      async list() {
+        return [gameAProject];
+      },
+      async create() {
+        return gameAProject;
+      },
+      async update() {
+        return gameAProject;
+      },
+    },
+    gameServers: {
+      async list() {
+        return [];
+      },
+      async create() {
+        throw new Error("测试未调用");
+      },
+      async update() {
+        throw new Error("测试未调用");
+      },
+    },
     metrics,
     login: {
       async loginWechat() {
@@ -146,7 +191,14 @@ function services(
           operatorId: "ops_kimi",
           displayName: "Kimi",
           authVersion: 1,
-          games: [{ gameId: "game-a", canOperateAccounts: true }],
+          canManageGames: true,
+          games: [{
+            gameId: "game-a",
+            name: "示例游戏 A",
+            status: "enabled",
+            configurationState: "configured",
+            canOperateAccounts: true,
+          }],
           expiresAt: "2026-07-28T18:00:00.000Z",
         };
       },
@@ -155,13 +207,21 @@ function services(
           operatorId: "ops_kimi",
           displayName: "Kimi",
           authVersion: 1,
-          games: [{ gameId: "game-a", canOperateAccounts: true }],
+          canManageGames: true,
+          games: [{
+            gameId: "game-a",
+            name: "示例游戏 A",
+            status: "enabled",
+            configurationState: "configured",
+            canOperateAccounts: true,
+          }],
           expiresAt: "2026-07-28T18:00:00.000Z",
         };
       },
       async logout() {},
       async requireAccountOperation() {},
       async requireGameAccess() {},
+      async requireGameManagement() {},
     },
     readiness: {
       async ready() {
@@ -186,6 +246,21 @@ test("public/internal 双监听只暴露各自多游戏业务路由", async (t) 
   });
   assert.equal(publicLogin.statusCode, 200);
   assert.deepEqual(publicLogin.json(), LOGIN);
+
+  const clientGames = await apps.publicApp.inject({
+    method: "GET",
+    url: "/v1/games",
+  });
+  assert.equal(clientGames.statusCode, 200);
+  assert.deepEqual(clientGames.json(), {
+    games: [{
+      gameId: "game-a",
+      name: "示例游戏 A",
+      description: "",
+      status: "enabled",
+    }],
+  });
+  assert.equal(clientGames.headers["cache-control"], "no-store");
 
   for (const oldPath of [
     "/v1/sessions/dev",
@@ -477,6 +552,11 @@ test("Admin 按游戏使用独立令牌桶且不影响 Public 登录", async (t)
 
 test("结构化完成日志包含可信身份字段且异常文本、token 和 secret 不泄漏", async (t) => {
   const games = await gameRegistry();
+  const projects = {
+    async resolve(gameId: string) {
+      return games.resolve(gameId);
+    },
+  };
   const records: Array<Record<string, unknown>> = [];
   const app = createHttpApp(loadConfig({
     NODE_ENV: "development",
@@ -496,7 +576,7 @@ test("结构化完成日志包含可信身份字段且异常文本、token 和 s
     "/public/:gameId",
     {
       preHandler: async (request) => {
-        resolveGameContext(request, games);
+        await resolveGameContext(request, projects);
       },
     },
     async () => {
@@ -510,7 +590,7 @@ test("结构化完成日志包含可信身份字段且异常文本、token 和 s
     "/service/:gameId",
     {
       preHandler: async (request) => {
-        authorizeServiceGame(request, games);
+        await authorizeServiceGame(request, games, projects);
       },
     },
     async () => ({ ok: true }),
@@ -519,7 +599,7 @@ test("结构化完成日志包含可信身份字段且异常文本、token 和 s
     "/admin/:gameId",
     {
       preHandler: async (request) => {
-        authorizeAdminGame(request, games);
+        await authorizeAdminGame(request, games, projects);
       },
     },
     async () => ({ ok: true }),

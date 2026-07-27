@@ -81,6 +81,99 @@ export type paths = {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/games": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listAdminGames"];
+        put?: never;
+        /** @description 创建草稿游戏项目；必须使用管理员 Cookie 会话，并校验请求 Origin。 */
+        post: operations["createAdminGame"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/games/{gameId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** @description 按 revision 编辑游戏项目；gameId 不可修改，且必须校验请求 Origin。 */
+        patch: operations["updateAdminGame"];
+        trace?: never;
+    };
+    "/v1/admin/games/{gameId}/servers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
+            cookie?: never;
+        };
+        /** @description 返回指定游戏的全部区服，包括尚未开放给客户端的区服。 */
+        get: operations["listAdminGameServers"];
+        put?: never;
+        /** @description 为指定游戏新增区服；必须使用管理员 Cookie 会话，并校验请求 Origin。 */
+        post: operations["createAdminGameServer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/games/{gameId}/servers/{serverId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+                serverId: components["parameters"]["ServerId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** @description 按 revision 编辑区服；gameId 与 serverId 不可修改，且必须校验请求 Origin。 */
+        patch: operations["updateAdminGameServer"];
+        trace?: never;
+    };
+    "/v1/games": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description 返回允许客户端发现的游戏；仅包含 enabled 或 maintenance 状态。 */
+        get: operations["listClientGames"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/games/{gameId}/admin/accounts/{userId}": {
         parameters: {
             query?: never;
@@ -147,6 +240,7 @@ export type paths = {
             };
             cookie?: never;
         };
+        /** @description 仅下发 isOpen=true 的区服；维护区服仍返回供客户端展示，但不可登录。 */
         get: operations["listAreas"];
         put?: never;
         post?: never;
@@ -283,6 +377,7 @@ export type components = {
             operatorId: string;
         };
         AdminSessionResponse: {
+            canManageGames: boolean;
             /** Format: date-time */
             expiresAt: string;
             games: components["schemas"]["AdminGameAccess"][];
@@ -305,18 +400,67 @@ export type components = {
             /** @enum {string} */
             tag: "normal" | "new" | "full" | "maintenance";
         };
+        ClientGameListResponse: {
+            games: components["schemas"]["ClientGameSummary"][];
+        };
+        ClientGameSummary: {
+            description: string;
+            gameId: components["schemas"]["GameId"];
+            name: string;
+            /** @enum {string} */
+            status: "enabled" | "maintenance";
+        };
+        CreateGameProjectRequest: {
+            description: string;
+            gameId: components["schemas"]["GameId"];
+            name: string;
+        };
+        CreateGameServerRequest: {
+            /** Format: uri */
+            gameHttpUrl: string;
+            /** Format: uri */
+            gameWsUrl: string;
+            isOpen: boolean;
+            name: string;
+            openTime: number;
+            serverId: number;
+            sortOrder: number;
+            /** @enum {string} */
+            status: "smooth" | "busy" | "maintenance";
+            /** @enum {string} */
+            tag: "normal" | "new" | "full" | "maintenance";
+        };
         DevLoginRequest: {
             deviceId?: string | null;
             devKey: string;
             serverId: number;
         };
         /** @enum {string} */
-        ErrorCode: "INVALID_PAYLOAD" | "AUTH_REQUIRED" | "ACCOUNT_BANNED" | "NOT_FOUND" | "RATE_LIMITED" | "UPSTREAM_UNAVAILABLE" | "SERVICE_AUTH_REQUIRED" | "SERVICE_FORBIDDEN" | "OPERATION_CONFLICT" | "INTERNAL" | "GAME_NOT_FOUND" | "GAME_DISABLED" | "GAME_ACCESS_DENIED" | "SERVER_NOT_FOUND" | "SERVER_DISABLED" | "ADMIN_AUTH_REQUIRED" | "ORIGIN_FORBIDDEN";
+        ErrorCode: "INVALID_PAYLOAD" | "AUTH_REQUIRED" | "ACCOUNT_BANNED" | "NOT_FOUND" | "RATE_LIMITED" | "UPSTREAM_UNAVAILABLE" | "SERVICE_AUTH_REQUIRED" | "SERVICE_FORBIDDEN" | "OPERATION_CONFLICT" | "INTERNAL" | "GAME_NOT_FOUND" | "GAME_DISABLED" | "GAME_ACCESS_DENIED" | "SERVER_NOT_FOUND" | "SERVER_DISABLED" | "ADMIN_AUTH_REQUIRED" | "ORIGIN_FORBIDDEN" | "GAME_PROJECT_CONFLICT" | "GAME_SERVER_CONFLICT";
         ErrorResponse: {
             code: components["schemas"]["ErrorCode"];
             requestId: string;
         };
+        /** @enum {string} */
+        GameConfigurationState: "draft" | "configured";
         GameId: string;
+        GameProject: {
+            clientVisible: boolean;
+            configurationState: components["schemas"]["GameConfigurationState"];
+            /** Format: date-time */
+            createdAt: string;
+            description: string;
+            gameId: components["schemas"]["GameId"];
+            name: string;
+            revision: number;
+            sortOrder: number;
+            status: components["schemas"]["GameStatus"];
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        GameProjectListResponse: {
+            games: components["schemas"]["GameProject"][];
+        };
         /** @enum {string} */
         GameStatus: "enabled" | "maintenance" | "disabled";
         HasCharacterResponse: {
@@ -331,12 +475,59 @@ export type components = {
             isNewAccount: boolean;
             userId: string;
         };
+        ManagedGameServer: {
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: uri */
+            gameHttpUrl: string;
+            gameId: components["schemas"]["GameId"];
+            /** Format: uri */
+            gameWsUrl: string;
+            isOpen: boolean;
+            name: string;
+            openTime: number;
+            revision: number;
+            serverId: number;
+            sortOrder: number;
+            /** @enum {string} */
+            status: "smooth" | "busy" | "maintenance";
+            /** @enum {string} */
+            tag: "normal" | "new" | "full" | "maintenance";
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        ManagedGameServerListResponse: {
+            servers: components["schemas"]["ManagedGameServer"][];
+        };
         ReadyResponse: {
             ready: boolean;
         };
         RegisterCharacterResponse: {
             /** @constant */
             registered: true;
+        };
+        UpdateGameProjectRequest: {
+            clientVisible: boolean;
+            description: string;
+            name: string;
+            revision: number;
+            sortOrder: number;
+            status: components["schemas"]["GameStatus"];
+        };
+        UpdateGameServerRequest: {
+            /** Format: uri */
+            gameHttpUrl: string;
+            /** Format: uri */
+            gameWsUrl: string;
+            isOpen: boolean;
+            name: string;
+            openTime: number;
+            revision: number;
+            sortOrder: number;
+            /** @enum {string} */
+            status: "smooth" | "busy" | "maintenance";
+            /** @enum {string} */
+            tag: "normal" | "new" | "full" | "maintenance";
         };
         VerifySessionRequest: {
             accessToken: string;
@@ -611,6 +802,214 @@ export interface operations {
             };
             401: components["responses"]["AdminUnauthorized"];
             403: components["responses"]["Forbidden"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listAdminGames: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 返回全部游戏项目及其配置状态 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GameProjectListResponse"];
+                };
+            };
+            401: components["responses"]["AdminUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createAdminGame: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateGameProjectRequest"];
+            };
+        };
+        responses: {
+            /** @description 游戏项目已创建 */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GameProject"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["AdminUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    updateAdminGame: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateGameProjectRequest"];
+            };
+        };
+        responses: {
+            /** @description 游戏项目已更新 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GameProject"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["AdminUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listAdminGameServers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 游戏区服列表 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedGameServerListResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["AdminUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createAdminGameServer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateGameServerRequest"];
+            };
+        };
+        responses: {
+            /** @description 游戏区服已创建 */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedGameServer"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["AdminUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    updateAdminGameServer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+                serverId: components["parameters"]["ServerId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateGameServerRequest"];
+            };
+        };
+        responses: {
+            /** @description 游戏区服已更新 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedGameServer"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["AdminUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listClientGames: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 客户端游戏列表 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientGameListResponse"];
+                };
+            };
             500: components["responses"]["Internal"];
             503: components["responses"]["Unavailable"];
         };

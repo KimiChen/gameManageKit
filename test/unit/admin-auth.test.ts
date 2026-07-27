@@ -14,6 +14,7 @@ import {
   normalizeAdminOperatorId,
   parseAdminSessionToken,
   requireAdminAccountCapability,
+  requireAdminGameManagement,
   requireAdminGameAccess,
   type AdminAuthDatabase,
   type AdminLoginProtection,
@@ -26,6 +27,7 @@ interface FakeOperator {
   password_hash: string;
   status: "enabled" | "disabled";
   auth_version: number;
+  can_manage_games: number;
 }
 
 interface FakeSession {
@@ -60,6 +62,9 @@ class FakeDatabase implements AdminAuthDatabase {
   readonly access = new Map<string, Array<{
     game_id: string;
     can_operate_accounts: number;
+    name?: string;
+    status?: "enabled" | "maintenance" | "disabled";
+    configuration_state?: "draft" | "configured";
   }>>();
   readonly sessions = new Map<string, FakeSession>();
   readonly audits: FakeAudit[] = [];
@@ -97,6 +102,7 @@ class FakeDatabase implements AdminAuthDatabase {
       password_hash: "stored-password-hash",
       status: "enabled",
       auth_version: 1,
+      can_manage_games: 0,
       ...overrides,
     };
     this.operators.set(operator.operator_id, operator);
@@ -127,7 +133,12 @@ class FakeDatabase implements AdminAuthDatabase {
     }
     if (sql.includes("FROM admin_game_access")) {
       const rows = this.access.get(String(values[0])) ?? [];
-      return [[...rows] as RowDataPacket[], []];
+      return [[...rows.map((row) => ({
+        name: row.game_id,
+        status: "enabled",
+        configuration_state: "configured",
+        ...row,
+      }))] as RowDataPacket[], []];
     }
     throw new Error(`未实现 FakeDatabase query: ${sql}`);
   }
@@ -224,7 +235,7 @@ test("会话令牌使用 32 字节随机值并以 BINARY(32) SHA-256 表示", ()
 
 test("登录锁定 operator 后签发会话并返回实时游戏权限", async () => {
   const database = new FakeDatabase();
-  database.addOperator();
+  database.addOperator({ can_manage_games: 1 });
   database.access.set("ops_kimi", [
     { game_id: "game-a", can_operate_accounts: 1 },
     { game_id: "game-b", can_operate_accounts: 0 },
@@ -255,9 +266,22 @@ test("登录锁定 operator 后签发会话并返回实时游戏权限", async (
   assert.equal(issued.operatorId, "ops_kimi");
   assert.equal(issued.displayName, "Kimi");
   assert.equal(issued.authVersion, 1);
+  assert.equal(issued.canManageGames, true);
   assert.deepEqual(issued.games, [
-    { gameId: "game-a", canOperateAccounts: true },
-    { gameId: "game-b", canOperateAccounts: false },
+    {
+      gameId: "game-a",
+      name: "game-a",
+      status: "enabled",
+      configurationState: "configured",
+      canOperateAccounts: true,
+    },
+    {
+      gameId: "game-b",
+      name: "game-b",
+      status: "enabled",
+      configurationState: "configured",
+      canOperateAccounts: false,
+    },
   ]);
   assert.equal(
     issued.expiresAt,
@@ -521,6 +545,9 @@ test("每次认证按 operator→session 锁序并实时读取权限、刷新空
 
   assert.deepEqual(identity.games, [{
     gameId: "game-b",
+    name: "game-b",
+    status: "enabled",
+    configurationState: "configured",
     canOperateAccounts: false,
   }]);
   const stored = [...fixture.database.sessions.values()][0];
@@ -615,12 +642,26 @@ test("游戏与账号操作能力由当前会话权限严格判定", () => {
     operatorId: "ops_kimi",
     displayName: "Kimi",
     authVersion: 1,
+    canManageGames: true,
     expiresAt: "2026-07-28T10:30:00.000Z",
     games: [
-      { gameId: "game-a", canOperateAccounts: true },
-      { gameId: "game-b", canOperateAccounts: false },
+      {
+        gameId: "game-a",
+        name: "游戏 A",
+        status: "enabled" as const,
+        configurationState: "configured" as const,
+        canOperateAccounts: true,
+      },
+      {
+        gameId: "game-b",
+        name: "游戏 B",
+        status: "maintenance" as const,
+        configurationState: "configured" as const,
+        canOperateAccounts: false,
+      },
     ],
   };
+  assert.doesNotThrow(() => requireAdminGameManagement(identity));
   assert.equal(requireAdminGameAccess(identity, "game-a").gameId, "game-a");
   assert.doesNotThrow(() => requireAdminAccountCapability(identity, "game-a"));
   assert.throws(
@@ -629,6 +670,10 @@ test("游戏与账号操作能力由当前会话权限严格判定", () => {
   );
   assert.throws(
     () => requireAdminGameAccess(identity, "game-c"),
+    (error) => isGameError(error, 403, "GAME_ACCESS_DENIED"),
+  );
+  assert.throws(
+    () => requireAdminGameManagement({ canManageGames: false }),
     (error) => isGameError(error, 403, "GAME_ACCESS_DENIED"),
   );
 });

@@ -12,6 +12,9 @@ export const ADMIN_ACTIONS = Object.freeze(["ban", "revoke"]);
 export const ADMIN_SESSION_IDLE_TTL_MS = 30 * 60 * 1_000;
 
 const GAME_STATUSES = new Set(["enabled", "maintenance", "disabled"]);
+const GAME_CONFIGURATION_STATES = new Set(["draft", "configured"]);
+const SERVER_TAGS = new Set(["normal", "new", "full", "maintenance"]);
+const SERVER_STATUSES = new Set(["smooth", "busy", "maintenance"]);
 const ACCOUNT_STATUSES = new Set(["active", "banned", "deregistered"]);
 const OPERATION_STATUSES = new Set(["banned", "revoked", "not_found"]);
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
@@ -49,7 +52,7 @@ function requiredString(value, label, maxLength) {
   if (
     typeof value !== "string"
     || value.trim().length === 0
-    || value.length > maxLength
+    || [...value].length > maxLength
   ) {
     throw new InvalidApiPayloadError(`${label} 无效`);
   }
@@ -86,6 +89,9 @@ export function normalizeSession(payload) {
   );
   if (!Array.isArray(payload.games)) {
     throw new InvalidApiPayloadError("games 无效");
+  }
+  if (typeof payload.canManageGames !== "boolean") {
+    throw new InvalidApiPayloadError("canManageGames 无效");
   }
 
   const seen = new Set();
@@ -124,8 +130,311 @@ export function normalizeSession(payload) {
   return Object.freeze({
     operator: Object.freeze({ operatorId, displayName }),
     games: Object.freeze(games),
+    canManageGames: payload.canManageGames,
     expiresAt,
   });
+}
+
+export function normalizeGameProject(payload) {
+  if (!isRecord(payload)) {
+    throw new InvalidApiPayloadError("游戏项目响应无效");
+  }
+  const gameId = requiredString(payload.gameId, "gameId", 32);
+  if (!GAME_ID_PATTERN.test(gameId)) {
+    throw new InvalidApiPayloadError("gameId 无效");
+  }
+  const name = requiredString(payload.name, "name", 128);
+  if (
+    typeof payload.description !== "string"
+    || [...payload.description].length > 500
+  ) {
+    throw new InvalidApiPayloadError("description 无效");
+  }
+  if (!GAME_STATUSES.has(payload.status)) {
+    throw new InvalidApiPayloadError("status 无效");
+  }
+  if (!GAME_CONFIGURATION_STATES.has(payload.configurationState)) {
+    throw new InvalidApiPayloadError("configurationState 无效");
+  }
+  if (
+    payload.configurationState === "draft"
+    && payload.status === "enabled"
+  ) {
+    throw new InvalidApiPayloadError("草稿游戏不能启用");
+  }
+  if (
+    typeof payload.clientVisible !== "boolean"
+    || (payload.clientVisible && (
+      payload.configurationState !== "configured"
+      || payload.status === "disabled"
+    ))
+  ) {
+    throw new InvalidApiPayloadError("clientVisible 无效");
+  }
+  if (
+    !Number.isSafeInteger(payload.sortOrder)
+    || payload.sortOrder < 0
+    || payload.sortOrder > 65_535
+  ) {
+    throw new InvalidApiPayloadError("sortOrder 无效");
+  }
+  if (!Number.isSafeInteger(payload.revision) || payload.revision <= 0) {
+    throw new InvalidApiPayloadError("revision 无效");
+  }
+  const createdAt = requiredString(payload.createdAt, "createdAt", 64);
+  const updatedAt = requiredString(payload.updatedAt, "updatedAt", 64);
+  if (
+    !Number.isFinite(Date.parse(createdAt))
+    || !Number.isFinite(Date.parse(updatedAt))
+  ) {
+    throw new InvalidApiPayloadError("游戏项目时间无效");
+  }
+  return Object.freeze({
+    gameId,
+    name,
+    description: payload.description,
+    status: payload.status,
+    configurationState: payload.configurationState,
+    clientVisible: payload.clientVisible,
+    sortOrder: payload.sortOrder,
+    revision: payload.revision,
+    createdAt,
+    updatedAt,
+  });
+}
+
+export function normalizeGameProjectList(payload) {
+  if (
+    !isRecord(payload)
+    || !Array.isArray(payload.games)
+  ) {
+    throw new InvalidApiPayloadError("游戏项目列表响应无效");
+  }
+  const seen = new Set();
+  const games = payload.games.map((value, index) => {
+    let game;
+    try {
+      game = normalizeGameProject(value);
+    } catch (error) {
+      if (error instanceof InvalidApiPayloadError) {
+        throw new InvalidApiPayloadError(`games[${index}] ${error.message}`);
+      }
+      throw error;
+    }
+    if (seen.has(game.gameId)) {
+      throw new InvalidApiPayloadError(`games[${index}].gameId 重复`);
+    }
+    seen.add(game.gameId);
+    return game;
+  });
+  return Object.freeze({ games: Object.freeze(games) });
+}
+
+function requiredEndpoint(value, label, protocols) {
+  const endpoint = requiredString(value, label, 2_048);
+  if (endpoint !== endpoint.trim()) {
+    throw new InvalidApiPayloadError(`${label} 无效`);
+  }
+  let url;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    throw new InvalidApiPayloadError(`${label} 无效`);
+  }
+  if (
+    !protocols.has(url.protocol)
+    || url.hostname.length === 0
+    || url.username.length > 0
+    || url.password.length > 0
+    || url.hash.length > 0
+  ) {
+    throw new InvalidApiPayloadError(`${label} 无效`);
+  }
+  return endpoint;
+}
+
+export function normalizeGameServer(
+  payload,
+  expectedGameId = null,
+  expectedServerId = null,
+) {
+  if (!isRecord(payload)) {
+    throw new InvalidApiPayloadError("区服响应无效");
+  }
+  const gameId = requiredString(payload.gameId, "gameId", 32);
+  if (
+    !GAME_ID_PATTERN.test(gameId)
+    || (expectedGameId !== null && gameId !== expectedGameId)
+  ) {
+    throw new InvalidApiPayloadError("gameId 无效");
+  }
+  if (
+    !Number.isSafeInteger(payload.serverId)
+    || payload.serverId < 0
+    || payload.serverId > 65_535
+    || (expectedServerId !== null && payload.serverId !== expectedServerId)
+  ) {
+    throw new InvalidApiPayloadError("serverId 无效");
+  }
+  const name = requiredString(payload.name, "name", 64);
+  if (!SERVER_TAGS.has(payload.tag)) {
+    throw new InvalidApiPayloadError("tag 无效");
+  }
+  if (!SERVER_STATUSES.has(payload.status)) {
+    throw new InvalidApiPayloadError("status 无效");
+  }
+  if (
+    !Number.isSafeInteger(payload.openTime)
+    || payload.openTime < 0
+  ) {
+    throw new InvalidApiPayloadError("openTime 无效");
+  }
+  const gameHttpUrl = requiredEndpoint(
+    payload.gameHttpUrl,
+    "gameHttpUrl",
+    new Set(["http:", "https:"]),
+  );
+  const gameWsUrl = requiredEndpoint(
+    payload.gameWsUrl,
+    "gameWsUrl",
+    new Set(["ws:", "wss:"]),
+  );
+  if (typeof payload.isOpen !== "boolean") {
+    throw new InvalidApiPayloadError("isOpen 无效");
+  }
+  if (
+    !Number.isSafeInteger(payload.sortOrder)
+    || payload.sortOrder < 0
+    || payload.sortOrder > 65_535
+  ) {
+    throw new InvalidApiPayloadError("sortOrder 无效");
+  }
+  if (!Number.isSafeInteger(payload.revision) || payload.revision <= 0) {
+    throw new InvalidApiPayloadError("revision 无效");
+  }
+  const createdAt = requiredString(payload.createdAt, "createdAt", 64);
+  const updatedAt = requiredString(payload.updatedAt, "updatedAt", 64);
+  if (
+    !Number.isFinite(Date.parse(createdAt))
+    || !Number.isFinite(Date.parse(updatedAt))
+  ) {
+    throw new InvalidApiPayloadError("区服时间无效");
+  }
+  return Object.freeze({
+    gameId,
+    serverId: payload.serverId,
+    name,
+    tag: payload.tag,
+    status: payload.status,
+    openTime: payload.openTime,
+    gameHttpUrl,
+    gameWsUrl,
+    isOpen: payload.isOpen,
+    sortOrder: payload.sortOrder,
+    revision: payload.revision,
+    createdAt,
+    updatedAt,
+  });
+}
+
+export function normalizeGameServerList(payload, expectedGameId = null) {
+  if (
+    !isRecord(payload)
+    || !Array.isArray(payload.servers)
+    || payload.servers.length > 65_536
+  ) {
+    throw new InvalidApiPayloadError("区服列表响应无效");
+  }
+  const seen = new Set();
+  const servers = payload.servers.map((value, index) => {
+    let server;
+    try {
+      server = normalizeGameServer(value, expectedGameId);
+    } catch (error) {
+      if (error instanceof InvalidApiPayloadError) {
+        throw new InvalidApiPayloadError(`servers[${index}] ${error.message}`);
+      }
+      throw error;
+    }
+    if (seen.has(server.serverId)) {
+      throw new InvalidApiPayloadError(`servers[${index}].serverId 重复`);
+    }
+    seen.add(server.serverId);
+    return server;
+  });
+  return Object.freeze({ servers: Object.freeze(servers) });
+}
+
+export function unixSecondsToDateTimeLocal(value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError("Unix 秒必须是非负安全整数");
+  }
+  const date = new Date(value * 1_000);
+  if (!Number.isFinite(date.getTime())) {
+    return "";
+  }
+  const year = String(date.getFullYear()).padStart(4, "0");
+  if (year.length !== 4) {
+    return "";
+  }
+  const pad = (part) => String(part).padStart(2, "0");
+  return `${year}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+    + `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+export function dateTimeLocalToUnixSeconds(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const match = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2})(?::([0-9]{2}))?$/u
+    .exec(value);
+  if (!match) {
+    return null;
+  }
+  const [, year, month, day, hour, minute, second = "0"] = match;
+  const parts = [year, month, day, hour, minute, second].map(Number);
+  const date = new Date(
+    parts[0],
+    parts[1] - 1,
+    parts[2],
+    parts[3],
+    parts[4],
+    parts[5],
+    0,
+  );
+  if (
+    date.getFullYear() !== parts[0]
+    || date.getMonth() !== parts[1] - 1
+    || date.getDate() !== parts[2]
+    || date.getHours() !== parts[3]
+    || date.getMinutes() !== parts[4]
+    || date.getSeconds() !== parts[5]
+  ) {
+    return null;
+  }
+  const unixSeconds = date.getTime() / 1_000;
+  return Number.isSafeInteger(unixSeconds) && unixSeconds >= 0
+    ? unixSeconds
+    : null;
+}
+
+export function canSelectGameStatus(game, status) {
+  if (!isRecord(game) || !GAME_STATUSES.has(status)) {
+    return false;
+  }
+  if (game.status === "disabled") {
+    return status === "disabled";
+  }
+  return !(game.configurationState === "draft" && status === "enabled");
+}
+
+export function canPublishGameToClient(game, status = game?.status) {
+  return (
+    isRecord(game)
+    && game.configurationState === "configured"
+    && GAME_STATUSES.has(status)
+    && status !== "disabled"
+  );
 }
 
 export function normalizeAccount(payload, expectedUserId = null) {
@@ -229,6 +538,19 @@ export function createLatestRequestGuard() {
 
 export function accountPath(gameId, userId) {
   return `/v1/games/${encodeURIComponent(gameId)}/admin/accounts/${encodeURIComponent(userId)}`;
+}
+
+export function gameProjectPath(gameId = null) {
+  return gameId === null
+    ? "/v1/admin/games"
+    : `/v1/admin/games/${encodeURIComponent(gameId)}`;
+}
+
+export function gameServerPath(gameId, serverId = null) {
+  const base = `${gameProjectPath(gameId)}/servers`;
+  return serverId === null
+    ? base
+    : `${base}/${encodeURIComponent(String(serverId))}`;
 }
 
 export function createOperationIntent({
@@ -387,6 +709,47 @@ export function createAdminApi(fetchImpl = globalThis.fetch, {
     async logout() {
       await request("/v1/admin/auth/session", { method: "DELETE" });
     },
+    async listGames() {
+      return normalizeGameProjectList(await request(gameProjectPath())).games;
+    },
+    async createGame(input) {
+      return normalizeGameProject(await request(gameProjectPath(), {
+        method: "POST",
+        body: input,
+      }));
+    },
+    async updateGame(gameId, input) {
+      return normalizeGameProject(await request(gameProjectPath(gameId), {
+        method: "PATCH",
+        body: input,
+      }));
+    },
+    async listGameServers(gameId) {
+      return normalizeGameServerList(
+        await request(gameServerPath(gameId)),
+        gameId,
+      ).servers;
+    },
+    async createGameServer(gameId, input) {
+      return normalizeGameServer(
+        await request(gameServerPath(gameId), {
+          method: "POST",
+          body: input,
+        }),
+        gameId,
+        input.serverId,
+      );
+    },
+    async updateGameServer(gameId, serverId, input) {
+      return normalizeGameServer(
+        await request(gameServerPath(gameId, serverId), {
+          method: "PATCH",
+          body: input,
+        }),
+        gameId,
+        serverId,
+      );
+    },
     async findAccount(gameId, userId) {
       return normalizeAccount(
         await request(accountPath(gameId, userId)),
@@ -427,10 +790,46 @@ export function describeApiError(error, context) {
   if (error.status === 403) {
     return `当前管理员没有执行此操作的权限。${suffix}`;
   }
+  if (
+    error.status === 400
+    && typeof context === "string"
+    && context.startsWith("game")
+  ) {
+    return `游戏项目信息无效，请检查后重试。${suffix}`;
+  }
+  if (
+    error.status === 400
+    && typeof context === "string"
+    && context.startsWith("server")
+  ) {
+    return `区服信息无效，请检查后重试。${suffix}`;
+  }
   if (error.status === 404 && context === "account") {
     return "当前游戏中不存在这个用户 ID。";
   }
+  if (error.status === 404 && context === "game-update") {
+    return `这个游戏项目已不存在，请关闭窗口后重新加载。${suffix}`;
+  }
+  if (
+    error.status === 404
+    && typeof context === "string"
+    && context.startsWith("server")
+  ) {
+    return `这个游戏或区服已不存在，请关闭窗口后重新加载。${suffix}`;
+  }
   if (error.status === 409) {
+    if (context === "game-create") {
+      return `游戏 ID 已存在，请使用另一个 ID。${suffix}`;
+    }
+    if (context === "game-update") {
+      return `游戏项目已被其他管理员修改，请关闭窗口后重新加载。${suffix}`;
+    }
+    if (context === "server-create") {
+      return `区服 ID 已存在，请使用另一个 ID。${suffix}`;
+    }
+    if (context === "server-update") {
+      return `区服已被其他管理员修改，请取消编辑；页面会加载最新版本后再编辑。${suffix}`;
+    }
     return `操作标识与已有记录冲突，请关闭窗口后重新发起。${suffix}`;
   }
   if (error.status === 429) {
@@ -515,6 +914,42 @@ function gameStatusPresentation(game) {
   return { text: "游戏已停用", variant: "danger" };
 }
 
+function serverTagPresentation(tag) {
+  const labels = {
+    normal: "普通",
+    new: "新服",
+    full: "爆满",
+    maintenance: "维护标签",
+  };
+  return {
+    text: labels[tag] ?? tag,
+    variant:
+      tag === "new"
+        ? "accent"
+        : tag === "maintenance"
+          ? "warning"
+          : tag === "full"
+            ? "danger"
+            : null,
+  };
+}
+
+function serverStatusPresentation(status) {
+  if (status === "smooth") {
+    return { text: "流畅", variant: "success" };
+  }
+  return status === "busy"
+    ? { text: "繁忙", variant: "warning" }
+    : { text: "维护中", variant: "danger" };
+}
+
+function formatUnixTime(value) {
+  const date = new Date(value * 1_000);
+  return Number.isFinite(date.getTime())
+    ? formatDateTime(date)
+    : `${value}（Unix 秒）`;
+}
+
 export function accountStatusPresentation(account) {
   if (account.status === "active") {
     return { text: "正常", variant: "success" };
@@ -537,6 +972,19 @@ export function canPerformAccountAction(account, action, canOperateAccounts) {
     : account.activeSessionCount > 0;
 }
 
+export function chooseAdminView(session, hash = "") {
+  if (!session) {
+    return "login";
+  }
+  if (hash === "#games" && session.canManageGames) {
+    return "games";
+  }
+  if (session.games.length > 0) {
+    return "accounts";
+  }
+  return session.canManageGames ? "games" : "no-access";
+}
+
 export function bootstrapAdminConsole({
   document = globalThis.document,
   window = globalThis.window,
@@ -555,6 +1003,8 @@ export function bootstrapAdminConsole({
   const toast = createToastController({ document, schedule });
   const sessionRequests = createLatestRequestGuard();
   const loginRequests = createLatestRequestGuard();
+  const gameRequests = createLatestRequestGuard();
+  const serverRequests = createLatestRequestGuard();
 
   const elements = {
     views: new Map(
@@ -571,6 +1021,7 @@ export function bootstrapAdminConsole({
       requiredElement(document, "logout-button"),
       requiredElement(document, "no-access-logout"),
       requiredElement(document, "sidebar-logout"),
+      requiredElement(document, "games-sidebar-logout"),
     ],
     bootSpinner: requiredElement(document, "boot-spinner"),
     bootMessage: requiredElement(document, "boot-message"),
@@ -622,6 +1073,87 @@ export function bootstrapAdminConsole({
       document,
       "operation-error-message",
     ),
+    accountsGamesLink: requiredElement(document, "accounts-games-link"),
+    gamesAccountsLink: requiredElement(document, "games-accounts-link"),
+    gameCreateButton: requiredElement(document, "game-create-button"),
+    gamesEmptyCreate: requiredElement(document, "games-empty-create"),
+    gamesLiveStatus: requiredElement(document, "games-live-status"),
+    gamesLoading: requiredElement(document, "games-loading"),
+    gamesError: requiredElement(document, "games-error"),
+    gamesErrorMessage: requiredElement(document, "games-error-message"),
+    gamesRetry: requiredElement(document, "games-retry"),
+    gamesEmpty: requiredElement(document, "games-empty"),
+    gamesList: requiredElement(document, "games-list"),
+    gameDialog: requiredElement(document, "game-dialog"),
+    gameForm: requiredElement(document, "game-form"),
+    gameDialogClose: requiredElement(document, "game-dialog-close"),
+    gameCancel: requiredElement(document, "game-cancel"),
+    gameSubmit: requiredElement(document, "game-submit"),
+    gameDialogKind: requiredElement(document, "game-dialog-kind"),
+    gameDialogTitle: requiredElement(document, "game-dialog-title"),
+    gameDialogDescription: requiredElement(
+      document,
+      "game-dialog-description",
+    ),
+    gameId: requiredElement(document, "game-id"),
+    gameName: requiredElement(document, "game-name"),
+    gameDescription: requiredElement(document, "game-description"),
+    gameStatus: requiredElement(document, "game-status"),
+    gameStatusHelp: requiredElement(document, "game-status-help"),
+    gameClientVisible: requiredElement(document, "game-client-visible"),
+    gameClientVisibleHelp: requiredElement(
+      document,
+      "game-client-visible-help",
+    ),
+    gameSortOrder: requiredElement(document, "game-sort-order"),
+    gameDisableWarning: requiredElement(document, "game-disable-warning"),
+    gameDisableConfirm: requiredElement(document, "game-disable-confirm"),
+    gameFormError: requiredElement(document, "game-form-error"),
+    gameFormErrorMessage: requiredElement(
+      document,
+      "game-form-error-message",
+    ),
+    serverDialog: requiredElement(document, "server-dialog"),
+    serverDialogTitle: requiredElement(document, "server-dialog-title"),
+    serverDialogDescription: requiredElement(
+      document,
+      "server-dialog-description",
+    ),
+    serverDialogClose: requiredElement(document, "server-dialog-close"),
+    serverGameLabel: requiredElement(document, "server-game-label"),
+    serverSummary: requiredElement(document, "server-summary"),
+    serverCreateButton: requiredElement(document, "server-create-button"),
+    serversEmptyCreate: requiredElement(document, "servers-empty-create"),
+    serversLiveStatus: requiredElement(document, "servers-live-status"),
+    serversLoading: requiredElement(document, "servers-loading"),
+    serversError: requiredElement(document, "servers-error"),
+    serversErrorMessage: requiredElement(document, "servers-error-message"),
+    serversRetry: requiredElement(document, "servers-retry"),
+    serversEmpty: requiredElement(document, "servers-empty"),
+    serversList: requiredElement(document, "servers-list"),
+    serverEditor: requiredElement(document, "server-editor"),
+    serverForm: requiredElement(document, "server-form"),
+    serverEditorKind: requiredElement(document, "server-editor-kind"),
+    serverEditorTitle: requiredElement(document, "server-editor-title"),
+    serverEditorClose: requiredElement(document, "server-editor-close"),
+    serverId: requiredElement(document, "server-id"),
+    serverName: requiredElement(document, "server-name"),
+    serverTag: requiredElement(document, "server-tag"),
+    serverStatus: requiredElement(document, "server-status"),
+    serverStatusHelp: requiredElement(document, "server-status-help"),
+    serverOpenTime: requiredElement(document, "server-open-time"),
+    serverHttpUrl: requiredElement(document, "server-http-url"),
+    serverWsUrl: requiredElement(document, "server-ws-url"),
+    serverIsOpen: requiredElement(document, "server-is-open"),
+    serverIsOpenHelp: requiredElement(document, "server-is-open-help"),
+    serverSortOrder: requiredElement(document, "server-sort-order"),
+    serverFormError: requiredElement(document, "server-form-error"),
+    serverFormErrorMessage: requiredElement(
+      document,
+      "server-form-error-message",
+    ),
+    serverCancel: requiredElement(document, "server-cancel"),
+    serverSubmit: requiredElement(document, "server-submit"),
     toastRegion: requiredElement(document, "toast-region"),
   };
 
@@ -636,6 +1168,21 @@ export function bootstrapAdminConsole({
     loginSubmitting: false,
     logoutSubmitting: false,
     operationOpener: null,
+    managedGames: [],
+    managedGamesLoaded: false,
+    gameFormMode: null,
+    editingGame: null,
+    gameSubmitting: false,
+    gameOpener: null,
+    serverGame: null,
+    managedServers: [],
+    managedServersLoaded: false,
+    serverFormMode: null,
+    editingServer: null,
+    serverSubmitting: false,
+    serverDialogOpener: null,
+    serverFormOpener: null,
+    serverDialogGeneration: 0,
     expiryTimer: null,
     idleExpiresAt: null,
     authGeneration: 0,
@@ -668,6 +1215,12 @@ export function bootstrapAdminConsole({
       replaceHash("#login");
     } else if (name === "accounts" || name === "no-access") {
       replaceHash("#accounts");
+    } else if (name === "games") {
+      replaceHash("#games");
+    }
+    if (elements.gameField) {
+      elements.gameField.hidden =
+        name !== "accounts" || (state.session?.games.length ?? 0) === 0;
     }
     if (focus) {
       elements.views.get(name)?.querySelector("h1")?.focus();
@@ -697,6 +1250,18 @@ export function bootstrapAdminConsole({
   function closeOperationDialog() {
     if (elements.dialog.open) {
       elements.dialog.close();
+    }
+  }
+
+  function closeGameDialog() {
+    if (elements.gameDialog.open) {
+      elements.gameDialog.close();
+    }
+  }
+
+  function closeServerDialog() {
+    if (elements.serverDialog.open) {
+      elements.serverDialog.close();
     }
   }
 
@@ -734,6 +1299,8 @@ export function bootstrapAdminConsole({
 
   function clearAuthenticatedState() {
     sessionRequests.invalidate();
+    gameRequests.invalidate();
+    serverRequests.invalidate();
     clearExpiryTimer();
     state.idleExpiresAt = null;
     state.session = null;
@@ -744,14 +1311,51 @@ export function bootstrapAdminConsole({
     state.pendingOperation = null;
     state.retryOperation = null;
     state.operationSubmitting = false;
+    state.managedGames = [];
+    state.managedGamesLoaded = false;
+    state.gameFormMode = null;
+    state.editingGame = null;
+    state.gameSubmitting = false;
+    state.gameOpener = null;
+    state.serverGame = null;
+    state.managedServers = [];
+    state.managedServersLoaded = false;
+    state.serverFormMode = null;
+    state.editingServer = null;
+    state.serverSubmitting = false;
+    state.serverDialogOpener = null;
+    state.serverFormOpener = null;
+    state.serverDialogGeneration += 1;
     state.logoutSubmitting = false;
     elements.sessionTools.hidden = true;
     elements.gameSelect.replaceChildren();
     elements.operatorName.textContent = "";
     elements.selectedGameLabel.textContent = "";
     elements.gameStatusBadge.textContent = "";
+    elements.accountsGamesLink.hidden = true;
+    elements.gamesAccountsLink.hidden = false;
+    elements.gamesList.replaceChildren();
+    elements.gamesList.hidden = true;
+    elements.gamesLoading.hidden = true;
+    elements.gamesError.hidden = true;
+    elements.gamesEmpty.hidden = true;
+    elements.gamesLiveStatus.textContent = "";
+    elements.serversList.replaceChildren();
+    elements.serversList.hidden = true;
+    elements.serversLoading.hidden = true;
+    elements.serversError.hidden = true;
+    elements.serversEmpty.hidden = true;
+    elements.serversLiveStatus.textContent = "";
+    elements.serverSummary.textContent = "";
+    elements.serverGameLabel.textContent = "";
+    elements.serverEditor.hidden = true;
+    elements.serverForm.reset();
+    elements.serverFormError.hidden = true;
+    elements.serverFormErrorMessage.textContent = "";
     elements.toastRegion.replaceChildren();
     closeOperationDialog();
+    closeGameDialog();
+    closeServerDialog();
     clearAccount();
   }
 
@@ -858,6 +1462,1080 @@ export function bootstrapAdminConsole({
     }
   }
 
+  function hideManagedGamePanels() {
+    elements.gamesLoading.hidden = true;
+    elements.gamesError.hidden = true;
+    elements.gamesEmpty.hidden = true;
+    elements.gamesList.hidden = true;
+  }
+
+  function appendFact(list, label, value) {
+    const item = document.createElement("div");
+    const term = document.createElement("dt");
+    const description = document.createElement("dd");
+    term.textContent = label;
+    description.textContent = value;
+    item.append(term, description);
+    list.append(item);
+  }
+
+  function createGameCard(game) {
+    const card = document.createElement("article");
+    card.className = "wsk-panel gmk-game-card";
+    card.setAttribute("role", "listitem");
+
+    const head = document.createElement("div");
+    head.className = "gmk-game-card-head";
+    const identity = document.createElement("div");
+    const title = document.createElement("h3");
+    title.textContent = game.name;
+    const gameId = document.createElement("code");
+    gameId.className = "gmk-game-id";
+    gameId.textContent = game.gameId;
+    identity.append(title, gameId);
+
+    const badges = document.createElement("div");
+    badges.className = "gmk-game-badges";
+    const statusBadge = document.createElement("span");
+    const status = gameStatusPresentation(game);
+    setBadge(statusBadge, status.text.replace(/^游戏/u, ""), status.variant);
+    const configurationBadge = document.createElement("span");
+    setBadge(
+      configurationBadge,
+      game.configurationState === "configured" ? "配置完成" : "草稿",
+      game.configurationState === "configured" ? "success" : "warning",
+    );
+    const clientBadge = document.createElement("span");
+    setBadge(
+      clientBadge,
+      game.clientVisible ? "客户端可见" : "不下发",
+      game.clientVisible ? "accent" : null,
+    );
+    badges.append(statusBadge, configurationBadge, clientBadge);
+    head.append(identity, badges);
+
+    const description = document.createElement("p");
+    description.className = "gmk-game-description";
+    description.textContent = game.description || "暂无游戏说明。";
+
+    const facts = document.createElement("dl");
+    facts.className = "gmk-game-facts";
+    appendFact(
+      facts,
+      "客户端展示顺序",
+      game.clientVisible ? String(game.sortOrder) : `未下发 · ${game.sortOrder}`,
+    );
+    appendFact(facts, "最近更新", formatDateTime(game.updatedAt));
+    appendFact(facts, "修订版本", `第 ${game.revision} 版`);
+
+    const actions = document.createElement("div");
+    actions.className = "gmk-game-card-actions";
+    const manageServers = document.createElement("button");
+    manageServers.className = "wsk-button";
+    manageServers.type = "button";
+    manageServers.dataset.gameServers = game.gameId;
+    manageServers.setAttribute("aria-label", `管理游戏 ${game.name} 的区服`);
+    const serverIcon = document.createElementNS(
+      "http://www.w3.org/2000/svg",
+      "svg",
+    );
+    serverIcon.classList.add("wsk-icon");
+    serverIcon.setAttribute("aria-hidden", "true");
+    const serverUse = document.createElementNS(
+      "http://www.w3.org/2000/svg",
+      "use",
+    );
+    serverUse.setAttribute("href", "#sessions");
+    serverIcon.append(serverUse);
+    manageServers.append(serverIcon, "管理区服");
+    manageServers.addEventListener("click", () => {
+      openServerDialog(game, manageServers);
+    });
+
+    const edit = document.createElement("button");
+    edit.className = "wsk-button wsk-secondary";
+    edit.type = "button";
+    edit.dataset.gameEdit = game.gameId;
+    edit.setAttribute("aria-label", `编辑游戏 ${game.name}`);
+    const editIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    editIcon.classList.add("wsk-icon");
+    editIcon.setAttribute("aria-hidden", "true");
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttribute("href", "#edit");
+    editIcon.append(use);
+    edit.append(editIcon, "编辑");
+    edit.addEventListener("click", () => openGameForm("edit", game, edit));
+    actions.append(manageServers, edit);
+
+    card.append(head, description, facts, actions);
+    return card;
+  }
+
+  function renderManagedGames() {
+    hideManagedGamePanels();
+    const games = [...state.managedGames].sort((left, right) => (
+      left.sortOrder - right.sortOrder
+      || left.gameId.localeCompare(right.gameId, "en")
+    ));
+    if (games.length === 0) {
+      elements.gamesEmpty.hidden = false;
+      elements.gamesLiveStatus.textContent = "当前没有游戏项目。";
+      return;
+    }
+    elements.gamesList.replaceChildren(...games.map(createGameCard));
+    elements.gamesList.hidden = false;
+    elements.gamesLiveStatus.textContent = `已加载 ${games.length} 个游戏项目。`;
+  }
+
+  async function loadManagedGames({ force = false, focusError = false } = {}) {
+    if (!state.session?.canManageGames) {
+      return;
+    }
+    if (state.managedGamesLoaded && !force) {
+      renderManagedGames();
+      return;
+    }
+    const version = gameRequests.begin();
+    const authGeneration = state.authGeneration;
+    hideManagedGamePanels();
+    elements.gamesLoading.hidden = false;
+    elements.gamesErrorMessage.textContent = "";
+    try {
+      const games = await api.listGames();
+      if (
+        !gameRequests.isCurrent(version)
+        || authGeneration !== state.authGeneration
+        || !state.session?.canManageGames
+      ) {
+        return;
+      }
+      state.managedGames = games;
+      state.managedGamesLoaded = true;
+      touchSessionActivity();
+      renderManagedGames();
+    } catch (error) {
+      if (
+        !gameRequests.isCurrent(version)
+        || authGeneration !== state.authGeneration
+      ) {
+        return;
+      }
+      hideManagedGamePanels();
+      if (error instanceof AdminApiError && error.status === 401) {
+        becomeAnonymous("管理员会话已过期，请重新登录。");
+        return;
+      }
+      if (error instanceof AdminApiError && error.status === 403) {
+        await refreshPermissions();
+        return;
+      }
+      elements.gamesErrorMessage.textContent = describeApiError(error, "games");
+      elements.gamesError.hidden = false;
+      elements.gamesLiveStatus.textContent = "游戏项目加载失败。";
+      if (focusError) {
+        elements.gamesError.focus();
+      }
+    }
+  }
+
+  function hideManagedServerPanels() {
+    elements.serversLoading.hidden = true;
+    elements.serversError.hidden = true;
+    elements.serversEmpty.hidden = true;
+    elements.serversList.hidden = true;
+  }
+
+  function createServerCard(server) {
+    const card = document.createElement("article");
+    card.className = "gmk-server-card";
+    card.setAttribute("role", "listitem");
+
+    const head = document.createElement("div");
+    head.className = "gmk-server-card-head";
+    const identity = document.createElement("div");
+    const title = document.createElement("h4");
+    title.textContent = server.name;
+    const serverId = document.createElement("code");
+    serverId.className = "gmk-game-id";
+    serverId.textContent = `区服 ID ${server.serverId}`;
+    identity.append(title, serverId);
+
+    const badges = document.createElement("div");
+    badges.className = "gmk-server-card-badges";
+    const openBadge = document.createElement("span");
+    setBadge(
+      openBadge,
+      server.isOpen ? "已开放" : "未开放",
+      server.isOpen ? "success" : "warning",
+    );
+    const statusBadge = document.createElement("span");
+    const status = serverStatusPresentation(server.status);
+    setBadge(statusBadge, status.text, status.variant);
+    const tagBadge = document.createElement("span");
+    const tag = serverTagPresentation(server.tag);
+    setBadge(tagBadge, tag.text, tag.variant);
+    badges.append(openBadge, statusBadge, tagBadge);
+    head.append(identity, badges);
+
+    const facts = document.createElement("dl");
+    facts.className = "gmk-server-facts";
+    appendFact(facts, "开放时间", formatUnixTime(server.openTime));
+    appendFact(facts, "展示顺序", String(server.sortOrder));
+    appendFact(facts, "最近更新", formatDateTime(server.updatedAt));
+    appendFact(facts, "修订版本", `第 ${server.revision} 版`);
+
+    const endpoints = document.createElement("div");
+    endpoints.className = "gmk-server-endpoints";
+    for (const [label, value] of [
+      ["HTTP", server.gameHttpUrl],
+      ["WebSocket", server.gameWsUrl],
+    ]) {
+      const row = document.createElement("div");
+      row.className = "gmk-server-endpoint";
+      const term = document.createElement("span");
+      term.textContent = label;
+      const endpoint = document.createElement("code");
+      endpoint.textContent = value;
+      row.append(term, endpoint);
+      endpoints.append(row);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "gmk-server-card-actions";
+    const edit = document.createElement("button");
+    edit.className = "wsk-button wsk-secondary";
+    edit.type = "button";
+    edit.dataset.serverEdit = String(server.serverId);
+    edit.setAttribute("aria-label", `编辑区服 ${server.name}`);
+    const editIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    editIcon.classList.add("wsk-icon");
+    editIcon.setAttribute("aria-hidden", "true");
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttribute("href", "#edit");
+    editIcon.append(use);
+    edit.append(editIcon, "编辑区服");
+    edit.addEventListener("click", () => openServerForm("edit", server, edit));
+    actions.append(edit);
+
+    card.append(head, facts, endpoints, actions);
+    return card;
+  }
+
+  function renderManagedServers() {
+    hideManagedServerPanels();
+    const servers = [...state.managedServers].sort((left, right) => (
+      left.sortOrder - right.sortOrder
+      || left.serverId - right.serverId
+    ));
+    const openCount = servers.filter((server) => server.isOpen).length;
+    elements.serverSummary.textContent =
+      `${servers.length} 个区服，${openCount} 个开放`;
+    elements.serverCreateButton.disabled = false;
+    if (servers.length === 0) {
+      elements.serversEmpty.hidden = false;
+      elements.serversLiveStatus.textContent = "当前游戏还没有区服。";
+      return;
+    }
+    elements.serversList.replaceChildren(...servers.map(createServerCard));
+    elements.serversList.hidden = false;
+    elements.serversLiveStatus.textContent =
+      `已加载 ${servers.length} 个区服，其中 ${openCount} 个开放。`;
+  }
+
+  async function loadManagedServers({ focusError = false } = {}) {
+    const game = state.serverGame;
+    if (
+      !elements.serverDialog.open
+      || !state.session?.canManageGames
+      || !game
+    ) {
+      return;
+    }
+    const requestVersion = serverRequests.begin();
+    const dialogGeneration = state.serverDialogGeneration;
+    const authGeneration = state.authGeneration;
+    const gameId = game.gameId;
+    state.managedServersLoaded = false;
+    elements.serverCreateButton.disabled = true;
+    hideManagedServerPanels();
+    elements.serversLoading.hidden = false;
+    elements.serverSummary.textContent = "正在读取区服…";
+    elements.serversErrorMessage.textContent = "";
+    try {
+      const servers = await api.listGameServers(gameId);
+      if (
+        !serverRequests.isCurrent(requestVersion)
+        || dialogGeneration !== state.serverDialogGeneration
+        || authGeneration !== state.authGeneration
+        || !elements.serverDialog.open
+        || state.serverGame?.gameId !== gameId
+      ) {
+        return;
+      }
+      state.managedServers = servers;
+      state.managedServersLoaded = true;
+      touchSessionActivity();
+      renderManagedServers();
+    } catch (error) {
+      if (
+        !serverRequests.isCurrent(requestVersion)
+        || dialogGeneration !== state.serverDialogGeneration
+        || authGeneration !== state.authGeneration
+        || !elements.serverDialog.open
+      ) {
+        return;
+      }
+      hideManagedServerPanels();
+      elements.serverCreateButton.disabled = true;
+      if (error instanceof AdminApiError && error.status === 401) {
+        closeServerDialog();
+        becomeAnonymous("管理员会话已过期，请重新登录。");
+        return;
+      }
+      if (error instanceof AdminApiError && error.status === 403) {
+        const message = describeApiError(error, "servers");
+        closeServerDialog();
+        await refreshPermissions();
+        toast(message, "danger");
+        return;
+      }
+      elements.serversErrorMessage.textContent =
+        describeApiError(error, "server-list");
+      elements.serversError.hidden = false;
+      elements.serverSummary.textContent = "区服读取失败";
+      elements.serversLiveStatus.textContent = "区服加载失败。";
+      if (focusError) {
+        elements.serversError.focus();
+      }
+    }
+  }
+
+  function openServerDialog(game, opener) {
+    if (!state.session?.canManageGames || !game || elements.serverDialog.open) {
+      return;
+    }
+    serverRequests.invalidate();
+    state.serverDialogGeneration += 1;
+    state.serverGame = game;
+    state.managedServers = [];
+    state.managedServersLoaded = false;
+    state.serverFormMode = null;
+    state.editingServer = null;
+    state.serverSubmitting = false;
+    state.serverDialogOpener = opener ?? document.activeElement;
+    state.serverFormOpener = null;
+    elements.serverGameLabel.textContent = `${game.name}（${game.gameId}）`;
+    elements.serverDialogDescription.textContent =
+      `查看和维护 ${game.gameId} 向客户端提供的区服。`;
+    elements.serverSummary.textContent = "正在读取区服…";
+    elements.serverCreateButton.disabled = true;
+    elements.serverDialogClose.disabled = false;
+    elements.serverEditorClose.disabled = false;
+    elements.serverCancel.disabled = false;
+    elements.serversList.replaceChildren();
+    elements.serverEditor.hidden = true;
+    elements.serverForm.reset();
+    elements.serverFormError.hidden = true;
+    elements.serverFormErrorMessage.textContent = "";
+    hideManagedServerPanels();
+    elements.serversLoading.hidden = false;
+    elements.serverDialog.showModal();
+    window.queueMicrotask(() => elements.serverDialogClose.focus());
+    void loadManagedServers();
+  }
+
+  function resetServerFormValidation() {
+    for (const input of [
+      elements.serverId,
+      elements.serverName,
+      elements.serverTag,
+      elements.serverStatus,
+      elements.serverOpenTime,
+      elements.serverHttpUrl,
+      elements.serverWsUrl,
+      elements.serverSortOrder,
+    ]) {
+      input.setCustomValidity("");
+    }
+  }
+
+  function updateServerFormPolicy() {
+    if (!elements.serverIsOpen.checked) {
+      elements.serverIsOpenHelp.textContent =
+        "未开放不下发且不可登录。";
+    } else if (elements.serverStatus.value === "maintenance") {
+      elements.serverIsOpenHelp.textContent =
+        "维护中的开放区服会下发给客户端，但玩家不可登录。";
+    } else {
+      elements.serverIsOpenHelp.textContent =
+        "开放区服会下发给客户端，并按负载状态决定是否可登录。";
+    }
+    elements.serverStatusHelp.textContent =
+      elements.serverStatus.value === "maintenance"
+        ? "维护中的区服可下发，但玩家不可登录。"
+        : "流畅和繁忙状态不额外阻止已开放区服登录。";
+  }
+
+  function setServerFormBusy(busy) {
+    state.serverSubmitting = busy;
+    for (const input of [
+      elements.serverId,
+      elements.serverName,
+      elements.serverTag,
+      elements.serverStatus,
+      elements.serverOpenTime,
+      elements.serverHttpUrl,
+      elements.serverWsUrl,
+      elements.serverIsOpen,
+      elements.serverSortOrder,
+    ]) {
+      input.disabled = busy;
+    }
+    elements.serverDialogClose.disabled = busy;
+    elements.serverEditorClose.disabled = busy;
+    elements.serverCancel.disabled = busy;
+    elements.serverCreateButton.disabled =
+      busy || !state.managedServersLoaded;
+    elements.serversEmptyCreate.disabled = busy;
+    for (const button of elements.serversList.querySelectorAll(
+      "[data-server-edit]",
+    )) {
+      button.disabled = busy;
+    }
+    setButtonBusy(elements.serverSubmit, busy, {
+      idleLabel:
+        state.serverFormMode === "create" ? "新增区服" : "保存修改",
+      busyLabel: "正在保存…",
+    });
+    elements.serverSubmit.disabled = busy || !state.managedServersLoaded;
+    if (!busy) {
+      elements.serverId.disabled = false;
+      elements.serverId.readOnly = state.serverFormMode === "edit";
+      elements.serverId.setAttribute(
+        "aria-readonly",
+        String(state.serverFormMode === "edit"),
+      );
+    }
+  }
+
+  function openServerForm(mode, server = null, opener = null) {
+    if (
+      !elements.serverDialog.open
+      || !state.session?.canManageGames
+      || !state.serverGame
+      || !state.managedServersLoaded
+      || (mode !== "create" && mode !== "edit")
+      || (mode === "edit" && !server)
+      || state.serverSubmitting
+    ) {
+      return;
+    }
+    state.serverFormMode = mode;
+    state.editingServer = server;
+    state.serverFormOpener = opener ?? document.activeElement;
+    elements.serverForm.reset();
+    elements.serverFormError.hidden = true;
+    elements.serverFormErrorMessage.textContent = "";
+    resetServerFormValidation();
+
+    if (mode === "create") {
+      elements.serverEditorKind.textContent = "CREATE SERVER";
+      elements.serverEditorTitle.textContent = "新增区服";
+      elements.serverId.value = "";
+      elements.serverName.value = "";
+      elements.serverTag.value = "normal";
+      elements.serverStatus.value = "smooth";
+      elements.serverOpenTime.value =
+        unixSecondsToDateTimeLocal(Math.max(0, Math.floor(now() / 1_000)));
+      elements.serverHttpUrl.value = "";
+      elements.serverWsUrl.value = "";
+      elements.serverIsOpen.checked = false;
+      elements.serverSortOrder.value = "0";
+    } else {
+      elements.serverEditorKind.textContent = "EDIT SERVER";
+      elements.serverEditorTitle.textContent = `编辑区服 ${server.serverId}`;
+      elements.serverId.value = String(server.serverId);
+      elements.serverName.value = server.name;
+      elements.serverTag.value = server.tag;
+      elements.serverStatus.value = server.status;
+      const localOpenTime = unixSecondsToDateTimeLocal(server.openTime);
+      elements.serverOpenTime.value = localOpenTime;
+      if (localOpenTime.length === 0) {
+        elements.serverFormErrorMessage.textContent =
+          `现有开放时间 ${server.openTime}（Unix 秒）超出浏览器可编辑范围，`
+          + "请填写新的有效时间后保存。";
+        elements.serverFormError.hidden = false;
+      }
+      elements.serverHttpUrl.value = server.gameHttpUrl;
+      elements.serverWsUrl.value = server.gameWsUrl;
+      elements.serverIsOpen.checked = server.isOpen;
+      elements.serverSortOrder.value = String(server.sortOrder);
+    }
+    updateServerFormPolicy();
+    setServerFormBusy(false);
+    elements.serverEditor.hidden = false;
+    elements.serverEditor.scrollIntoView?.({ block: "nearest" });
+    window.queueMicrotask(() => (
+      mode === "create" ? elements.serverId : elements.serverName
+    ).focus());
+  }
+
+  function hideServerEditor({ restoreFocus = true } = {}) {
+    if (state.serverSubmitting) {
+      return;
+    }
+    const needsReload = !state.managedServersLoaded;
+    const editedServerId = state.editingServer?.serverId ?? null;
+    const opener = state.serverFormOpener;
+    state.serverFormMode = null;
+    state.editingServer = null;
+    state.serverFormOpener = null;
+    elements.serverEditor.hidden = true;
+    elements.serverForm.reset();
+    elements.serverFormError.hidden = true;
+    elements.serverFormErrorMessage.textContent = "";
+    resetServerFormValidation();
+    if (!restoreFocus || !elements.serverDialog.open) {
+      return;
+    }
+    if (needsReload) {
+      void loadManagedServers({ focusError: true }).then(() => {
+        if (!state.managedServersLoaded || !elements.serverDialog.open) {
+          return;
+        }
+        const replacement = editedServerId === null
+          ? null
+          : [...elements.serversList.querySelectorAll(
+              "[data-server-edit]",
+            )].find(
+              (button) => (
+                button.dataset.serverEdit === String(editedServerId)
+              ),
+            );
+        window.queueMicrotask(() => (replacement ?? opener)?.focus());
+      });
+      return;
+    }
+    const replacement = editedServerId === null
+      ? null
+      : [...elements.serversList.querySelectorAll("[data-server-edit]")].find(
+          (button) => button.dataset.serverEdit === String(editedServerId),
+        );
+    window.queueMicrotask(() => (replacement ?? opener)?.focus());
+  }
+
+  function upsertManagedServer(server) {
+    const index = state.managedServers.findIndex(
+      (candidate) => candidate.serverId === server.serverId,
+    );
+    state.managedServers = index === -1
+      ? [...state.managedServers, server]
+      : state.managedServers.map((candidate, candidateIndex) => (
+          candidateIndex === index ? server : candidate
+        ));
+    state.managedServersLoaded = true;
+    renderManagedServers();
+  }
+
+  function validateServerEndpoint(input, label, protocols) {
+    const value = input.value.trim();
+    input.value = value;
+    try {
+      requiredEndpoint(value, label, protocols);
+      input.setCustomValidity("");
+      return value;
+    } catch {
+      input.setCustomValidity(
+        label === "HTTP URL"
+          ? "请输入不含账号、密码或片段的 http:// 或 https:// 地址。"
+          : "请输入不含账号、密码或片段的 ws:// 或 wss:// 地址。",
+      );
+      return value;
+    }
+  }
+
+  async function submitServerForm(event) {
+    event.preventDefault();
+    const game = state.serverGame;
+    if (
+      state.serverSubmitting
+      || !state.session?.canManageGames
+      || !game
+      || !state.serverFormMode
+    ) {
+      return;
+    }
+
+    const creating = state.serverFormMode === "create";
+    const editingServer = state.editingServer;
+    const serverId = elements.serverId.valueAsNumber;
+    const name = elements.serverName.value.trim();
+    const tag = elements.serverTag.value;
+    const status = elements.serverStatus.value;
+    const openTime = dateTimeLocalToUnixSeconds(
+      elements.serverOpenTime.value,
+    );
+    const sortOrder = elements.serverSortOrder.valueAsNumber;
+    const gameHttpUrl = validateServerEndpoint(
+      elements.serverHttpUrl,
+      "HTTP URL",
+      new Set(["http:", "https:"]),
+    );
+    const gameWsUrl = validateServerEndpoint(
+      elements.serverWsUrl,
+      "WebSocket URL",
+      new Set(["ws:", "wss:"]),
+    );
+    elements.serverName.value = name;
+    elements.serverId.setCustomValidity(
+      Number.isSafeInteger(serverId)
+      && serverId >= 0
+      && serverId <= 65_535
+        ? ""
+        : "区服 ID 必须是 0–65535 的整数。",
+    );
+    elements.serverName.setCustomValidity(
+      [...name].length >= 1 && [...name].length <= 64
+        ? ""
+        : "区服名称必须为 1–64 个字符。",
+    );
+    elements.serverTag.setCustomValidity(
+      SERVER_TAGS.has(tag) ? "" : "区服标签无效。",
+    );
+    elements.serverStatus.setCustomValidity(
+      SERVER_STATUSES.has(status) ? "" : "负载状态无效。",
+    );
+    elements.serverOpenTime.setCustomValidity(
+      openTime === null ? "请输入有效且不早于 1970 年的开放时间。" : "",
+    );
+    elements.serverSortOrder.setCustomValidity(
+      Number.isSafeInteger(sortOrder)
+      && sortOrder >= 0
+      && sortOrder <= 65_535
+        ? ""
+        : "展示顺序必须是 0–65535 的整数。",
+    );
+    if (!elements.serverForm.reportValidity() || openTime === null) {
+      return;
+    }
+
+    const input = {
+      ...(creating ? { serverId } : {}),
+      name,
+      tag,
+      status,
+      openTime,
+      gameHttpUrl,
+      gameWsUrl,
+      isOpen: elements.serverIsOpen.checked,
+      sortOrder,
+      ...(creating ? {} : { revision: editingServer?.revision }),
+    };
+    elements.serverFormError.hidden = true;
+    elements.serverFormErrorMessage.textContent = "";
+    setServerFormBusy(true);
+    const dialogGeneration = state.serverDialogGeneration;
+    const authGeneration = state.authGeneration;
+    try {
+      const server = creating
+        ? await api.createGameServer(game.gameId, input)
+        : await api.updateGameServer(game.gameId, serverId, input);
+      if (
+        dialogGeneration !== state.serverDialogGeneration
+        || authGeneration !== state.authGeneration
+        || !elements.serverDialog.open
+        || state.serverGame?.gameId !== game.gameId
+      ) {
+        return;
+      }
+      touchSessionActivity();
+      upsertManagedServer(server);
+      setServerFormBusy(false);
+      hideServerEditor();
+      toast(
+        creating
+          ? `区服 ${server.serverId} 已新增。`
+          : `区服 ${server.serverId} 已更新。`,
+      );
+    } catch (error) {
+      if (
+        dialogGeneration !== state.serverDialogGeneration
+        || authGeneration !== state.authGeneration
+        || !elements.serverDialog.open
+      ) {
+        return;
+      }
+      if (error instanceof AdminApiError && error.status === 401) {
+        closeServerDialog();
+        becomeAnonymous("管理员会话已过期，请重新登录。");
+        return;
+      }
+      if (error instanceof AdminApiError && error.status === 403) {
+        const message = describeApiError(error, "server-update");
+        closeServerDialog();
+        await refreshPermissions();
+        toast(message, "danger");
+        return;
+      }
+      if (
+        !creating
+        && error instanceof AdminApiError
+        && error.status === 409
+      ) {
+        state.managedServersLoaded = false;
+      }
+      elements.serverFormErrorMessage.textContent = describeApiError(
+        error,
+        creating ? "server-create" : "server-update",
+      );
+      elements.serverFormError.hidden = false;
+      elements.serverFormError.focus();
+    } finally {
+      if (
+        elements.serverDialog.open
+        && !elements.serverEditor.hidden
+        && dialogGeneration === state.serverDialogGeneration
+      ) {
+        setServerFormBusy(false);
+      } else {
+        state.serverSubmitting = false;
+      }
+    }
+  }
+
+  function routeAuthenticated({ focus = true } = {}) {
+    const view = chooseAdminView(state.session, window.location.hash);
+    showView(view, { focus });
+    if (view === "games") {
+      void loadManagedGames();
+    }
+  }
+
+  function shouldConfirmDisable() {
+    return (
+      state.gameFormMode === "edit"
+      && state.editingGame?.status !== "disabled"
+      && elements.gameStatus.value === "disabled"
+    );
+  }
+
+  function updateGameFormRules() {
+    const game = state.editingGame;
+    const creating = state.gameFormMode === "create";
+    const status = elements.gameStatus.value;
+    const enabledOption = elements.gameStatus.querySelector(
+      'option[value="enabled"]',
+    );
+    if (enabledOption) {
+      enabledOption.disabled = creating || game?.configurationState === "draft";
+    }
+
+    elements.gameId.readOnly = !creating;
+    elements.gameId.setAttribute("aria-readonly", String(!creating));
+    elements.gameStatus.disabled =
+      state.gameSubmitting || creating || game?.status === "disabled";
+    elements.gameSortOrder.disabled = state.gameSubmitting || creating;
+
+    const publishAllowed =
+      !creating && canPublishGameToClient(game, status);
+    if (!publishAllowed) {
+      elements.gameClientVisible.checked = false;
+    }
+    elements.gameClientVisible.disabled =
+      state.gameSubmitting || !publishAllowed;
+
+    if (creating) {
+      elements.gameStatusHelp.textContent =
+        "新游戏固定以“维护中”草稿创建，完成部署配置后才能启用。";
+      elements.gameClientVisibleHelp.textContent =
+        "新游戏默认不下发；完成部署配置后可在编辑中开启。";
+    } else if (game?.status === "disabled") {
+      elements.gameStatusHelp.textContent =
+        "这个游戏已永久停用，不能恢复为其他状态。";
+      elements.gameClientVisibleHelp.textContent =
+        "已停用游戏不能下发给客户端。";
+    } else if (game?.configurationState === "draft") {
+      elements.gameStatusHelp.textContent =
+        "草稿不能启用；可继续维护，或永久停用。";
+      elements.gameClientVisibleHelp.textContent =
+        "草稿需要先完成部署配置，暂时不能下发给客户端。";
+    } else if (status === "disabled") {
+      elements.gameStatusHelp.textContent =
+        "停用提交成功后不能恢复。";
+      elements.gameClientVisibleHelp.textContent =
+        "即将停用的游戏不能继续下发给客户端。";
+    } else {
+      elements.gameStatusHelp.textContent =
+        "已配置游戏可以在启用和维护状态之间切换。";
+      elements.gameClientVisibleHelp.textContent =
+        "开启后，游戏会按展示顺序出现在客户端游戏列表。";
+    }
+
+    const confirmDisable = shouldConfirmDisable();
+    elements.gameDisableWarning.hidden = !confirmDisable;
+    elements.gameDisableConfirm.required = confirmDisable;
+    elements.gameDisableConfirm.disabled =
+      state.gameSubmitting || !confirmDisable;
+    if (!confirmDisable) {
+      elements.gameDisableConfirm.checked = false;
+    }
+  }
+
+  function setGameFormBusy(busy) {
+    state.gameSubmitting = busy;
+    elements.gameName.disabled = busy;
+    elements.gameDescription.disabled = busy;
+    elements.gameDialogClose.disabled = busy;
+    elements.gameCancel.disabled = busy;
+    elements.gameId.disabled = busy;
+    elements.gameClientVisible.disabled = busy;
+    elements.gameSortOrder.disabled = busy;
+    elements.gameDisableConfirm.disabled = busy;
+    setButtonBusy(elements.gameSubmit, busy, {
+      idleLabel: state.gameFormMode === "create" ? "新增游戏" : "保存修改",
+      busyLabel: "正在保存…",
+    });
+    if (!busy) {
+      elements.gameId.disabled = false;
+    }
+    updateGameFormRules();
+  }
+
+  function openGameForm(mode, game = null, opener = null) {
+    if (
+      !state.session?.canManageGames
+      || (mode !== "create" && mode !== "edit")
+      || (mode === "edit" && !game)
+    ) {
+      return;
+    }
+    state.gameFormMode = mode;
+    state.editingGame = game;
+    state.gameOpener = opener ?? document.activeElement;
+    elements.gameForm.reset();
+    elements.gameFormError.hidden = true;
+    elements.gameFormErrorMessage.textContent = "";
+    elements.gameId.setCustomValidity("");
+    elements.gameName.setCustomValidity("");
+    elements.gameDescription.setCustomValidity("");
+    elements.gameStatus.setCustomValidity("");
+    elements.gameDisableConfirm.setCustomValidity("");
+
+    if (mode === "create") {
+      elements.gameDialogKind.textContent = "CREATE GAME";
+      elements.gameDialogTitle.textContent = "新增游戏";
+      elements.gameDialogDescription.textContent =
+        "新游戏将以维护中的草稿状态创建，默认不下发给客户端。";
+      elements.gameId.value = "";
+      elements.gameName.value = "";
+      elements.gameDescription.value = "";
+      elements.gameStatus.value = "maintenance";
+      elements.gameClientVisible.checked = false;
+      elements.gameSortOrder.value = "0";
+    } else {
+      elements.gameDialogKind.textContent = "EDIT GAME";
+      elements.gameDialogTitle.textContent = "编辑游戏";
+      elements.gameDialogDescription.textContent =
+        game.configurationState === "configured"
+          ? `正在编辑 ${game.gameId}；保存时会校验第 ${game.revision} 版。`
+          : `正在编辑草稿 ${game.gameId}；完成部署配置前不能启用或下发。`;
+      elements.gameId.value = game.gameId;
+      elements.gameName.value = game.name;
+      elements.gameDescription.value = game.description;
+      elements.gameStatus.value = game.status;
+      elements.gameClientVisible.checked = game.clientVisible;
+      elements.gameSortOrder.value = String(game.sortOrder);
+    }
+    setGameFormBusy(false);
+    elements.gameDialog.showModal();
+    window.queueMicrotask(() => (
+      mode === "create" ? elements.gameId : elements.gameName
+    ).focus());
+  }
+
+  function dismissGameForm() {
+    if (!state.gameSubmitting) {
+      closeGameDialog();
+    }
+  }
+
+  function upsertManagedGame(game) {
+    const index = state.managedGames.findIndex(
+      (candidate) => candidate.gameId === game.gameId,
+    );
+    state.managedGames = index === -1
+      ? [...state.managedGames, game]
+      : state.managedGames.map((candidate, candidateIndex) => (
+          candidateIndex === index ? game : candidate
+        ));
+    state.managedGamesLoaded = true;
+    renderManagedGames();
+
+    if (!state.session) {
+      return;
+    }
+    let changed = false;
+    const sessionGames = state.session.games.map((access) => {
+      if (access.gameId !== game.gameId) {
+        return access;
+      }
+      changed = true;
+      return Object.freeze({
+        ...access,
+        name: game.name,
+        status: game.status,
+        canOperateAccounts:
+          game.status === "enabled" && access.canOperateAccounts,
+      });
+    });
+    if (changed) {
+      state.session = Object.freeze({
+        ...state.session,
+        games: Object.freeze(sessionGames),
+      });
+      populateGames();
+      if (state.selectedGameId === game.gameId) {
+        clearAccount({
+          announcement: `游戏 ${game.gameId} 的项目配置已更新。`,
+        });
+        renderGame();
+      }
+    }
+  }
+
+  async function submitGameForm(event) {
+    event.preventDefault();
+    if (
+      state.gameSubmitting
+      || !state.session?.canManageGames
+      || !state.gameFormMode
+    ) {
+      return;
+    }
+    const creating = state.gameFormMode === "create";
+    const editingGame = state.editingGame;
+    const gameId = elements.gameId.value.trim();
+    const name = elements.gameName.value.trim();
+    const description = elements.gameDescription.value.trim();
+    const status = elements.gameStatus.value;
+    const sortOrder = elements.gameSortOrder.valueAsNumber;
+    elements.gameId.value = gameId;
+    elements.gameName.value = name;
+    elements.gameDescription.value = description;
+    elements.gameId.setCustomValidity(
+      GAME_ID_PATTERN.test(gameId) ? "" : "请输入合法的游戏 ID。",
+    );
+    elements.gameName.setCustomValidity(
+      [...name].length >= 1 && [...name].length <= 128
+        ? ""
+        : "游戏名称必须为 1–128 个 Unicode 字符。",
+    );
+    elements.gameDescription.setCustomValidity(
+      [...description].length <= 500
+        ? ""
+        : "游戏说明最多 500 个 Unicode 字符。",
+    );
+    elements.gameStatus.setCustomValidity(
+      creating || canSelectGameStatus(editingGame, status)
+        ? ""
+        : "当前游戏不能切换到这个状态。",
+    );
+    if (
+      !creating
+      && (
+        !Number.isSafeInteger(sortOrder)
+        || sortOrder < 0
+        || sortOrder > 65_535
+      )
+    ) {
+      elements.gameSortOrder.setCustomValidity(
+        "展示顺序必须是 0–65535 的整数。",
+      );
+    } else {
+      elements.gameSortOrder.setCustomValidity("");
+    }
+    if (shouldConfirmDisable() && !elements.gameDisableConfirm.checked) {
+      elements.gameDisableConfirm.setCustomValidity(
+        "请确认永久停用这个游戏。",
+      );
+    } else {
+      elements.gameDisableConfirm.setCustomValidity("");
+    }
+    if (!elements.gameForm.reportValidity()) {
+      return;
+    }
+
+    elements.gameFormError.hidden = true;
+    setGameFormBusy(true);
+    const authGeneration = state.authGeneration;
+    try {
+      const game = creating
+        ? await api.createGame({ gameId, name, description })
+        : await api.updateGame(gameId, {
+            name,
+            description,
+            status,
+            clientVisible: elements.gameClientVisible.checked,
+            sortOrder,
+            revision: editingGame.revision,
+          });
+      if (
+        authGeneration !== state.authGeneration
+        || !state.session?.canManageGames
+      ) {
+        return;
+      }
+      touchSessionActivity();
+      upsertManagedGame(game);
+      if (!await synchronizeSessionAfterGameMutation(authGeneration)) {
+        return;
+      }
+      closeGameDialog();
+      toast(
+        creating
+          ? `游戏 ${game.gameId} 已创建为草稿。`
+          : `游戏 ${game.gameId} 已更新。`,
+      );
+    } catch (error) {
+      if (
+        authGeneration !== state.authGeneration
+        || !state.session
+      ) {
+        return;
+      }
+      if (error instanceof AdminApiError && error.status === 401) {
+        closeGameDialog();
+        becomeAnonymous("管理员会话已过期，请重新登录。");
+        return;
+      }
+      if (error instanceof AdminApiError && error.status === 403) {
+        closeGameDialog();
+        await refreshPermissions();
+        toast(describeApiError(error, "game-update"), "danger");
+        return;
+      }
+      if (
+        !creating
+        && error instanceof AdminApiError
+        && (error.status === 404 || error.status === 409)
+      ) {
+        state.managedGamesLoaded = false;
+      }
+      elements.gameFormErrorMessage.textContent = describeApiError(
+        error,
+        creating ? "game-create" : "game-update",
+      );
+      elements.gameFormError.hidden = false;
+      elements.gameFormError.focus();
+    } finally {
+      if (elements.gameDialog.open) {
+        setGameFormBusy(false);
+      } else {
+        state.gameSubmitting = false;
+      }
+    }
+  }
+
   function renderAccount(account) {
     const game = currentGame();
     if (!game) {
@@ -887,7 +2565,7 @@ export function bootstrapAdminConsole({
     elements.accountLiveStatus.textContent = `已加载账号 ${account.userId}。`;
   }
 
-  function applySession(session) {
+  function applySession(session, { focus = true } = {}) {
     if (isSessionExpired(session, now())) {
       becomeAnonymous("管理员会话已过期，请重新登录。");
       return false;
@@ -899,18 +2577,28 @@ export function bootstrapAdminConsole({
     state.selectedGameId = chooseInitialGame(session.games, previousGameId);
     elements.operatorName.textContent = session.operator.displayName;
     elements.sessionTools.hidden = false;
+    elements.accountsGamesLink.hidden = !session.canManageGames;
+    elements.gamesAccountsLink.hidden = session.games.length === 0;
+    if (!session.canManageGames) {
+      gameRequests.invalidate();
+      serverRequests.invalidate();
+      state.managedGames = [];
+      state.managedGamesLoaded = false;
+      elements.gamesList.replaceChildren();
+      closeGameDialog();
+      closeServerDialog();
+    }
     hideLoginError();
     populateGames();
     clearAccount();
     renderGame();
     scheduleExpiry(session.expiresAt);
 
-    if (session.games.length === 0) {
-      showView("no-access");
-      return true;
-    }
-    showView("accounts");
-    if (!state.selectedGameId) {
+    routeAuthenticated({ focus });
+    if (
+      !state.selectedGameId
+      && !elements.views.get("accounts")?.hidden
+    ) {
       elements.gameSelect.focus();
     }
     return true;
@@ -967,6 +2655,37 @@ export function bootstrapAdminConsole({
         return;
       }
       toast(describeApiError(error, "session"), "danger");
+    }
+  }
+
+  async function synchronizeSessionAfterGameMutation(authGeneration) {
+    const version = sessionRequests.begin();
+    try {
+      const session = await api.session();
+      if (
+        !sessionRequests.isCurrent(version)
+        || authGeneration !== state.authGeneration
+      ) {
+        return false;
+      }
+      applySession(session, { focus: false });
+      return true;
+    } catch (error) {
+      if (
+        !sessionRequests.isCurrent(version)
+        || authGeneration !== state.authGeneration
+      ) {
+        return false;
+      }
+      if (error instanceof AdminApiError && error.status === 401) {
+        becomeAnonymous("管理员会话已过期，请重新登录。");
+        return false;
+      }
+      toast(
+        "游戏已保存，但账号管理权限状态刷新失败；请刷新页面后再操作账号。",
+        "warning",
+      );
+      return true;
     }
   }
 
@@ -1349,16 +3068,184 @@ export function bootstrapAdminConsole({
     opener?.focus();
   });
 
+  for (const button of [elements.gameCreateButton, elements.gamesEmptyCreate]) {
+    button.addEventListener("click", () => {
+      openGameForm("create", null, button);
+    });
+  }
+  elements.gamesRetry.addEventListener("click", () => {
+    void loadManagedGames({ force: true, focusError: true });
+  });
+  elements.gameForm.addEventListener("submit", submitGameForm);
+  elements.gameCancel.addEventListener("click", dismissGameForm);
+  elements.gameDialogClose.addEventListener("click", dismissGameForm);
+  elements.gameStatus.addEventListener("change", () => {
+    elements.gameStatus.setCustomValidity("");
+    elements.gameDisableConfirm.setCustomValidity("");
+    updateGameFormRules();
+  });
+  elements.gameId.addEventListener("input", () => {
+    elements.gameId.setCustomValidity("");
+  });
+  elements.gameName.addEventListener("input", () => {
+    elements.gameName.setCustomValidity("");
+  });
+  elements.gameDescription.addEventListener("input", () => {
+    elements.gameDescription.setCustomValidity("");
+  });
+  elements.gameSortOrder.addEventListener("input", () => {
+    elements.gameSortOrder.setCustomValidity("");
+  });
+  elements.gameDisableConfirm.addEventListener("change", () => {
+    elements.gameDisableConfirm.setCustomValidity("");
+  });
+  elements.gameDialog.addEventListener("cancel", (event) => {
+    if (state.gameSubmitting) {
+      event.preventDefault();
+    }
+  });
+  elements.gameDialog.addEventListener("click", (event) => {
+    if (event.target === elements.gameDialog) {
+      dismissGameForm();
+    }
+  });
+  elements.gameDialog.addEventListener("close", () => {
+    // A fast follow-up edit may reopen the same <dialog> before the previous
+    // close event is delivered. Never let that stale event reset the new form.
+    if (elements.gameDialog.open) {
+      return;
+    }
+    const editedGameId = state.editingGame?.gameId ?? null;
+    const opener = state.gameOpener;
+    state.gameFormMode = null;
+    state.editingGame = null;
+    state.gameSubmitting = false;
+    state.gameOpener = null;
+    elements.gameForm.reset();
+    elements.gameFormError.hidden = true;
+    elements.gameFormErrorMessage.textContent = "";
+    elements.gameDisableWarning.hidden = true;
+    elements.gameDisableConfirm.required = false;
+    elements.gameId.setCustomValidity("");
+    elements.gameName.setCustomValidity("");
+    elements.gameDescription.setCustomValidity("");
+    elements.gameStatus.setCustomValidity("");
+    elements.gameSortOrder.setCustomValidity("");
+    elements.gameDisableConfirm.setCustomValidity("");
+    const replacement = editedGameId
+      ? [...elements.gamesList.querySelectorAll("[data-game-edit]")].find(
+          (button) => button.dataset.gameEdit === editedGameId,
+        )
+      : null;
+    const focusTarget = replacement ?? opener;
+    if (state.session && !elements.views.get("games")?.hidden) {
+      window.queueMicrotask(() => focusTarget?.focus());
+    }
+    if (
+      !state.managedGamesLoaded
+      && state.session?.canManageGames
+      && !elements.views.get("games")?.hidden
+    ) {
+      void loadManagedGames({ force: true });
+    }
+  });
+
+  for (const button of [
+    elements.serverCreateButton,
+    elements.serversEmptyCreate,
+  ]) {
+    button.addEventListener("click", () => {
+      openServerForm("create", null, button);
+    });
+  }
+  elements.serversRetry.addEventListener("click", () => {
+    void loadManagedServers({ focusError: true });
+  });
+  elements.serverForm.addEventListener("submit", submitServerForm);
+  elements.serverCancel.addEventListener("click", () => hideServerEditor());
+  elements.serverEditorClose.addEventListener(
+    "click",
+    () => hideServerEditor(),
+  );
+  for (const input of [
+    elements.serverId,
+    elements.serverName,
+    elements.serverTag,
+    elements.serverOpenTime,
+    elements.serverHttpUrl,
+    elements.serverWsUrl,
+    elements.serverSortOrder,
+  ]) {
+    input.addEventListener("input", () => input.setCustomValidity(""));
+  }
+  elements.serverStatus.addEventListener("change", () => {
+    elements.serverStatus.setCustomValidity("");
+    updateServerFormPolicy();
+  });
+  elements.serverIsOpen.addEventListener("change", updateServerFormPolicy);
+  elements.serverDialogClose.addEventListener("click", () => {
+    if (!state.serverSubmitting) {
+      closeServerDialog();
+    }
+  });
+  elements.serverDialog.addEventListener("cancel", (event) => {
+    if (state.serverSubmitting) {
+      event.preventDefault();
+    }
+  });
+  elements.serverDialog.addEventListener("click", (event) => {
+    if (event.target === elements.serverDialog && !state.serverSubmitting) {
+      closeServerDialog();
+    }
+  });
+  elements.serverDialog.addEventListener("close", () => {
+    // Ignore a delayed close event if the same dialog was already reopened.
+    if (elements.serverDialog.open) {
+      return;
+    }
+    serverRequests.invalidate();
+    const gameId = state.serverGame?.gameId ?? null;
+    const opener = state.serverDialogOpener;
+    state.serverDialogGeneration += 1;
+    state.serverGame = null;
+    state.managedServers = [];
+    state.managedServersLoaded = false;
+    state.serverFormMode = null;
+    state.editingServer = null;
+    state.serverSubmitting = false;
+    state.serverDialogOpener = null;
+    state.serverFormOpener = null;
+    elements.serverGameLabel.textContent = "";
+    elements.serverSummary.textContent = "";
+    elements.serverCreateButton.disabled = true;
+    elements.serverDialogClose.disabled = false;
+    elements.serverEditorClose.disabled = false;
+    elements.serverCancel.disabled = false;
+    elements.serversList.replaceChildren();
+    hideManagedServerPanels();
+    elements.serverEditor.hidden = true;
+    elements.serverForm.reset();
+    elements.serverFormError.hidden = true;
+    elements.serverFormErrorMessage.textContent = "";
+    resetServerFormValidation();
+    const replacement = gameId === null
+      ? null
+      : [...elements.gamesList.querySelectorAll("[data-game-servers]")].find(
+          (button) => button.dataset.gameServers === gameId,
+        );
+    if (state.session && !elements.views.get("games")?.hidden) {
+      window.queueMicrotask(() => (replacement ?? opener)?.focus());
+    }
+  });
+
   for (const button of elements.logoutButtons) {
     button.addEventListener("click", () => void logout());
   }
   window.addEventListener("hashchange", () => {
     if (!state.session) {
       showView("login");
-    } else if (state.session.games.length === 0) {
-      showView("no-access");
     } else {
-      showView("accounts");
+      routeAuthenticated();
     }
   });
 

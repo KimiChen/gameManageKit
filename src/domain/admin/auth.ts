@@ -35,6 +35,7 @@ interface OperatorRow extends RowDataPacket {
   password_hash: string;
   status: string;
   auth_version: number | string;
+  can_manage_games: number | boolean | string;
 }
 
 interface SessionLookupRow extends RowDataPacket {
@@ -52,6 +53,9 @@ interface SessionRow extends RowDataPacket {
 interface AccessRow extends RowDataPacket {
   game_id: string;
   can_operate_accounts: number | boolean | string;
+  name: string;
+  status: string;
+  configuration_state: string;
 }
 
 interface ExpiredSessionRow extends RowDataPacket {
@@ -70,6 +74,9 @@ export interface AdminAuthDatabase {
 
 export interface AdminGameAccess {
   readonly gameId: string;
+  readonly name: string;
+  readonly status: "enabled" | "maintenance" | "disabled";
+  readonly configurationState: "draft" | "configured";
   readonly canOperateAccounts: boolean;
 }
 
@@ -77,6 +84,7 @@ export interface AdminSessionIdentity {
   readonly operatorId: string;
   readonly displayName: string;
   readonly authVersion: number;
+  readonly canManageGames: boolean;
   readonly games: readonly AdminGameAccess[];
   /** The non-rolling, absolute session expiry exposed to the browser. */
   readonly expiresAt: string;
@@ -326,8 +334,13 @@ function identityFrom(
     operatorId: operator.operator_id,
     displayName: operator.display_name,
     authVersion: version,
+    canManageGames: Number(operator.can_manage_games) === 1,
     games: accessRows.map((row) => ({
       gameId: row.game_id,
+      name: row.name,
+      status: row.status as AdminGameAccess["status"],
+      configurationState:
+        row.configuration_state as AdminGameAccess["configurationState"],
       canOperateAccounts: Number(row.can_operate_accounts) === 1,
     })),
     expiresAt: expiresAt.toISOString(),
@@ -350,6 +363,14 @@ export function requireAdminAccountCapability(
   gameId: string,
 ): void {
   if (!requireAdminGameAccess(identity, gameId).canOperateAccounts) {
+    throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
+  }
+}
+
+export function requireAdminGameManagement(
+  identity: Pick<AdminSessionIdentity, "canManageGames">,
+): void {
+  if (!identity.canManageGames) {
     throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
   }
 }
@@ -756,6 +777,26 @@ export class AdminAuthService {
     await this.lockGameAccess(connection, identity, gameId);
   }
 
+  async requireGameManagement(
+    connection: PoolConnection,
+    identity: Pick<AdminSessionIdentity, "operatorId" | "authVersion">,
+  ): Promise<void> {
+    const operator = await this.findOperator(
+      connection,
+      identity.operatorId,
+      true,
+    );
+    if (
+      !enabled(operator)
+      || authVersion(operator.auth_version) !== identity.authVersion
+    ) {
+      throw new GameManageKitError(401, "ADMIN_AUTH_REQUIRED");
+    }
+    if (Number(operator.can_manage_games) !== 1) {
+      throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
+    }
+  }
+
   private async lockGameAccess(
     connection: PoolConnection,
     identity: Pick<AdminSessionIdentity, "operatorId" | "authVersion">,
@@ -800,7 +841,8 @@ export class AdminAuthService {
     lock: boolean,
   ): Promise<OperatorRow | undefined> {
     const [rows] = await executor.query<OperatorRow[]>(
-      `SELECT operator_id, display_name, password_hash, status, auth_version
+      `SELECT operator_id, display_name, password_hash, status, auth_version,
+              can_manage_games
          FROM admin_operators
         WHERE operator_id = ?${lock ? " FOR UPDATE" : ""}`,
       [operatorId],
@@ -813,10 +855,12 @@ export class AdminAuthService {
     operatorId: string,
   ): Promise<AccessRow[]> {
     const [rows] = await executor.query<AccessRow[]>(
-      `SELECT game_id, can_operate_accounts
-         FROM admin_game_access
-        WHERE operator_id = ?
-        ORDER BY game_id`,
+      `SELECT a.game_id, a.can_operate_accounts,
+              g.name, g.status, g.configuration_state
+         FROM admin_game_access AS a
+         JOIN games AS g ON g.game_id = a.game_id
+        WHERE a.operator_id = ?
+        ORDER BY a.game_id`,
       [operatorId],
     );
     return rows;

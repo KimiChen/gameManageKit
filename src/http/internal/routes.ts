@@ -8,6 +8,7 @@ import {
 } from "@gono/game-manage-kit-contract";
 import type { CharacterService } from "../../domain/character/service.js";
 import type { GameRegistry } from "../../domain/game/registry.js";
+import type { GameProjectService } from "../../domain/game/projects.js";
 import type { SessionService } from "../../domain/session/service.js";
 import {
   authorizeServiceGame,
@@ -19,6 +20,7 @@ import {
 
 export interface InternalRouteServices {
   readonly games: GameRegistry;
+  readonly gameProjects: Pick<GameProjectService, "resolve">;
   readonly sessions: Pick<SessionService, "verify">;
   readonly characters: Pick<CharacterService, "register" | "has">;
 }
@@ -54,7 +56,11 @@ export function registerInternalRoutes(
   services: InternalRouteServices,
 ): void {
   const preHandler = async (request: Parameters<typeof authorizeServiceGame>[0]): Promise<void> => {
-    authorizeServiceGame(request, services.games);
+    await authorizeServiceGame(
+      request,
+      services.games,
+      services.gameProjects,
+    );
   };
 
   app.post<{ Params: Pick<CharacterParams, "gameId">; Body: VerifySessionRequest }>(

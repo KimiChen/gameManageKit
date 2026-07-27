@@ -1,12 +1,17 @@
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
-import type { Pool, RowDataPacket } from "mysql2/promise";
+import type {
+  Pool,
+  ResultSetHeader,
+  RowDataPacket,
+} from "mysql2/promise";
 import type { AreaServer } from "@gono/game-manage-kit-contract";
 import { GameManageKitError } from "../../errors.js";
 import { matchesAnySecret, TokenBucketLimiter } from "../../infra/security/security.js";
 import { WechatClient } from "../../infra/wechat/client.js";
 import {
   FileDirectoryProvider,
+  MysqlDirectoryProvider,
   type DirectoryProvider,
 } from "../directory/service.js";
 
@@ -56,7 +61,9 @@ interface PrincipalRecord<T> {
 
 interface StoredGameRow extends RowDataPacket {
   readonly game_id: string;
+  readonly name: string;
   readonly status: GameStatus;
+  readonly configuration_state: "draft" | "configured";
 }
 
 interface ParsedGame {
@@ -416,9 +423,10 @@ function parseAdminIdentities(
 
 export class GameRegistry {
   private constructor(
-    private readonly games: ReadonlyMap<string, GameContext>,
+    private readonly games: Map<string, GameContext>,
     private readonly services: ReadonlyMap<string, PrincipalRecord<ServiceIdentity>>,
     private readonly admins: ReadonlyMap<string, PrincipalRecord<AdminIdentity>>,
+    private readonly production: boolean,
   ) {}
 
   static async load(
@@ -505,6 +513,7 @@ export class GameRegistry {
       new Map(contexts.map((context) => [context.gameId, context])),
       services,
       admins,
+      options.production,
     );
   }
 
@@ -518,6 +527,26 @@ export class GameRegistry {
 
   get(gameId: string): GameContext | undefined {
     return this.games.get(gameId);
+  }
+
+  applyProjectMetadata(
+    gameId: string,
+    metadata: Readonly<{ name: string; status: GameStatus }>,
+  ): GameContext | undefined {
+    const current = this.games.get(gameId);
+    if (!current) {
+      return undefined;
+    }
+    if (current.name === metadata.name && current.status === metadata.status) {
+      return current;
+    }
+    const updated = Object.freeze({
+      ...current,
+      name: metadata.name,
+      status: metadata.status,
+    });
+    this.games.set(gameId, updated);
+    return updated;
   }
 
   resolve(gameId: string): GameContext {
@@ -577,38 +606,116 @@ export class GameRegistry {
   }
 
   async sync(pool: Pool): Promise<void> {
+    const directorySeeds = new Map(
+      await Promise.all([...this.games.values()].map(async (game) => (
+        [game.gameId, await game.directory.listAreas()] as const
+      ))),
+    );
     const connection = await pool.getConnection();
+    const metadata = new Map<string, { name: string; status: GameStatus }>();
     try {
       await connection.beginTransaction();
       try {
         const [storedGames] = await connection.query<StoredGameRow[]>(
-          "SELECT game_id, status FROM games FOR UPDATE",
+          `SELECT game_id, name, status, configuration_state
+             FROM games
+            FOR UPDATE`,
+        );
+        const storedById = new Map(
+          storedGames.map((stored) => [String(stored.game_id), stored]),
         );
         for (const stored of storedGames) {
           const configured = this.games.get(String(stored.game_id));
-          if (!configured) {
+          if (!configured && stored.configuration_state === "configured") {
             throw new Error(
               `游戏配置缺少已登记 gameId ${String(stored.game_id)}；`
               + "退役游戏必须保留并设为 disabled",
             );
           }
-          if (stored.status === "disabled" && configured.status !== "disabled") {
-            throw new Error(`已停用 gameId 不允许重新启用: ${configured.gameId}`);
+          if (
+            stored.configuration_state !== "draft"
+            && stored.configuration_state !== "configured"
+          ) {
+            throw new Error(`gameId ${String(stored.game_id)} 配置状态无效`);
           }
         }
         for (const game of this.games.values()) {
-          await connection.execute(
-            `INSERT INTO games (game_id, status)
-             VALUES (?, ?)
-             ON DUPLICATE KEY UPDATE status = VALUES(status)`,
-            [game.gameId, game.status],
-          );
+          const stored = storedById.get(game.gameId);
+          if (!stored) {
+            await connection.execute(
+              `INSERT INTO games
+                 (game_id, name, description, status,
+                  configuration_state, client_visible, sort_order, revision)
+               VALUES (?, ?, '', ?, 'configured', ?, 0, 1)`,
+              [
+                game.gameId,
+                game.name,
+                game.status,
+                game.status === "disabled" ? 0 : 1,
+              ],
+            );
+            metadata.set(game.gameId, {
+              name: game.name,
+              status: game.status,
+            });
+          } else if (stored.configuration_state === "draft") {
+            const status = stored.status === "disabled"
+              ? "disabled"
+              : game.status;
+            await connection.execute(
+              `UPDATE games
+                  SET status = ?,
+                      configuration_state = 'configured',
+                      revision = revision + 1
+                WHERE game_id = ?`,
+              [status, game.gameId],
+            );
+            metadata.set(game.gameId, {
+              name: String(stored.name),
+              status,
+            });
+          } else {
+            metadata.set(game.gameId, {
+              name: String(stored.name),
+              status: stored.status,
+            });
+          }
           await connection.execute(
             `INSERT INTO seq (game_id, name, val)
              VALUES (?, 'user_id', 0)
              ON DUPLICATE KEY UPDATE name = name`,
             [game.gameId],
           );
+          const seed = directorySeeds.get(game.gameId);
+          if (!seed) {
+            throw new Error(`gameId ${game.gameId} 缺少目录启动快照`);
+          }
+          const [settingsResult] = await connection.execute<ResultSetHeader>(
+            `INSERT IGNORE INTO game_directory_settings (game_id, is_ops)
+             VALUES (?, ?)`,
+            [game.gameId, seed.isOps ? 1 : 0],
+          );
+          if (settingsResult.affectedRows === 1) {
+            for (const [sortOrder, server] of seed.servers.entries()) {
+              await connection.execute(
+                `INSERT INTO game_servers
+                   (game_id, server_id, name, tag, status, open_time,
+                    game_http_url, game_ws_url, is_open, sort_order, revision)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1)`,
+                [
+                  game.gameId,
+                  server.serverId,
+                  server.name,
+                  server.tag,
+                  server.status,
+                  server.openTime,
+                  server.gameHttpUrl,
+                  server.gameWsUrl,
+                  sortOrder,
+                ],
+              );
+            }
+          }
         }
         await connection.commit();
       } catch (error) {
@@ -617,6 +724,21 @@ export class GameRegistry {
       }
     } finally {
       connection.release();
+    }
+    for (const [gameId, project] of metadata) {
+      this.applyProjectMetadata(gameId, project);
+      const current = this.games.get(gameId);
+      if (!current) {
+        throw new Error(`gameId ${gameId} 运行时上下文丢失`);
+      }
+      this.games.set(gameId, Object.freeze({
+        ...current,
+        directory: new MysqlDirectoryProvider(
+          pool,
+          gameId,
+          this.production,
+        ),
+      }));
     }
   }
 }
