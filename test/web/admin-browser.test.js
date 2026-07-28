@@ -79,6 +79,7 @@ async function readRequestBody(request) {
 
 async function createAdminFixtureServer() {
   let authenticated = false;
+  let elevatedUntil = null;
   let nextOperationGate = null;
   let nextServerListGate = null;
   let nextServerConflict = false;
@@ -86,6 +87,10 @@ async function createAdminFixtureServer() {
   const operations = [];
   const gameMutations = [];
   const serverMutations = [];
+  const integrationMutations = [];
+  const machineIdentityMutations = [];
+  const machineOperationStatuses = new Map();
+  let directoryRevision = 3;
   const gameProjects = [
     {
       gameId: "game-a",
@@ -117,6 +122,38 @@ async function createAdminFixtureServer() {
       updatedAt: "2026-07-28T10:00:00.000Z",
     },
   ];
+  const directorySettings = {
+    gameId: "game-a",
+    isOps: false,
+    revision: 3,
+    createdAt: "2026-07-27T10:00:00.000Z",
+    updatedAt: "2026-07-28T10:00:00.000Z",
+  };
+  const gameIntegration = {
+    gameId: "game-a",
+    configurationState: "configured",
+    wechatAppId: "wx-game-a",
+    wechatSecret: {
+      configured: false,
+      version: 0,
+      state: "missing",
+      updatedAt: null,
+    },
+    wechatEndpoint: "https://api.weixin.qq.com/sns/jscode2session",
+    wechatTimeoutMs: 2_000,
+    wechatBreakerThreshold: 4,
+    wechatBreakerOpenMs: 5_000,
+    sessionTtlSeconds: 7_200,
+    loginRateCapacity: 100,
+    loginRateRefillPerSecond: 100,
+    adminRateCapacity: 100,
+    adminRateRefillPerSecond: 100,
+    revision: 3,
+    loadedRevision: 3,
+    createdAt: "2026-07-27T10:00:00.000Z",
+    updatedAt: "2026-07-28T10:00:00.000Z",
+  };
+  const machineIdentities = [];
   const staticFiles = new Map([
     ["/admin/", "index.html"],
     ["/admin/admin.css", "admin.css"],
@@ -172,6 +209,10 @@ async function createAdminFixtureServer() {
             },
           ],
           canManageGames: true,
+          canManageIntegrations: true,
+          canRotateSecrets: true,
+          canManageMachineIdentities: true,
+          elevatedUntil,
           expiresAt: "2099-07-28T18:00:00.000Z",
         });
         return;
@@ -192,6 +233,20 @@ async function createAdminFixtureServer() {
           "set-cookie":
             "gmk_admin_session=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA; "
             + "Path=/; HttpOnly; SameSite=Strict",
+        });
+        reply.end();
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && url.pathname === "/v1/admin/auth/reauthenticate"
+      ) {
+        const body = JSON.parse(await readRequestBody(request));
+        assert.deepEqual(body, { password: "correct horse battery" });
+        elevatedUntil = "2099-07-28T18:00:00.000Z";
+        reply.writeHead(204, {
+          "cache-control": "no-store",
         });
         reply.end();
         return;
@@ -276,7 +331,10 @@ async function createAdminFixtureServer() {
           gate.markStarted();
           await gate.wait;
         }
-        json(reply, 200, { servers: gameServers });
+        json(reply, 200, {
+          directoryRevision,
+          servers: gameServers,
+        });
         return;
       }
 
@@ -284,7 +342,10 @@ async function createAdminFixtureServer() {
         request.method === "GET"
         && url.pathname === "/v1/admin/games/new-game/servers"
       ) {
-        json(reply, 200, { servers: [] });
+        json(reply, 200, {
+          directoryRevision: 1,
+          servers: [],
+        });
         return;
       }
 
@@ -294,6 +355,7 @@ async function createAdminFixtureServer() {
       ) {
         const body = JSON.parse(await readRequestBody(request));
         assert.deepEqual(body, {
+          directoryRevision: 3,
           serverId: 2,
           name: "星海二区",
           tag: "normal",
@@ -315,7 +377,11 @@ async function createAdminFixtureServer() {
         };
         gameServers.push(server);
         serverMutations.push({ method: "POST", body });
-        json(reply, 201, server);
+        directoryRevision += 1;
+        json(reply, 201, {
+          directoryRevision,
+          server,
+        });
         return;
       }
 
@@ -337,6 +403,7 @@ async function createAdminFixtureServer() {
             revision: gameServers[index].revision + 1,
             updatedAt: "2026-07-28T11:16:00.000Z",
           };
+          directoryRevision += 1;
           json(reply, 409, {
             code: "ADMIN_GAME_SERVER_REVISION_CONFLICT",
             message: "revision conflict",
@@ -350,6 +417,7 @@ async function createAdminFixtureServer() {
           body,
           priorSuccessfulUpdates === 0
             ? {
+                directoryRevision: 4,
                 name: "星海二区（维护）",
                 tag: "maintenance",
                 status: "maintenance",
@@ -363,6 +431,7 @@ async function createAdminFixtureServer() {
                 revision: 1,
               }
             : {
+                directoryRevision: 6,
                 name: "星海二区（外部更新）",
                 tag: "maintenance",
                 status: "maintenance",
@@ -385,7 +454,309 @@ async function createAdminFixtureServer() {
             : "2026-07-28T11:17:00.000Z",
         };
         serverMutations.push({ method: "PATCH", body });
-        json(reply, 200, gameServers[index]);
+        directoryRevision += 1;
+        json(reply, 200, {
+          directoryRevision,
+          server: gameServers[index],
+        });
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && url.pathname === "/v1/admin/games/game-a/directory-settings"
+      ) {
+        json(reply, 200, directorySettings);
+        return;
+      }
+
+      if (
+        request.method === "PATCH"
+        && url.pathname === "/v1/admin/games/game-a/directory-settings"
+      ) {
+        const body = JSON.parse(await readRequestBody(request));
+        Object.assign(directorySettings, {
+          isOps: body.isOps,
+          revision: directorySettings.revision + 1,
+          updatedAt: "2026-07-28T11:20:00.000Z",
+        });
+        integrationMutations.push({
+          method: "PATCH_DIRECTORY",
+          body,
+        });
+        json(reply, 200, directorySettings);
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && url.pathname === "/v1/admin/games/game-a/integration"
+      ) {
+        json(reply, 200, gameIntegration);
+        return;
+      }
+
+      if (
+        request.method === "PATCH"
+        && url.pathname === "/v1/admin/games/game-a/integration"
+      ) {
+        const body = JSON.parse(await readRequestBody(request));
+        Object.assign(gameIntegration, body, {
+          revision: gameIntegration.revision + 1,
+          updatedAt: "2026-07-28T11:21:00.000Z",
+        });
+        integrationMutations.push({
+          method: "PATCH_INTEGRATION",
+          body,
+        });
+        json(reply, 200, gameIntegration);
+        return;
+      }
+
+      if (
+        request.method === "PUT"
+        && url.pathname
+          === "/v1/admin/games/game-a/secrets/wechat-app-secret"
+      ) {
+        const body = JSON.parse(await readRequestBody(request));
+        assert.equal(body.wechatAppSecret, "fixture-wechat-secret");
+        Object.assign(gameIntegration, {
+          configurationState: "configured",
+          wechatSecret: {
+            configured: true,
+            version: 1,
+            state: "active",
+            updatedAt: "2026-07-28T11:22:00.000Z",
+          },
+          revision: gameIntegration.revision + 1,
+          updatedAt: "2026-07-28T11:22:00.000Z",
+        });
+        integrationMutations.push({
+          method: "PUT_WECHAT_SECRET",
+          body,
+        });
+        json(reply, 200, {
+          gameId: "game-a",
+          configurationState: "configured",
+          wechatSecret: gameIntegration.wechatSecret,
+          revision: gameIntegration.revision,
+          loadedRevision: gameIntegration.loadedRevision,
+          replayed: false,
+        });
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && url.pathname === "/v1/admin/machine-identities"
+      ) {
+        json(reply, 200, { identities: machineIdentities });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && url.pathname === "/v1/admin/machine-identities"
+      ) {
+        const body = JSON.parse(await readRequestBody(request));
+        const identity = {
+          identityId: body.identityId,
+          identityType: body.identityType,
+          displayName: body.displayName,
+          status: "enabled",
+          gameIds: body.gameIds,
+          revision: 1,
+          secretVersions: [
+            {
+              version: 1,
+              state: "current",
+              expiresAt: null,
+              createdAt: "2026-07-28T11:23:00.000Z",
+              activatedAt: "2026-07-28T11:23:00.000Z",
+              lastUsedAt: null,
+              revokedAt: null,
+            },
+          ],
+          createdAt: "2026-07-28T11:23:00.000Z",
+          updatedAt: "2026-07-28T11:23:00.000Z",
+        };
+        machineIdentities.push(identity);
+        machineIdentityMutations.push({ method: "POST", body });
+        json(reply, 201, {
+          identity,
+          version: 1,
+          previousExpiresAt: null,
+          replayed: false,
+          secret: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq",
+        });
+        return;
+      }
+
+      const machineIdentityMatch =
+        /^\/v1\/admin\/machine-identities\/([^/]+)$/u.exec(url.pathname);
+      if (request.method === "PATCH" && machineIdentityMatch) {
+        const identityId = decodeURIComponent(machineIdentityMatch[1]);
+        const identity = machineIdentities.find(
+          (candidate) => candidate.identityId === identityId,
+        );
+        if (!identity) {
+          json(reply, 404, {
+            code: "ADMIN_MACHINE_IDENTITY_NOT_FOUND",
+            message: "identity not found",
+          });
+          return;
+        }
+        const body = JSON.parse(await readRequestBody(request));
+        Object.assign(identity, body, {
+          revision: identity.revision + 1,
+          updatedAt: "2026-07-28T11:24:00.000Z",
+        });
+        machineIdentityMutations.push({ method: "PATCH", body });
+        json(reply, 200, identity);
+        return;
+      }
+
+      const rotationMatch =
+        /^\/v1\/admin\/machine-identities\/([^/]+)\/secret-rotations$/u
+          .exec(url.pathname);
+      if (request.method === "POST" && rotationMatch) {
+        const identityId = decodeURIComponent(rotationMatch[1]);
+        const identity = machineIdentities.find(
+          (candidate) => candidate.identityId === identityId,
+        );
+        if (!identity) {
+          json(reply, 404, {
+            code: "ADMIN_MACHINE_IDENTITY_NOT_FOUND",
+            message: "identity not found",
+          });
+          return;
+        }
+        const body = JSON.parse(await readRequestBody(request));
+        const version = Math.max(
+          0,
+          ...identity.secretVersions.map((candidate) => candidate.version),
+        ) + 1;
+        for (const candidate of identity.secretVersions) {
+          if (candidate.state === "current") {
+            candidate.state = "previous";
+            candidate.expiresAt = "2026-07-28T12:24:00.000Z";
+          }
+        }
+        identity.secretVersions.push({
+          version,
+          state: "current",
+          expiresAt: null,
+          createdAt: "2026-07-28T11:24:00.000Z",
+          activatedAt: "2026-07-28T11:24:00.000Z",
+          lastUsedAt: null,
+          revokedAt: null,
+        });
+        identity.revision += 1;
+        identity.updatedAt = "2026-07-28T11:24:00.000Z";
+        machineIdentityMutations.push({ method: "ROTATE", body });
+        machineOperationStatuses.set(body.operationId, {
+          operationId: body.operationId,
+          identityId,
+          action: "rotate",
+          status: "succeeded",
+          version,
+          deliveryLost: true,
+          createdAt: "2026-07-28T11:24:00.000Z",
+        });
+        json(reply, 200, {
+          identity,
+          version,
+          previousExpiresAt: "2026-07-28T12:24:00.000Z",
+          replayed: false,
+          secret: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefg",
+        });
+        return;
+      }
+
+      const rotationStatusMatch =
+        /^\/v1\/admin\/machine-identities\/([^/]+)\/secret-rotations\/([^/]+)$/u
+          .exec(url.pathname);
+      if (request.method === "GET" && rotationStatusMatch) {
+        const operationId = decodeURIComponent(rotationStatusMatch[2]);
+        const status = machineOperationStatuses.get(operationId);
+        if (!status) {
+          json(reply, 404, {
+            code: "ADMIN_SECRET_OPERATION_NOT_FOUND",
+            message: "operation not found",
+          });
+          return;
+        }
+        json(reply, 200, status);
+        return;
+      }
+
+      const revokeMatch =
+        /^\/v1\/admin\/machine-identities\/([^/]+)\/secret-versions\/([0-9]+)\/revoke$/u
+          .exec(url.pathname);
+      if (request.method === "POST" && revokeMatch) {
+        const identityId = decodeURIComponent(revokeMatch[1]);
+        const version = Number(revokeMatch[2]);
+        const identity = machineIdentities.find(
+          (candidate) => candidate.identityId === identityId,
+        );
+        const secretVersion = identity?.secretVersions.find(
+          (candidate) => candidate.version === version,
+        );
+        if (!identity || !secretVersion) {
+          json(reply, 404, {
+            code: "ADMIN_MACHINE_SECRET_NOT_FOUND",
+            message: "secret not found",
+          });
+          return;
+        }
+        const body = JSON.parse(await readRequestBody(request));
+        Object.assign(secretVersion, {
+          state: "revoked",
+          revokedAt: "2026-07-28T11:25:00.000Z",
+        });
+        identity.revision += 1;
+        identity.updatedAt = "2026-07-28T11:25:00.000Z";
+        machineIdentityMutations.push({ method: "REVOKE", body });
+        machineOperationStatuses.set(body.operationId, {
+          operationId: body.operationId,
+          identityId,
+          action: "revoke",
+          status: "succeeded",
+          version,
+          deliveryLost: false,
+          createdAt: "2026-07-28T11:25:00.000Z",
+        });
+        json(reply, 200, {
+          identityId,
+          version,
+          state: "revoked",
+          identityRevision: identity.revision,
+          replayed: false,
+        });
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && url.pathname === "/v1/admin/config-audit"
+      ) {
+        assert.equal(url.searchParams.get("gameId"), "game-a");
+        json(reply, 200, {
+          records: [
+            {
+              id: "audit-browser-1",
+              auditType: "game_configuration",
+              operatorId: "ops_kimi",
+              gameId: "game-a",
+              identityId: null,
+              action: "integration.read",
+              result: "succeeded",
+              oldVersion: null,
+              newVersion: 3,
+              createdAt: "2026-07-28T11:00:00.000Z",
+            },
+          ],
+        });
         return;
       }
 
@@ -491,6 +862,8 @@ async function createAdminFixtureServer() {
     gameMutations,
     gameProjects,
     gameServers,
+    integrationMutations,
+    machineIdentityMutations,
     operations,
     serverMutations,
     close: () => new Promise((resolve, reject) => {
@@ -749,11 +1122,215 @@ test("真实 Chrome 可用键盘完成管理员登录、查询和确认操作", 
     "",
   );
 
+  assert.equal(
+    await evaluate(
+      client,
+      "!document.querySelector('#accounts-integration-link').hidden",
+    ),
+    true,
+  );
   await evaluate(
     client,
-    "document.querySelector('#accounts-games-link').focus()",
+    "document.querySelector('#accounts-integration-link').focus()",
   );
   await pressKey(client, "Enter");
+  await waitFor(
+    client,
+    "!document.querySelector('#integration-view').hidden"
+      + " && !document.querySelector('#integration-content').hidden",
+    "显示接入配置",
+  );
+  assert.deepEqual(
+    await evaluate(client, `({
+      auditVisible:
+        !document.querySelector("#configuration-audit-section").hidden,
+      completeness:
+        document.querySelector("#configuration-completeness-score").textContent,
+      machineVisible:
+        !document.querySelector("#machine-identities-section").hidden,
+      noSecretInPage:
+        !document.body.textContent.includes("fixture-wechat-secret"),
+      selectedGame:
+        document.querySelector("#integration-game-select").value,
+    })`),
+    {
+      auditVisible: true,
+      completeness: "3 / 4",
+      machineVisible: true,
+      noSecretInPage: true,
+      selectedGame: "game-a",
+    },
+  );
+
+  await evaluate(
+    client,
+    "document.querySelector('#wechat-secret-replace').focus()",
+  );
+  await pressKey(client, "Enter");
+  await waitFor(
+    client,
+    "document.querySelector('#reauthenticate-dialog').open",
+    "敏感配置操作要求重新认证",
+  );
+  assert.equal(
+    await evaluate(client, "document.activeElement.id"),
+    "reauthenticate-password",
+  );
+  await client.send("Input.insertText", { text: "correct horse battery" });
+  await evaluate(
+    client,
+    "document.querySelector('#reauthenticate-submit').focus()",
+  );
+  await pressKey(client, "Enter");
+  await waitFor(
+    client,
+    "!document.querySelector('#reauthenticate-dialog').open"
+      + " && document.querySelector('#wechat-secret-dialog').open",
+    "重新认证后打开 AppSecret 输入窗口",
+  );
+  assert.equal(
+    await evaluate(
+      client,
+      "document.querySelector('#reauthenticate-password').value",
+    ),
+    "",
+  );
+
+  await focusAndType(
+    client,
+    "#wechat-secret-input",
+    "fixture-wechat-secret",
+  );
+  await evaluate(
+    client,
+    "document.querySelector('#wechat-secret-submit').focus()",
+  );
+  await pressKey(client, "Enter");
+  await waitFor(
+    client,
+    "!document.querySelector('#wechat-secret-dialog').open"
+      + " && document.querySelector('#wechat-secret-status-badge')"
+      + ".textContent === '已生效'",
+    "AppSecret 替换完成",
+  );
+  assert.deepEqual(
+    await evaluate(client, `({
+      hashClean: !location.hash.includes("fixture-wechat-secret"),
+      inputType: document.querySelector("#wechat-secret-input").type,
+      inputValue: document.querySelector("#wechat-secret-input").value,
+      liveRegionClean: ![...document.querySelectorAll('[aria-live]')]
+        .some((node) => node.textContent.includes("fixture-wechat-secret")),
+      pageClean: !document.body.textContent.includes("fixture-wechat-secret"),
+      toastClean:
+        !document.querySelector("#toast-region").textContent
+          .includes("fixture-wechat-secret"),
+    })`),
+    {
+      hashClean: true,
+      inputType: "password",
+      inputValue: "",
+      liveRegionClean: true,
+      pageClean: true,
+      toastClean: true,
+    },
+  );
+  assert.equal(
+    fixture.integrationMutations.filter(
+      (mutation) => mutation.method === "PUT_WECHAT_SECRET",
+    ).length,
+    1,
+  );
+
+  await evaluate(
+    client,
+    "document.querySelector('#machine-identity-create').focus()",
+  );
+  await pressKey(client, "Enter");
+  await waitFor(
+    client,
+    "document.querySelector('#machine-identity-dialog').open",
+    "打开机器身份创建窗口",
+  );
+  await focusAndType(client, "#machine-identity-id", "browser-service");
+  await focusAndType(client, "#machine-identity-name", "浏览器 Service");
+  await evaluate(client, `(() => {
+    const scope = document.querySelector('[data-machine-scope="game-a"]');
+    scope.checked = true;
+    document.querySelector("#machine-identity-submit").focus();
+  })()`);
+  await pressKey(client, "Enter");
+  await waitFor(
+    client,
+    "!document.querySelector('#machine-identity-dialog').open"
+      + " && document.querySelector('#one-time-secret-dialog').open",
+    "创建机器身份后显示一次性 Secret",
+  );
+  assert.deepEqual(
+    await evaluate(client, `({
+      closeDisabled: document.querySelector("#one-time-secret-close").disabled,
+      secretType: document.querySelector("#one-time-secret-value").type,
+      secretValue: document.querySelector("#one-time-secret-value").value,
+    })`),
+    {
+      closeDisabled: true,
+      secretType: "password",
+      secretValue: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq",
+    },
+  );
+  await evaluate(
+    client,
+    "document.querySelector('#one-time-secret-toggle').click()",
+  );
+  assert.equal(
+    await evaluate(
+      client,
+      "document.querySelector('#one-time-secret-value').type",
+    ),
+    "text",
+  );
+  await evaluate(client, `(() => {
+    const confirm = document.querySelector("#one-time-secret-confirm");
+    confirm.checked = true;
+    confirm.dispatchEvent(new Event("change", { bubbles: true }));
+    document.querySelector("#one-time-secret-close").click();
+  })()`);
+  await waitFor(
+    client,
+    "!document.querySelector('#one-time-secret-dialog').open",
+    "确认保存后关闭一次性 Secret",
+  );
+  assert.deepEqual(
+    await evaluate(client, `({
+      context: document.querySelector("#one-time-secret-context").textContent,
+      hashClean:
+        !location.hash.includes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq"),
+      secretType: document.querySelector("#one-time-secret-value").type,
+      secretValue: document.querySelector("#one-time-secret-value").value,
+      toastClean:
+        !document.querySelector("#toast-region").textContent
+          .includes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq"),
+    })`),
+    {
+      context: "",
+      hashClean: true,
+      secretType: "password",
+      secretValue: "",
+      toastClean: true,
+    },
+  );
+  assert.equal(fixture.machineIdentityMutations.length, 1);
+
+  await evaluate(
+    client,
+    "document.querySelector('#integration-games-link').focus()",
+  );
+  await pressKey(client, "Enter");
+  await waitFor(
+    client,
+    "!document.querySelector('#games-view').hidden",
+    "从接入配置进入游戏项目",
+  );
+
   await waitFor(
     client,
     "!document.querySelector('#games-view').hidden"

@@ -11,26 +11,44 @@ import {
   canSelectGameStatus,
   chooseAdminView,
   chooseInitialGame,
+  configurationAuditPath,
+  createConfigurationOperationId,
   createLatestRequestGuard,
   createAdminApi,
   createOperationIntent,
   dateTimeLocalToUnixSeconds,
   describeApiError,
+  directorySettingsPath,
+  gameIntegrationPath,
   gameProjectPath,
   gameServerPath,
   isSessionExpired,
   isCompletedLogout,
   isValidAdminPasswordInput,
   isValidUserId,
+  machineIdentityPath,
+  machineSecretRevokePath,
+  machineSecretRotationPath,
   normalizeAccount,
+  normalizeConfigurationAuditPage,
+  normalizeDirectorySettings,
+  normalizeGameIntegration,
   normalizeGameProject,
   normalizeGameProjectList,
   normalizeGameServer,
   normalizeGameServerList,
+  normalizeMachineIdentity,
+  normalizeMachineIdentityList,
+  normalizeMachineSecretIssued,
+  normalizeMachineSecretOperationStatus,
+  normalizeMachineSecretRevoked,
   normalizeOperationResult,
   normalizeSession,
+  normalizeWechatSecretMetadata,
+  normalizeWechatSecretWrite,
   reuseOrCreateOperationIntent,
   unixSecondsToDateTimeLocal,
+  wechatAppSecretPath,
 } from "../../web/admin/app.js";
 import { resetPasswordControl } from "../../web/admin/wsk.js";
 
@@ -69,7 +87,11 @@ const validSession = () => ({
     },
   ],
   canManageGames: true,
+  canManageIntegrations: true,
+  canRotateSecrets: true,
+  canManageMachineIdentities: true,
   expiresAt: "2026-07-28T18:00:00.000Z",
+  elevatedUntil: "2026-07-28T17:30:00.000Z",
 });
 
 const validGameProject = (overrides = {}) => ({
@@ -98,6 +120,55 @@ const validGameServer = (overrides = {}) => ({
   isOpen: true,
   sortOrder: 10,
   revision: 3,
+  createdAt: "2026-07-27T10:00:00.000Z",
+  updatedAt: "2026-07-28T10:00:00.000Z",
+  ...overrides,
+});
+
+const validIntegration = (overrides = {}) => ({
+  gameId: "game-a",
+  configurationState: "configured",
+  wechatAppId: "wx-game-a",
+  wechatSecret: {
+    configured: true,
+    version: 2,
+    state: "active",
+    updatedAt: "2026-07-28T10:00:00.000Z",
+  },
+  wechatEndpoint: "https://api.weixin.qq.com/sns/jscode2session",
+  wechatTimeoutMs: 2_000,
+  wechatBreakerThreshold: 4,
+  wechatBreakerOpenMs: 5_000,
+  sessionTtlSeconds: 7_200,
+  loginRateCapacity: 40,
+  loginRateRefillPerSecond: 2.5,
+  adminRateCapacity: 20,
+  adminRateRefillPerSecond: 1,
+  revision: 3,
+  loadedRevision: 3,
+  createdAt: "2026-07-27T10:00:00.000Z",
+  updatedAt: "2026-07-28T10:00:00.000Z",
+  ...overrides,
+});
+
+const validMachineIdentity = (overrides = {}) => ({
+  identityId: "game-a-service",
+  identityType: "service",
+  displayName: "游戏 A 服务",
+  status: "enabled",
+  gameIds: ["game-a"],
+  revision: 2,
+  secretVersions: [
+    {
+      version: 2,
+      state: "current",
+      expiresAt: null,
+      createdAt: "2026-07-28T10:00:00.000Z",
+      activatedAt: "2026-07-28T10:00:00.000Z",
+      lastUsedAt: null,
+      revokedAt: null,
+    },
+  ],
   createdAt: "2026-07-27T10:00:00.000Z",
   updatedAt: "2026-07-28T10:00:00.000Z",
   ...overrides,
@@ -147,6 +218,15 @@ test("管理员页面只引用本地资源且不包含共享 Secret", async () =
       .every((match) => match[1]?.includes("game-manage-kit-theme")),
     true,
   );
+  assert.doesNotMatch(applicationSource, /sessionStorage/u);
+  assert.doesNotMatch(
+    appJs,
+    /(?:localStorage|sessionStorage|replaceHash|toast)\s*\([^)]*(?:wechatAppSecret|oneTimeSecret|\.secret\b)/u,
+  );
+  assert.doesNotMatch(
+    appJs,
+    /(?:accountLiveStatus|gamesLiveStatus|serversLiveStatus)\.textContent\s*=\s*[^;]*(?:wechatAppSecret|oneTimeSecret|\.secret\b)/u,
+  );
 
   assert.match(
     wskCss,
@@ -162,6 +242,10 @@ test("会话响应按管理员和游戏权限严格校验", () => {
     ["game-a", "game-b"],
   );
   assert.equal(session.canManageGames, true);
+  assert.equal(session.canManageIntegrations, true);
+  assert.equal(session.canRotateSecrets, true);
+  assert.equal(session.canManageMachineIdentities, true);
+  assert.equal(session.elevatedUntil, "2026-07-28T17:30:00.000Z");
   assert.equal(Object.isFrozen(session), true);
   assert.equal(Object.isFrozen(session.games), true);
   assert.equal(
@@ -200,11 +284,38 @@ test("会话响应按管理员和游戏权限严格校验", () => {
     InvalidApiPayloadError,
   );
 
+  for (const capability of [
+    "canManageIntegrations",
+    "canRotateSecrets",
+    "canManageMachineIdentities",
+  ]) {
+    const invalid = validSession();
+    invalid[capability] = "yes";
+    assert.throws(
+      () => normalizeSession(invalid),
+      InvalidApiPayloadError,
+    );
+  }
+
   const invalidExpiry = validSession();
   invalidExpiry.expiresAt = "tomorrow";
   assert.throws(
     () => normalizeSession(invalidExpiry),
     InvalidApiPayloadError,
+  );
+
+  const invalidElevation = validSession();
+  invalidElevation.elevatedUntil = "tomorrow";
+  assert.throws(
+    () => normalizeSession(invalidElevation),
+    InvalidApiPayloadError,
+  );
+  assert.equal(
+    normalizeSession({
+      ...validSession(),
+      elevatedUntil: null,
+    }).elevatedUntil,
+    null,
   );
 });
 
@@ -217,10 +328,11 @@ test("多游戏必须主动选择，单游戏才自动选中", () => {
   assert.equal(chooseInitialGame([]), null);
 });
 
-test("管理员路由按账号权限和游戏管理权限选择可访问页面", () => {
+test("管理员路由隐藏无权访问的接入配置入口", () => {
   const session = normalizeSession(validSession());
   assert.equal(chooseAdminView(null, "#games"), "login");
   assert.equal(chooseAdminView(session, "#games"), "games");
+  assert.equal(chooseAdminView(session, "#integration"), "integration");
   assert.equal(chooseAdminView(session, "#unknown"), "accounts");
   assert.equal(
     chooseAdminView(Object.freeze({
@@ -234,6 +346,8 @@ test("管理员路由按账号权限和游戏管理权限选择可访问页面",
       ...session,
       games: Object.freeze([]),
       canManageGames: false,
+      canManageIntegrations: false,
+      canManageMachineIdentities: false,
     }), "#games"),
     "no-access",
   );
@@ -243,6 +357,24 @@ test("管理员路由按账号权限和游戏管理权限选择可访问页面",
       canManageGames: false,
     }), "#games"),
     "accounts",
+  );
+  assert.equal(
+    chooseAdminView(Object.freeze({
+      ...session,
+      canManageIntegrations: false,
+      canManageMachineIdentities: false,
+    }), "#integration"),
+    "accounts",
+  );
+  assert.equal(
+    chooseAdminView(Object.freeze({
+      ...session,
+      games: Object.freeze([]),
+      canManageGames: false,
+      canManageIntegrations: true,
+      canManageMachineIdentities: false,
+    }), "#accounts"),
+    "integration",
   );
 });
 
@@ -326,6 +458,7 @@ test("区服响应严格校验游戏归属、枚举、URL 和乐观锁字段", (
   );
 
   const list = normalizeGameServerList({
+    directoryRevision: 7,
     servers: [
       validGameServer(),
       validGameServer({
@@ -337,6 +470,7 @@ test("区服响应严格校验游戏归属、枚举、URL 和乐观锁字段", (
       }),
     ],
   }, "game-a");
+  assert.equal(list.directoryRevision, 7);
   assert.equal(list.servers.length, 2);
   assert.equal(Object.isFrozen(list.servers), true);
 
@@ -361,8 +495,229 @@ test("区服响应严格校验游戏归属、枚举、URL 和乐观锁字段", (
   }
   assert.throws(
     () => normalizeGameServerList({
+      directoryRevision: 7,
       servers: [validGameServer(), validGameServer()],
     }, "game-a"),
+    InvalidApiPayloadError,
+  );
+  assert.throws(
+    () => normalizeGameServerList({
+      directoryRevision: 0,
+      servers: [],
+    }, "game-a"),
+    InvalidApiPayloadError,
+  );
+});
+
+test("接入配置响应只接收 Secret 元数据并校验目录 revision", () => {
+  const directory = normalizeDirectorySettings({
+    gameId: "game-a",
+    isOps: true,
+    revision: 4,
+    createdAt: "2026-07-27T10:00:00.000Z",
+    updatedAt: "2026-07-28T10:00:00.000Z",
+  }, "game-a");
+  assert.equal(directory.revision, 4);
+  assert.equal(directory.isOps, true);
+
+  const integration = normalizeGameIntegration(validIntegration(), "game-a");
+  assert.equal(integration.wechatAppId, "wx-game-a");
+  assert.deepEqual(integration.wechatSecret, {
+    configured: true,
+    version: 2,
+    state: "active",
+    updatedAt: "2026-07-28T10:00:00.000Z",
+  });
+  assert.equal(Object.isFrozen(integration.wechatSecret), true);
+
+  assert.deepEqual(
+    normalizeWechatSecretMetadata({
+      configured: false,
+      version: 0,
+      state: "missing",
+      updatedAt: null,
+    }),
+    {
+      configured: false,
+      version: 0,
+      state: "missing",
+      updatedAt: null,
+    },
+  );
+  const write = normalizeWechatSecretWrite({
+    gameId: "game-a",
+    configurationState: "configured",
+    wechatSecret: validIntegration().wechatSecret,
+    revision: 4,
+    loadedRevision: 4,
+    replayed: false,
+  }, "game-a");
+  assert.equal(write.replayed, false);
+  assert.equal(write.wechatSecret.version, 2);
+
+  assert.throws(
+    () => normalizeDirectorySettings({
+      ...directory,
+      gameId: "game-b",
+    }, "game-a"),
+    InvalidApiPayloadError,
+  );
+  for (const sensitiveField of [
+    "wechatAppSecret",
+    "wechat_app_secret",
+    "secretDigest",
+  ]) {
+    assert.throws(
+      () => normalizeGameIntegration({
+        ...validIntegration(),
+        [sensitiveField]: "must-not-be-returned",
+      }, "game-a"),
+      InvalidApiPayloadError,
+    );
+  }
+  assert.throws(
+    () => normalizeWechatSecretWrite({
+      ...write,
+      secret: "must-not-be-returned",
+    }, "game-a"),
+    InvalidApiPayloadError,
+  );
+  for (const endpoint of [
+    "https://example.com/collect",
+    "https://api.weixin.qq.com/sns/jscode2session?redirect=1",
+    "http://api.weixin.qq.com/sns/jscode2session",
+  ]) {
+    assert.throws(
+      () => normalizeGameIntegration(
+        validIntegration({ wechatEndpoint: endpoint }),
+        "game-a",
+      ),
+      InvalidApiPayloadError,
+    );
+  }
+  assert.equal(
+    normalizeGameIntegration(validIntegration({
+      wechatEndpoint: "http://127.0.0.1:8787/mock-wechat",
+    }), "game-a").wechatEndpoint,
+    "http://127.0.0.1:8787/mock-wechat",
+  );
+});
+
+test("机器身份只接受范围与 Secret 版本元数据，一次性明文仅允许首次响应", () => {
+  const identity = normalizeMachineIdentity(
+    validMachineIdentity(),
+    "game-a-service",
+  );
+  assert.deepEqual(identity.gameIds, ["game-a"]);
+  assert.equal(identity.secretVersions[0].state, "current");
+  assert.equal(Object.isFrozen(identity.secretVersions), true);
+  assert.equal(
+    normalizeMachineIdentityList({
+      identities: [
+        validMachineIdentity(),
+        validMachineIdentity({
+          identityId: "game-a-admin",
+          identityType: "machine_admin",
+          displayName: "游戏 A 机器管理员",
+        }),
+      ],
+    }).identities.length,
+    2,
+  );
+
+  const oneTimeValue = "A".repeat(43);
+  const issued = normalizeMachineSecretIssued({
+    identity: validMachineIdentity(),
+    version: 2,
+    secret: oneTimeValue,
+    previousExpiresAt: "2026-07-28T11:00:00.000Z",
+    replayed: false,
+  }, "game-a-service");
+  assert.equal(issued.secret, oneTimeValue);
+  const replayed = normalizeMachineSecretIssued({
+    identity: validMachineIdentity(),
+    version: 2,
+    previousExpiresAt: null,
+    replayed: true,
+  }, "game-a-service");
+  assert.equal("secret" in replayed, false);
+
+  assert.deepEqual(
+    normalizeMachineSecretRevoked({
+      identityId: "game-a-service",
+      version: 1,
+      state: "revoked",
+      identityRevision: 3,
+      replayed: false,
+    }, "game-a-service", 1),
+    {
+      identityId: "game-a-service",
+      version: 1,
+      state: "revoked",
+      identityRevision: 3,
+      replayed: false,
+    },
+  );
+  const status = normalizeMachineSecretOperationStatus({
+    operationId: "rotate-game-a-service",
+    identityId: "game-a-service",
+    action: "rotate",
+    status: "succeeded",
+    version: 2,
+    deliveryLost: true,
+    createdAt: "2026-07-28T10:00:00.000Z",
+  }, "game-a-service", "rotate-game-a-service");
+  assert.equal(status.deliveryLost, true);
+  assert.equal("secret" in status, false);
+
+  assert.throws(
+    () => normalizeMachineIdentity({
+      ...validMachineIdentity(),
+      secretDigest: "must-not-be-returned",
+    }),
+    InvalidApiPayloadError,
+  );
+  assert.throws(
+    () => normalizeMachineSecretOperationStatus({
+      ...status,
+      secret: oneTimeValue,
+    }, "game-a-service", "rotate-game-a-service"),
+    InvalidApiPayloadError,
+  );
+  assert.throws(
+    () => normalizeMachineIdentityList({
+      identities: [validMachineIdentity(), validMachineIdentity()],
+    }),
+    InvalidApiPayloadError,
+  );
+});
+
+test("配置审计接受 game_configuration 白名单且拒绝敏感字段", () => {
+  const record = {
+    id: "audit-1",
+    auditType: "game_configuration",
+    operatorId: "ops_kimi",
+    gameId: "game-a",
+    identityId: null,
+    action: "update_integration",
+    result: "succeeded",
+    oldVersion: 2,
+    newVersion: 3,
+    createdAt: "2026-07-28T10:00:00.000Z",
+  };
+  const page = normalizeConfigurationAuditPage({ records: [record] });
+  assert.equal(page.records[0].auditType, "game_configuration");
+  assert.equal(Object.isFrozen(page.records), true);
+  assert.throws(
+    () => normalizeConfigurationAuditPage({
+      records: [{ ...record, auditType: "configuration" }],
+    }),
+    InvalidApiPayloadError,
+  );
+  assert.throws(
+    () => normalizeConfigurationAuditPage({
+      records: [{ ...record, secret_digest: "must-not-be-returned" }],
+    }),
     InvalidApiPayloadError,
   );
 });
@@ -641,15 +996,25 @@ test("区服 API 路径编码并发送精确的新增编辑请求", async () => 
     revision: 4,
   });
   const responses = [
-    jsonResponse({ servers: [validGameServer()] }),
-    jsonResponse(created, { status: 201 }),
-    jsonResponse(updated),
+    jsonResponse({
+      directoryRevision: 3,
+      servers: [validGameServer()],
+    }),
+    jsonResponse({
+      directoryRevision: 4,
+      server: created,
+    }, { status: 201 }),
+    jsonResponse({
+      directoryRevision: 5,
+      server: updated,
+    }),
   ];
   const api = createAdminApi(async (path, init) => {
     requests.push({ path, init });
     return responses.shift();
   });
   const createInput = {
+    directoryRevision: 3,
     serverId: 1,
     name: "星海一区",
     tag: "new",
@@ -661,6 +1026,7 @@ test("区服 API 路径编码并发送精确的新增编辑请求", async () => 
     sortOrder: 10,
   };
   const updateInput = {
+    directoryRevision: 4,
     name: "星海一区（维护）",
     tag: "new",
     status: "maintenance",
@@ -676,9 +1042,12 @@ test("区服 API 路径编码并发送精确的新增编辑请求", async () => 
   const createResult = await api.createGameServer("game-a", createInput);
   const updateResult = await api.updateGameServer("game-a", 1, updateInput);
 
-  assert.equal(servers.length, 1);
-  assert.equal(createResult.revision, 1);
-  assert.equal(updateResult.revision, 4);
+  assert.equal(servers.directoryRevision, 3);
+  assert.equal(servers.servers.length, 1);
+  assert.equal(createResult.directoryRevision, 4);
+  assert.equal(createResult.server.revision, 1);
+  assert.equal(updateResult.directoryRevision, 5);
+  assert.equal(updateResult.server.revision, 4);
   assert.deepEqual(
     requests.map((request) => [request.path, request.init.method]),
     [
@@ -689,6 +1058,212 @@ test("区服 API 路径编码并发送精确的新增编辑请求", async () => 
   );
   assert.deepEqual(JSON.parse(requests[1].init.body), createInput);
   assert.deepEqual(JSON.parse(requests[2].init.body), updateInput);
+});
+
+test("接入配置 API 路径编码并按契约发送精确请求", async () => {
+  assert.equal(
+    directorySettingsPath("game/a"),
+    "/v1/admin/games/game%2Fa/directory-settings",
+  );
+  assert.equal(
+    gameIntegrationPath("game/a"),
+    "/v1/admin/games/game%2Fa/integration",
+  );
+  assert.equal(
+    wechatAppSecretPath("game/a"),
+    "/v1/admin/games/game%2Fa/secrets/wechat-app-secret",
+  );
+  assert.equal(
+    machineIdentityPath("service/a"),
+    "/v1/admin/machine-identities/service%2Fa",
+  );
+  assert.equal(
+    machineSecretRotationPath("service/a"),
+    "/v1/admin/machine-identities/service%2Fa/secret-rotations",
+  );
+  assert.equal(
+    machineSecretRotationPath("service/a", "operation/a"),
+    "/v1/admin/machine-identities/service%2Fa/secret-rotations/operation%2Fa",
+  );
+  assert.equal(
+    machineSecretRevokePath("service/a", 2),
+    "/v1/admin/machine-identities/service%2Fa/secret-versions/2/revoke",
+  );
+  assert.equal(
+    configurationAuditPath("game/a", 25),
+    "/v1/admin/config-audit?gameId=game%2Fa&limit=25",
+  );
+  assert.equal(
+    createConfigurationOperationId(() => "operation-1"),
+    "operation-1",
+  );
+  assert.throws(
+    () => createConfigurationOperationId(() => "contains whitespace"),
+    /operationId/u,
+  );
+
+  const requests = [];
+  const directory = {
+    gameId: "game-a",
+    isOps: true,
+    revision: 4,
+    createdAt: "2026-07-27T10:00:00.000Z",
+    updatedAt: "2026-07-28T10:00:00.000Z",
+  };
+  const identity = validMachineIdentity();
+  const issued = {
+    identity,
+    version: 2,
+    secret: "A".repeat(43),
+    previousExpiresAt: null,
+    replayed: false,
+  };
+  const audit = {
+    records: [{
+      id: "audit-1",
+      auditType: "game_configuration",
+      operatorId: "ops_kimi",
+      gameId: "game-a",
+      identityId: null,
+      action: "update_integration",
+      result: "succeeded",
+      oldVersion: 2,
+      newVersion: 3,
+      createdAt: "2026-07-28T10:00:00.000Z",
+    }],
+  };
+  const responses = [
+    new Response(null, { status: 204 }),
+    jsonResponse(directory),
+    jsonResponse({ ...directory, revision: 5 }),
+    jsonResponse(validIntegration()),
+    jsonResponse(validIntegration({ revision: 4, loadedRevision: 4 })),
+    jsonResponse({
+      gameId: "game-a",
+      configurationState: "configured",
+      wechatSecret: validIntegration().wechatSecret,
+      revision: 4,
+      loadedRevision: 4,
+      replayed: false,
+    }),
+    jsonResponse({ identities: [identity] }),
+    jsonResponse(issued, { status: 201 }),
+    jsonResponse({ ...identity, displayName: "新名称", revision: 3 }),
+    jsonResponse(issued),
+    jsonResponse({
+      identityId: "game-a-service",
+      version: 2,
+      state: "revoked",
+      identityRevision: 3,
+      replayed: false,
+    }),
+    jsonResponse({
+      operationId: "operation-rotate",
+      identityId: "game-a-service",
+      action: "rotate",
+      status: "succeeded",
+      version: 2,
+      deliveryLost: true,
+      createdAt: "2026-07-28T10:00:00.000Z",
+    }),
+    jsonResponse(audit),
+  ];
+  const api = createAdminApi(async (path, init) => {
+    requests.push({ path, init });
+    return responses.shift();
+  });
+
+  const directoryInput = { isOps: true, revision: 4 };
+  const integrationInput = {
+    wechatAppId: "wx-game-a",
+    wechatEndpoint: "https://api.weixin.qq.com/sns/jscode2session",
+    wechatTimeoutMs: 2_000,
+    wechatBreakerThreshold: 4,
+    wechatBreakerOpenMs: 5_000,
+    sessionTtlSeconds: 7_200,
+    loginRateCapacity: 40,
+    loginRateRefillPerSecond: 2.5,
+    adminRateCapacity: 20,
+    adminRateRefillPerSecond: 1,
+    revision: 3,
+  };
+  const secretInput = {
+    wechatAppSecret: "test-only-placeholder",
+    revision: 3,
+    operationId: "operation-wechat",
+  };
+  const createIdentityInput = {
+    identityId: "game-a-service",
+    identityType: "service",
+    displayName: "游戏 A 服务",
+    gameIds: ["game-a"],
+    operationId: "operation-create",
+  };
+  const updateIdentityInput = {
+    displayName: "新名称",
+    status: "enabled",
+    gameIds: ["game-a"],
+    revision: 2,
+  };
+  const rotateInput = {
+    operationId: "operation-rotate",
+    revision: 2,
+    previousValiditySeconds: 3_600,
+  };
+  const revokeInput = {
+    operationId: "operation-revoke",
+    revision: 2,
+    reason: "应急撤销",
+  };
+
+  await api.reauthenticate("test-only-password");
+  await api.getDirectorySettings("game-a");
+  await api.updateDirectorySettings("game-a", directoryInput);
+  await api.getGameIntegration("game-a");
+  await api.updateGameIntegration("game-a", integrationInput);
+  await api.replaceWechatAppSecret("game-a", secretInput);
+  await api.listMachineIdentities();
+  await api.createMachineIdentity(createIdentityInput);
+  await api.updateMachineIdentity("game-a-service", updateIdentityInput);
+  await api.rotateMachineSecret("game-a-service", rotateInput);
+  await api.revokeMachineSecret("game-a-service", 2, revokeInput);
+  const status = await api.machineSecretOperationStatus(
+    "game-a-service",
+    "operation-rotate",
+  );
+  const records = await api.listConfigurationAudit("game-a", 25);
+
+  assert.equal(status.deliveryLost, true);
+  assert.equal("secret" in status, false);
+  assert.equal(records[0].auditType, "game_configuration");
+  assert.deepEqual(
+    requests.map((request) => [request.path, request.init.method]),
+    [
+      ["/v1/admin/auth/reauthenticate", "POST"],
+      ["/v1/admin/games/game-a/directory-settings", "GET"],
+      ["/v1/admin/games/game-a/directory-settings", "PATCH"],
+      ["/v1/admin/games/game-a/integration", "GET"],
+      ["/v1/admin/games/game-a/integration", "PATCH"],
+      ["/v1/admin/games/game-a/secrets/wechat-app-secret", "PUT"],
+      ["/v1/admin/machine-identities", "GET"],
+      ["/v1/admin/machine-identities", "POST"],
+      ["/v1/admin/machine-identities/game-a-service", "PATCH"],
+      ["/v1/admin/machine-identities/game-a-service/secret-rotations", "POST"],
+      ["/v1/admin/machine-identities/game-a-service/secret-versions/2/revoke", "POST"],
+      ["/v1/admin/machine-identities/game-a-service/secret-rotations/operation-rotate", "GET"],
+      ["/v1/admin/config-audit?gameId=game-a&limit=25", "GET"],
+    ],
+  );
+  assert.deepEqual(JSON.parse(requests[0].init.body), {
+    password: "test-only-password",
+  });
+  assert.deepEqual(JSON.parse(requests[2].init.body), directoryInput);
+  assert.deepEqual(JSON.parse(requests[4].init.body), integrationInput);
+  assert.deepEqual(JSON.parse(requests[5].init.body), secretInput);
+  assert.deepEqual(JSON.parse(requests[7].init.body), createIdentityInput);
+  assert.deepEqual(JSON.parse(requests[8].init.body), updateIdentityInput);
+  assert.deepEqual(JSON.parse(requests[9].init.body), rotateInput);
+  assert.deepEqual(JSON.parse(requests[10].init.body), revokeInput);
 });
 
 test("API 客户端使用同源 Cookie、正确方法和 JSON 请求", async () => {

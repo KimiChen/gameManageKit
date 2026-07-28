@@ -8,6 +8,8 @@ import {
 export const USER_ID_PATTERN = /^u_[0-9]+$/u;
 export const GAME_ID_PATTERN = /^[a-z][a-z0-9-]{1,31}$/u;
 export const OPERATOR_ID_PATTERN = /^[a-z][a-z0-9_.-]{2,63}$/u;
+export const MACHINE_ID_PATTERN = /^[a-z][a-z0-9_.-]{2,63}$/u;
+export const OPERATION_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/u;
 export const ADMIN_ACTIONS = Object.freeze(["ban", "revoke"]);
 export const ADMIN_SESSION_IDLE_TTL_MS = 30 * 60 * 1_000;
 
@@ -15,6 +17,10 @@ const GAME_STATUSES = new Set(["enabled", "maintenance", "disabled"]);
 const GAME_CONFIGURATION_STATES = new Set(["draft", "configured"]);
 const SERVER_TAGS = new Set(["normal", "new", "full", "maintenance"]);
 const SERVER_STATUSES = new Set(["smooth", "busy", "maintenance"]);
+const MACHINE_IDENTITY_TYPES = new Set(["service", "machine_admin"]);
+const MACHINE_IDENTITY_STATUSES = new Set(["enabled", "disabled"]);
+const MACHINE_SECRET_STATES = new Set(["current", "previous", "revoked"]);
+const MACHINE_SECRET_ACTIONS = new Set(["set", "rotate", "revoke"]);
 const ACCOUNT_STATUSES = new Set(["active", "banned", "deregistered"]);
 const OPERATION_STATUSES = new Set(["banned", "revoked", "not_found"]);
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
@@ -69,6 +75,63 @@ function nullableDate(value, label) {
   return value;
 }
 
+function requiredDate(value, label) {
+  const date = requiredString(value, label, 64);
+  if (!Number.isFinite(Date.parse(date))) {
+    throw new InvalidApiPayloadError(`${label} 无效`);
+  }
+  return date;
+}
+
+function positiveInteger(value, label, maximum = Number.MAX_SAFE_INTEGER) {
+  if (
+    !Number.isSafeInteger(value)
+    || value < 1
+    || value > maximum
+  ) {
+    throw new InvalidApiPayloadError(`${label} 无效`);
+  }
+  return value;
+}
+
+function nonNegativeInteger(
+  value,
+  label,
+  maximum = Number.MAX_SAFE_INTEGER,
+) {
+  if (
+    !Number.isSafeInteger(value)
+    || value < 0
+    || value > maximum
+  ) {
+    throw new InvalidApiPayloadError(`${label} 无效`);
+  }
+  return value;
+}
+
+function positiveNumber(value, label) {
+  if (!Number.isFinite(value) || value <= 0 || value > 1_000_000) {
+    throw new InvalidApiPayloadError(`${label} 无效`);
+  }
+  return value;
+}
+
+function assertNoSensitiveFields(payload, label) {
+  const forbidden = new Set([
+    "wechatAppSecret",
+    "wechat_app_secret",
+    "secret",
+    "secretDigest",
+    "secret_digest",
+    "digest",
+  ]);
+  for (const key of Object.keys(payload)) {
+    if (forbidden.has(key)) {
+      throw new InvalidApiPayloadError(`${label} 含敏感字段`);
+    }
+  }
+}
+
 export function normalizeSession(payload) {
   if (!isRecord(payload) || !isRecord(payload.operator)) {
     throw new InvalidApiPayloadError("管理员会话响应无效");
@@ -92,6 +155,15 @@ export function normalizeSession(payload) {
   }
   if (typeof payload.canManageGames !== "boolean") {
     throw new InvalidApiPayloadError("canManageGames 无效");
+  }
+  for (const capability of [
+    "canManageIntegrations",
+    "canRotateSecrets",
+    "canManageMachineIdentities",
+  ]) {
+    if (typeof payload[capability] !== "boolean") {
+      throw new InvalidApiPayloadError(`${capability} 无效`);
+    }
   }
 
   const seen = new Set();
@@ -122,16 +194,18 @@ export function normalizeSession(payload) {
     });
   });
 
-  const expiresAt = requiredString(payload.expiresAt, "expiresAt", 64);
-  if (!Number.isFinite(Date.parse(expiresAt))) {
-    throw new InvalidApiPayloadError("expiresAt 无效");
-  }
+  const expiresAt = requiredDate(payload.expiresAt, "expiresAt");
+  const elevatedUntil = nullableDate(payload.elevatedUntil, "elevatedUntil");
 
   return Object.freeze({
     operator: Object.freeze({ operatorId, displayName }),
     games: Object.freeze(games),
     canManageGames: payload.canManageGames,
+    canManageIntegrations: payload.canManageIntegrations,
+    canRotateSecrets: payload.canRotateSecrets,
+    canManageMachineIdentities: payload.canManageMachineIdentities,
     expiresAt,
+    elevatedUntil,
   });
 }
 
@@ -230,6 +304,27 @@ export function normalizeGameProjectList(payload) {
   return Object.freeze({ games: Object.freeze(games) });
 }
 
+export function normalizeDirectorySettings(payload, expectedGameId = null) {
+  if (!isRecord(payload)) {
+    throw new InvalidApiPayloadError("目录设置响应无效");
+  }
+  const gameId = requiredString(payload.gameId, "gameId", 32);
+  if (
+    !GAME_ID_PATTERN.test(gameId)
+    || (expectedGameId !== null && gameId !== expectedGameId)
+    || typeof payload.isOps !== "boolean"
+  ) {
+    throw new InvalidApiPayloadError("目录设置响应无效");
+  }
+  return Object.freeze({
+    gameId,
+    isOps: payload.isOps,
+    revision: positiveInteger(payload.revision, "revision"),
+    createdAt: requiredDate(payload.createdAt, "createdAt"),
+    updatedAt: requiredDate(payload.updatedAt, "updatedAt"),
+  });
+}
+
 function requiredEndpoint(value, label, protocols) {
   const endpoint = requiredString(value, label, 2_048);
   if (endpoint !== endpoint.trim()) {
@@ -248,6 +343,32 @@ function requiredEndpoint(value, label, protocols) {
     || url.password.length > 0
     || url.hash.length > 0
   ) {
+    throw new InvalidApiPayloadError(`${label} 无效`);
+  }
+  return endpoint;
+}
+
+function requiredWechatEndpoint(value, label) {
+  const endpoint = requiredEndpoint(
+    value,
+    label,
+    new Set(["http:", "https:"]),
+  );
+  const parsed = new URL(endpoint);
+  const official = (
+    parsed.protocol === "https:"
+    && parsed.hostname === "api.weixin.qq.com"
+    && parsed.port === ""
+    && parsed.pathname === "/sns/jscode2session"
+    && parsed.search === ""
+  );
+  const loopback = (
+    parsed.hostname === "localhost"
+    || parsed.hostname === "127.0.0.1"
+    || parsed.hostname === "::1"
+    || parsed.hostname === "[::1]"
+  );
+  if (!official && !loopback) {
     throw new InvalidApiPayloadError(`${label} 无效`);
   }
   return endpoint;
@@ -340,6 +461,8 @@ export function normalizeGameServer(
 export function normalizeGameServerList(payload, expectedGameId = null) {
   if (
     !isRecord(payload)
+    || !Number.isSafeInteger(payload.directoryRevision)
+    || payload.directoryRevision < 1
     || !Array.isArray(payload.servers)
     || payload.servers.length > 65_536
   ) {
@@ -362,7 +485,402 @@ export function normalizeGameServerList(payload, expectedGameId = null) {
     seen.add(server.serverId);
     return server;
   });
-  return Object.freeze({ servers: Object.freeze(servers) });
+  return Object.freeze({
+    directoryRevision: payload.directoryRevision,
+    servers: Object.freeze(servers),
+  });
+}
+
+export function normalizeGameServerMutation(
+  payload,
+  expectedGameId,
+  expectedServerId,
+) {
+  if (!isRecord(payload)) {
+    throw new InvalidApiPayloadError("区服写入响应无效");
+  }
+  return Object.freeze({
+    directoryRevision: positiveInteger(
+      payload.directoryRevision,
+      "directoryRevision",
+    ),
+    server: normalizeGameServer(
+      payload.server,
+      expectedGameId,
+      expectedServerId,
+    ),
+  });
+}
+
+export function normalizeWechatSecretMetadata(payload) {
+  if (!isRecord(payload)) {
+    throw new InvalidApiPayloadError("微信 Secret 元数据无效");
+  }
+  const version = Number.isSafeInteger(payload.version)
+    && payload.version >= 0
+    ? payload.version
+    : null;
+  if (
+    typeof payload.configured !== "boolean"
+    || version === null
+    || !["active", "missing"].includes(payload.state)
+    || (payload.configured && (version < 1 || payload.state !== "active"))
+    || (!payload.configured && payload.state !== "missing")
+  ) {
+    throw new InvalidApiPayloadError("微信 Secret 元数据无效");
+  }
+  return Object.freeze({
+    configured: payload.configured,
+    version,
+    state: payload.state,
+    updatedAt: nullableDate(payload.updatedAt, "wechatSecret.updatedAt"),
+  });
+}
+
+export function normalizeGameIntegration(payload, expectedGameId = null) {
+  if (!isRecord(payload)) {
+    throw new InvalidApiPayloadError("游戏接入配置响应无效");
+  }
+  assertNoSensitiveFields(payload, "游戏接入配置响应");
+  const gameId = requiredString(payload.gameId, "gameId", 32);
+  if (
+    !GAME_ID_PATTERN.test(gameId)
+    || (expectedGameId !== null && gameId !== expectedGameId)
+    || !GAME_CONFIGURATION_STATES.has(payload.configurationState)
+  ) {
+    throw new InvalidApiPayloadError("游戏接入配置响应无效");
+  }
+  const wechatAppId = payload.wechatAppId === null
+    ? null
+    : requiredString(payload.wechatAppId, "wechatAppId", 128);
+  const loadedRevision = payload.loadedRevision === null
+    ? null
+    : positiveInteger(payload.loadedRevision, "loadedRevision");
+  return Object.freeze({
+    gameId,
+    configurationState: payload.configurationState,
+    wechatAppId,
+    wechatSecret: normalizeWechatSecretMetadata(payload.wechatSecret),
+    wechatEndpoint: requiredWechatEndpoint(
+      payload.wechatEndpoint,
+      "wechatEndpoint",
+    ),
+    wechatTimeoutMs: positiveInteger(
+      payload.wechatTimeoutMs,
+      "wechatTimeoutMs",
+      30_000,
+    ),
+    wechatBreakerThreshold: positiveInteger(
+      payload.wechatBreakerThreshold,
+      "wechatBreakerThreshold",
+      1_000,
+    ),
+    wechatBreakerOpenMs: positiveInteger(
+      payload.wechatBreakerOpenMs,
+      "wechatBreakerOpenMs",
+      600_000,
+    ),
+    sessionTtlSeconds: positiveInteger(
+      payload.sessionTtlSeconds,
+      "sessionTtlSeconds",
+      31_536_000,
+    ),
+    loginRateCapacity: positiveNumber(
+      payload.loginRateCapacity,
+      "loginRateCapacity",
+    ),
+    loginRateRefillPerSecond: positiveNumber(
+      payload.loginRateRefillPerSecond,
+      "loginRateRefillPerSecond",
+    ),
+    adminRateCapacity: positiveNumber(
+      payload.adminRateCapacity,
+      "adminRateCapacity",
+    ),
+    adminRateRefillPerSecond: positiveNumber(
+      payload.adminRateRefillPerSecond,
+      "adminRateRefillPerSecond",
+    ),
+    revision: positiveInteger(payload.revision, "revision"),
+    loadedRevision,
+    createdAt: requiredDate(payload.createdAt, "createdAt"),
+    updatedAt: requiredDate(payload.updatedAt, "updatedAt"),
+  });
+}
+
+export function normalizeWechatSecretWrite(payload, expectedGameId = null) {
+  if (!isRecord(payload)) {
+    throw new InvalidApiPayloadError("微信 Secret 写入响应无效");
+  }
+  assertNoSensitiveFields(payload, "微信 Secret 写入响应");
+  const gameId = requiredString(payload.gameId, "gameId", 32);
+  if (
+    !GAME_ID_PATTERN.test(gameId)
+    || (expectedGameId !== null && gameId !== expectedGameId)
+    || !GAME_CONFIGURATION_STATES.has(payload.configurationState)
+    || typeof payload.replayed !== "boolean"
+  ) {
+    throw new InvalidApiPayloadError("微信 Secret 写入响应无效");
+  }
+  return Object.freeze({
+    gameId,
+    configurationState: payload.configurationState,
+    wechatSecret: normalizeWechatSecretMetadata(payload.wechatSecret),
+    revision: positiveInteger(payload.revision, "revision"),
+    loadedRevision: payload.loadedRevision === null
+      ? null
+      : positiveInteger(payload.loadedRevision, "loadedRevision"),
+    replayed: payload.replayed,
+  });
+}
+
+export function normalizeMachineSecretVersion(payload) {
+  if (!isRecord(payload)) {
+    throw new InvalidApiPayloadError("机器 Secret 版本元数据无效");
+  }
+  assertNoSensitiveFields(payload, "机器 Secret 版本元数据");
+  if (!MACHINE_SECRET_STATES.has(payload.state)) {
+    throw new InvalidApiPayloadError("机器 Secret 状态无效");
+  }
+  return Object.freeze({
+    version: positiveInteger(payload.version, "version"),
+    state: payload.state,
+    expiresAt: nullableDate(payload.expiresAt, "expiresAt"),
+    createdAt: requiredDate(payload.createdAt, "createdAt"),
+    activatedAt: requiredDate(payload.activatedAt, "activatedAt"),
+    lastUsedAt: nullableDate(payload.lastUsedAt, "lastUsedAt"),
+    revokedAt: nullableDate(payload.revokedAt, "revokedAt"),
+  });
+}
+
+export function normalizeMachineIdentity(payload, expectedIdentityId = null) {
+  if (!isRecord(payload)) {
+    throw new InvalidApiPayloadError("机器身份响应无效");
+  }
+  assertNoSensitiveFields(payload, "机器身份响应");
+  const identityId = requiredString(payload.identityId, "identityId", 64);
+  if (
+    !MACHINE_ID_PATTERN.test(identityId)
+    || (expectedIdentityId !== null && identityId !== expectedIdentityId)
+    || !MACHINE_IDENTITY_TYPES.has(payload.identityType)
+    || !MACHINE_IDENTITY_STATUSES.has(payload.status)
+    || !Array.isArray(payload.gameIds)
+    || !Array.isArray(payload.secretVersions)
+  ) {
+    throw new InvalidApiPayloadError("机器身份响应无效");
+  }
+  const gameIds = payload.gameIds.map((gameId, index) => {
+    if (
+      typeof gameId !== "string"
+      || !GAME_ID_PATTERN.test(gameId)
+    ) {
+      throw new InvalidApiPayloadError(`gameIds[${index}] 无效`);
+    }
+    return gameId;
+  });
+  if (new Set(gameIds).size !== gameIds.length) {
+    throw new InvalidApiPayloadError("gameIds 重复");
+  }
+  const secretVersions = payload.secretVersions.map(
+    normalizeMachineSecretVersion,
+  );
+  if (
+    new Set(secretVersions.map((version) => version.version)).size
+      !== secretVersions.length
+  ) {
+    throw new InvalidApiPayloadError("secretVersions 重复");
+  }
+  return Object.freeze({
+    identityId,
+    identityType: payload.identityType,
+    displayName: requiredString(payload.displayName, "displayName", 128),
+    status: payload.status,
+    gameIds: Object.freeze(gameIds),
+    revision: positiveInteger(payload.revision, "revision"),
+    secretVersions: Object.freeze(secretVersions),
+    createdAt: requiredDate(payload.createdAt, "createdAt"),
+    updatedAt: requiredDate(payload.updatedAt, "updatedAt"),
+  });
+}
+
+export function normalizeMachineIdentityList(payload) {
+  if (!isRecord(payload) || !Array.isArray(payload.identities)) {
+    throw new InvalidApiPayloadError("机器身份列表响应无效");
+  }
+  const identities = payload.identities.map(
+    (identity) => normalizeMachineIdentity(identity),
+  );
+  if (
+    new Set(identities.map((identity) => identity.identityId)).size
+      !== identities.length
+  ) {
+    throw new InvalidApiPayloadError("机器身份 ID 重复");
+  }
+  return Object.freeze({ identities: Object.freeze(identities) });
+}
+
+export function normalizeMachineSecretIssued(
+  payload,
+  expectedIdentityId = null,
+) {
+  if (!isRecord(payload) || typeof payload.replayed !== "boolean") {
+    throw new InvalidApiPayloadError("一次性机器 Secret 响应无效");
+  }
+  const machineIdentity = normalizeMachineIdentity(
+    payload.identity,
+    expectedIdentityId,
+  );
+  const version = positiveInteger(payload.version, "version");
+  if (
+    payload.secret !== undefined
+    && (
+      typeof payload.secret !== "string"
+      || payload.secret.length !== 43
+      || !/^[A-Za-z0-9_-]+$/u.test(payload.secret)
+    )
+  ) {
+    throw new InvalidApiPayloadError("一次性机器 Secret 无效");
+  }
+  return Object.freeze({
+    identity: machineIdentity,
+    version,
+    previousExpiresAt: nullableDate(
+      payload.previousExpiresAt,
+      "previousExpiresAt",
+    ),
+    replayed: payload.replayed,
+    ...(payload.secret === undefined ? {} : { secret: payload.secret }),
+  });
+}
+
+export function normalizeMachineSecretRevoked(
+  payload,
+  expectedIdentityId,
+  expectedVersion,
+) {
+  if (
+    !isRecord(payload)
+    || payload.identityId !== expectedIdentityId
+    || payload.version !== expectedVersion
+    || payload.state !== "revoked"
+    || typeof payload.replayed !== "boolean"
+  ) {
+    throw new InvalidApiPayloadError("机器 Secret 撤销响应无效");
+  }
+  return Object.freeze({
+    identityId: payload.identityId,
+    version: payload.version,
+    state: "revoked",
+    identityRevision: positiveInteger(
+      payload.identityRevision,
+      "identityRevision",
+    ),
+    replayed: payload.replayed,
+  });
+}
+
+export function normalizeMachineSecretOperationStatus(
+  payload,
+  expectedIdentityId,
+  expectedOperationId,
+) {
+  if (
+    !isRecord(payload)
+    || payload.identityId !== expectedIdentityId
+    || payload.operationId !== expectedOperationId
+    || !MACHINE_SECRET_ACTIONS.has(payload.action)
+    || payload.status !== "succeeded"
+    || typeof payload.deliveryLost !== "boolean"
+  ) {
+    throw new InvalidApiPayloadError("机器 Secret 操作状态响应无效");
+  }
+  assertNoSensitiveFields(payload, "机器 Secret 操作状态响应");
+  return Object.freeze({
+    operationId: payload.operationId,
+    identityId: payload.identityId,
+    action: payload.action,
+    status: payload.status,
+    version: payload.version === null
+      ? null
+      : positiveInteger(payload.version, "version"),
+    deliveryLost: payload.deliveryLost,
+    createdAt: requiredDate(payload.createdAt, "createdAt"),
+  });
+}
+
+export function normalizeConfigurationAuditPage(payload) {
+  if (
+    !isRecord(payload)
+    || !Array.isArray(payload.records)
+    || payload.records.length > 100
+  ) {
+    throw new InvalidApiPayloadError("配置审计响应无效");
+  }
+  const records = payload.records.map((record, index) => {
+    if (!isRecord(record)) {
+      throw new InvalidApiPayloadError(`records[${index}] 无效`);
+    }
+    assertNoSensitiveFields(record, `records[${index}]`);
+    if (
+      ![
+        "game_configuration",
+        "machine_identity",
+        "secret",
+      ].includes(record.auditType)
+    ) {
+      throw new InvalidApiPayloadError(`records[${index}] 无效`);
+    }
+    const gameId = record.gameId === null
+      ? null
+      : requiredString(record.gameId, `records[${index}].gameId`, 32);
+    const identityId = record.identityId === null
+      ? null
+      : requiredString(
+          record.identityId,
+          `records[${index}].identityId`,
+          64,
+        );
+    const operatorId = requiredString(
+      record.operatorId,
+      `records[${index}].operatorId`,
+      64,
+    );
+    if (
+      (gameId !== null && !GAME_ID_PATTERN.test(gameId))
+      || (identityId !== null && !MACHINE_ID_PATTERN.test(identityId))
+      || !OPERATOR_ID_PATTERN.test(operatorId)
+    ) {
+      throw new InvalidApiPayloadError(`records[${index}] 无效`);
+    }
+    return Object.freeze({
+      id: requiredString(record.id, `records[${index}].id`, 128),
+      auditType: record.auditType,
+      operatorId,
+      gameId,
+      identityId,
+      action: requiredString(
+        record.action,
+        `records[${index}].action`,
+        64,
+      ),
+      result: requiredString(
+        record.result,
+        `records[${index}].result`,
+        64,
+      ),
+      oldVersion: record.oldVersion === null
+        ? null
+        : nonNegativeInteger(record.oldVersion, "oldVersion"),
+      newVersion: record.newVersion === null
+        ? null
+        : nonNegativeInteger(record.newVersion, "newVersion"),
+      createdAt: requiredDate(
+        record.createdAt,
+        `records[${index}].createdAt`,
+      ),
+    });
+  });
+  return Object.freeze({ records: Object.freeze(records) });
 }
 
 export function unixSecondsToDateTimeLocal(value) {
@@ -553,6 +1071,61 @@ export function gameServerPath(gameId, serverId = null) {
     : `${base}/${encodeURIComponent(String(serverId))}`;
 }
 
+export function directorySettingsPath(gameId) {
+  return `${gameProjectPath(gameId)}/directory-settings`;
+}
+
+export function gameIntegrationPath(gameId) {
+  return `${gameProjectPath(gameId)}/integration`;
+}
+
+export function wechatAppSecretPath(gameId) {
+  return `${gameProjectPath(gameId)}/secrets/wechat-app-secret`;
+}
+
+export function machineIdentityPath(identityId = null) {
+  return identityId === null
+    ? "/v1/admin/machine-identities"
+    : `/v1/admin/machine-identities/${encodeURIComponent(identityId)}`;
+}
+
+export function machineSecretRotationPath(identityId, operationId = null) {
+  const base = `${machineIdentityPath(identityId)}/secret-rotations`;
+  return operationId === null
+    ? base
+    : `${base}/${encodeURIComponent(operationId)}`;
+}
+
+export function machineSecretRevokePath(identityId, version) {
+  return `${machineIdentityPath(identityId)}/secret-versions/`
+    + `${encodeURIComponent(String(version))}/revoke`;
+}
+
+export function configurationAuditPath(gameId = null, limit = 50) {
+  const query = new URLSearchParams();
+  if (gameId !== null) {
+    query.set("gameId", gameId);
+  }
+  query.set("limit", String(limit));
+  return `/v1/admin/config-audit?${query}`;
+}
+
+export function createConfigurationOperationId(
+  randomUUID = globalThis.crypto?.randomUUID?.bind(globalThis.crypto),
+) {
+  if (typeof randomUUID !== "function") {
+    throw new Error("当前环境不支持安全的 operationId");
+  }
+  const operationId = randomUUID();
+  if (
+    typeof operationId !== "string"
+    || !OPERATION_ID_PATTERN.test(operationId)
+  ) {
+    throw new Error("安全 operationId 无效");
+  }
+  return operationId;
+}
+
 export function createOperationIntent({
   action,
   gameId,
@@ -703,6 +1276,12 @@ export function createAdminApi(fetchImpl = globalThis.fetch, {
         body: { operatorId, password },
       });
     },
+    async reauthenticate(password) {
+      await request("/v1/admin/auth/reauthenticate", {
+        method: "POST",
+        body: { password },
+      });
+    },
     async session() {
       return normalizeSession(await request("/v1/admin/auth/session"));
     },
@@ -728,10 +1307,10 @@ export function createAdminApi(fetchImpl = globalThis.fetch, {
       return normalizeGameServerList(
         await request(gameServerPath(gameId)),
         gameId,
-      ).servers;
+      );
     },
     async createGameServer(gameId, input) {
-      return normalizeGameServer(
+      return normalizeGameServerMutation(
         await request(gameServerPath(gameId), {
           method: "POST",
           body: input,
@@ -741,7 +1320,7 @@ export function createAdminApi(fetchImpl = globalThis.fetch, {
       );
     },
     async updateGameServer(gameId, serverId, input) {
-      return normalizeGameServer(
+      return normalizeGameServerMutation(
         await request(gameServerPath(gameId, serverId), {
           method: "PATCH",
           body: input,
@@ -749,6 +1328,99 @@ export function createAdminApi(fetchImpl = globalThis.fetch, {
         gameId,
         serverId,
       );
+    },
+    async getDirectorySettings(gameId) {
+      return normalizeDirectorySettings(
+        await request(directorySettingsPath(gameId)),
+        gameId,
+      );
+    },
+    async updateDirectorySettings(gameId, input) {
+      return normalizeDirectorySettings(
+        await request(directorySettingsPath(gameId), {
+          method: "PATCH",
+          body: input,
+        }),
+        gameId,
+      );
+    },
+    async getGameIntegration(gameId) {
+      return normalizeGameIntegration(
+        await request(gameIntegrationPath(gameId)),
+        gameId,
+      );
+    },
+    async updateGameIntegration(gameId, input) {
+      return normalizeGameIntegration(
+        await request(gameIntegrationPath(gameId), {
+          method: "PATCH",
+          body: input,
+        }),
+        gameId,
+      );
+    },
+    async replaceWechatAppSecret(gameId, input) {
+      return normalizeWechatSecretWrite(
+        await request(wechatAppSecretPath(gameId), {
+          method: "PUT",
+          body: input,
+        }),
+        gameId,
+      );
+    },
+    async listMachineIdentities() {
+      return normalizeMachineIdentityList(
+        await request(machineIdentityPath()),
+      ).identities;
+    },
+    async createMachineIdentity(input) {
+      return normalizeMachineSecretIssued(
+        await request(machineIdentityPath(), {
+          method: "POST",
+          body: input,
+        }),
+        input.identityId,
+      );
+    },
+    async updateMachineIdentity(identityId, input) {
+      return normalizeMachineIdentity(
+        await request(machineIdentityPath(identityId), {
+          method: "PATCH",
+          body: input,
+        }),
+        identityId,
+      );
+    },
+    async rotateMachineSecret(identityId, input) {
+      return normalizeMachineSecretIssued(
+        await request(machineSecretRotationPath(identityId), {
+          method: "POST",
+          body: input,
+        }),
+        identityId,
+      );
+    },
+    async revokeMachineSecret(identityId, version, input) {
+      return normalizeMachineSecretRevoked(
+        await request(machineSecretRevokePath(identityId, version), {
+          method: "POST",
+          body: input,
+        }),
+        identityId,
+        version,
+      );
+    },
+    async machineSecretOperationStatus(identityId, operationId) {
+      return normalizeMachineSecretOperationStatus(
+        await request(machineSecretRotationPath(identityId, operationId)),
+        identityId,
+        operationId,
+      );
+    },
+    async listConfigurationAudit(gameId = null, limit = 50) {
+      return normalizeConfigurationAuditPage(
+        await request(configurationAuditPath(gameId, limit)),
+      ).records;
     },
     async findAccount(gameId, userId) {
       return normalizeAccount(
@@ -976,13 +1648,21 @@ export function chooseAdminView(session, hash = "") {
   if (!session) {
     return "login";
   }
+  const canManageConfiguration =
+    session.canManageIntegrations || session.canManageMachineIdentities;
+  if (hash === "#integration" && canManageConfiguration) {
+    return "integration";
+  }
   if (hash === "#games" && session.canManageGames) {
     return "games";
   }
   if (session.games.length > 0) {
     return "accounts";
   }
-  return session.canManageGames ? "games" : "no-access";
+  if (session.canManageGames) {
+    return "games";
+  }
+  return canManageConfiguration ? "integration" : "no-access";
 }
 
 export function bootstrapAdminConsole({
@@ -1005,6 +1685,7 @@ export function bootstrapAdminConsole({
   const loginRequests = createLatestRequestGuard();
   const gameRequests = createLatestRequestGuard();
   const serverRequests = createLatestRequestGuard();
+  const configurationRequests = createLatestRequestGuard();
 
   const elements = {
     views: new Map(
@@ -1022,6 +1703,7 @@ export function bootstrapAdminConsole({
       requiredElement(document, "no-access-logout"),
       requiredElement(document, "sidebar-logout"),
       requiredElement(document, "games-sidebar-logout"),
+      requiredElement(document, "integration-sidebar-logout"),
     ],
     bootSpinner: requiredElement(document, "boot-spinner"),
     bootMessage: requiredElement(document, "boot-message"),
@@ -1075,6 +1757,22 @@ export function bootstrapAdminConsole({
     ),
     accountsGamesLink: requiredElement(document, "accounts-games-link"),
     gamesAccountsLink: requiredElement(document, "games-accounts-link"),
+    accountsIntegrationLink: requiredElement(
+      document,
+      "accounts-integration-link",
+    ),
+    gamesIntegrationLink: requiredElement(
+      document,
+      "games-integration-link",
+    ),
+    integrationAccountsLink: requiredElement(
+      document,
+      "integration-accounts-link",
+    ),
+    integrationGamesLink: requiredElement(
+      document,
+      "integration-games-link",
+    ),
     gameCreateButton: requiredElement(document, "game-create-button"),
     gamesEmptyCreate: requiredElement(document, "games-empty-create"),
     gamesLiveStatus: requiredElement(document, "games-live-status"),
@@ -1154,6 +1852,264 @@ export function bootstrapAdminConsole({
     ),
     serverCancel: requiredElement(document, "server-cancel"),
     serverSubmit: requiredElement(document, "server-submit"),
+    integrationGameSelect: requiredElement(
+      document,
+      "integration-game-select",
+    ),
+    integrationRefresh: requiredElement(document, "integration-refresh"),
+    integrationLoading: requiredElement(document, "integration-loading"),
+    integrationError: requiredElement(document, "integration-error"),
+    integrationErrorMessage: requiredElement(
+      document,
+      "integration-error-message",
+    ),
+    integrationRetry: requiredElement(document, "integration-retry"),
+    integrationContent: requiredElement(document, "integration-content"),
+    integrationSettingsSection: requiredElement(
+      document,
+      "integration-settings-section",
+    ),
+    configurationCompletenessSummary: requiredElement(
+      document,
+      "configuration-completeness-summary",
+    ),
+    configurationCompletenessScore: requiredElement(
+      document,
+      "configuration-completeness-score",
+    ),
+    configurationStateBadge: requiredElement(
+      document,
+      "configuration-state-badge",
+    ),
+    configurationCheckList: requiredElement(
+      document,
+      "configuration-check-list",
+    ),
+    configurationLoadedRevision: requiredElement(
+      document,
+      "configuration-loaded-revision",
+    ),
+    integrationForm: requiredElement(document, "integration-form"),
+    integrationWechatAppId: requiredElement(
+      document,
+      "integration-wechat-app-id",
+    ),
+    integrationWechatEndpoint: requiredElement(
+      document,
+      "integration-wechat-endpoint",
+    ),
+    integrationWechatTimeout: requiredElement(
+      document,
+      "integration-wechat-timeout",
+    ),
+    integrationBreakerThreshold: requiredElement(
+      document,
+      "integration-breaker-threshold",
+    ),
+    integrationBreakerOpen: requiredElement(
+      document,
+      "integration-breaker-open",
+    ),
+    integrationSessionTtl: requiredElement(
+      document,
+      "integration-session-ttl",
+    ),
+    integrationLoginCapacity: requiredElement(
+      document,
+      "integration-login-capacity",
+    ),
+    integrationLoginRefill: requiredElement(
+      document,
+      "integration-login-refill",
+    ),
+    integrationAdminCapacity: requiredElement(
+      document,
+      "integration-admin-capacity",
+    ),
+    integrationAdminRefill: requiredElement(
+      document,
+      "integration-admin-refill",
+    ),
+    wechatSecretStatusBadge: requiredElement(
+      document,
+      "wechat-secret-status-badge",
+    ),
+    directoryRevisionLabel: requiredElement(
+      document,
+      "directory-revision-label",
+    ),
+    directoryIsOps: requiredElement(document, "directory-is-ops"),
+    directorySave: requiredElement(document, "directory-save"),
+    integrationFormError: requiredElement(
+      document,
+      "integration-form-error",
+    ),
+    integrationFormErrorMessage: requiredElement(
+      document,
+      "integration-form-error-message",
+    ),
+    wechatSecretReplace: requiredElement(
+      document,
+      "wechat-secret-replace",
+    ),
+    integrationSave: requiredElement(document, "integration-save"),
+    machineIdentitiesSection: requiredElement(
+      document,
+      "machine-identities-section",
+    ),
+    machineIdentityCreate: requiredElement(
+      document,
+      "machine-identity-create",
+    ),
+    machineIdentitiesList: requiredElement(
+      document,
+      "machine-identities-list",
+    ),
+    machineIdentitiesEmpty: requiredElement(
+      document,
+      "machine-identities-empty",
+    ),
+    configurationAuditSection: requiredElement(
+      document,
+      "configuration-audit-section",
+    ),
+    configurationAuditList: requiredElement(
+      document,
+      "configuration-audit-list",
+    ),
+    configurationAuditEmpty: requiredElement(
+      document,
+      "configuration-audit-empty",
+    ),
+    reauthenticateDialog: requiredElement(
+      document,
+      "reauthenticate-dialog",
+    ),
+    reauthenticateForm: requiredElement(document, "reauthenticate-form"),
+    reauthenticateClose: requiredElement(document, "reauthenticate-close"),
+    reauthenticatePassword: requiredElement(
+      document,
+      "reauthenticate-password",
+    ),
+    reauthenticatePasswordToggle: requiredElement(
+      document,
+      "reauthenticate-password-toggle",
+    ),
+    reauthenticateError: requiredElement(
+      document,
+      "reauthenticate-error",
+    ),
+    reauthenticateErrorMessage: requiredElement(
+      document,
+      "reauthenticate-error-message",
+    ),
+    reauthenticateCancel: requiredElement(
+      document,
+      "reauthenticate-cancel",
+    ),
+    reauthenticateSubmit: requiredElement(
+      document,
+      "reauthenticate-submit",
+    ),
+    wechatSecretDialog: requiredElement(document, "wechat-secret-dialog"),
+    wechatSecretForm: requiredElement(document, "wechat-secret-form"),
+    wechatSecretClose: requiredElement(document, "wechat-secret-close"),
+    wechatSecretInput: requiredElement(document, "wechat-secret-input"),
+    wechatSecretToggle: requiredElement(document, "wechat-secret-toggle"),
+    wechatSecretError: requiredElement(document, "wechat-secret-error"),
+    wechatSecretErrorMessage: requiredElement(
+      document,
+      "wechat-secret-error-message",
+    ),
+    wechatSecretCancel: requiredElement(document, "wechat-secret-cancel"),
+    wechatSecretSubmit: requiredElement(document, "wechat-secret-submit"),
+    machineIdentityDialog: requiredElement(
+      document,
+      "machine-identity-dialog",
+    ),
+    machineIdentityForm: requiredElement(document, "machine-identity-form"),
+    machineIdentityDialogKind: requiredElement(
+      document,
+      "machine-identity-dialog-kind",
+    ),
+    machineIdentityDialogTitle: requiredElement(
+      document,
+      "machine-identity-dialog-title",
+    ),
+    machineIdentityClose: requiredElement(
+      document,
+      "machine-identity-close",
+    ),
+    machineIdentityId: requiredElement(document, "machine-identity-id"),
+    machineIdentityType: requiredElement(
+      document,
+      "machine-identity-type",
+    ),
+    machineIdentityName: requiredElement(
+      document,
+      "machine-identity-name",
+    ),
+    machineIdentityStatus: requiredElement(
+      document,
+      "machine-identity-status",
+    ),
+    machineScopeOptions: requiredElement(document, "machine-scope-options"),
+    machineIdentityError: requiredElement(
+      document,
+      "machine-identity-error",
+    ),
+    machineIdentityErrorMessage: requiredElement(
+      document,
+      "machine-identity-error-message",
+    ),
+    machineIdentityCancel: requiredElement(
+      document,
+      "machine-identity-cancel",
+    ),
+    machineIdentitySubmit: requiredElement(
+      document,
+      "machine-identity-submit",
+    ),
+    machineRevokeDialog: requiredElement(document, "machine-revoke-dialog"),
+    machineRevokeForm: requiredElement(document, "machine-revoke-form"),
+    machineRevokeClose: requiredElement(document, "machine-revoke-close"),
+    machineRevokeTarget: requiredElement(document, "machine-revoke-target"),
+    machineRevokeReason: requiredElement(document, "machine-revoke-reason"),
+    machineRevokeError: requiredElement(document, "machine-revoke-error"),
+    machineRevokeErrorMessage: requiredElement(
+      document,
+      "machine-revoke-error-message",
+    ),
+    machineRevokeCancel: requiredElement(document, "machine-revoke-cancel"),
+    machineRevokeSubmit: requiredElement(document, "machine-revoke-submit"),
+    oneTimeSecretDialog: requiredElement(
+      document,
+      "one-time-secret-dialog",
+    ),
+    oneTimeSecretContext: requiredElement(
+      document,
+      "one-time-secret-context",
+    ),
+    oneTimeSecretValue: requiredElement(
+      document,
+      "one-time-secret-value",
+    ),
+    oneTimeSecretToggle: requiredElement(
+      document,
+      "one-time-secret-toggle",
+    ),
+    oneTimeSecretCopy: requiredElement(
+      document,
+      "one-time-secret-copy",
+    ),
+    oneTimeSecretConfirm: requiredElement(
+      document,
+      "one-time-secret-confirm",
+    ),
+    oneTimeSecretClose: requiredElement(
+      document,
+      "one-time-secret-close",
+    ),
     toastRegion: requiredElement(document, "toast-region"),
   };
 
@@ -1175,6 +2131,7 @@ export function bootstrapAdminConsole({
     gameSubmitting: false,
     gameOpener: null,
     serverGame: null,
+    directoryRevision: null,
     managedServers: [],
     managedServersLoaded: false,
     serverFormMode: null,
@@ -1183,6 +2140,26 @@ export function bootstrapAdminConsole({
     serverDialogOpener: null,
     serverFormOpener: null,
     serverDialogGeneration: 0,
+    configurationGameId: null,
+    integration: null,
+    directorySettings: null,
+    configurationServers: [],
+    machineIdentities: [],
+    configurationAudit: [],
+    configurationLoaded: false,
+    configurationSubmitting: false,
+    configurationGeneration: 0,
+    reauthenticationSubmitting: false,
+    elevatedAction: null,
+    elevatedActionOpener: null,
+    wechatSecretSubmitting: false,
+    machineFormMode: null,
+    editingMachineIdentity: null,
+    machineIdentitySubmitting: false,
+    machineIdentityOpener: null,
+    machineRevokeTarget: null,
+    machineRevokeSubmitting: false,
+    oneTimeSecret: null,
     expiryTimer: null,
     idleExpiresAt: null,
     authGeneration: 0,
@@ -1217,6 +2194,8 @@ export function bootstrapAdminConsole({
       replaceHash("#accounts");
     } else if (name === "games") {
       replaceHash("#games");
+    } else if (name === "integration") {
+      replaceHash("#integration");
     }
     if (elements.gameField) {
       elements.gameField.hidden =
@@ -1265,6 +2244,650 @@ export function bootstrapAdminConsole({
     }
   }
 
+  function hasConfigurationAccess(session = state.session) {
+    return Boolean(
+      session
+      && (
+        session.canManageIntegrations
+        || session.canManageMachineIdentities
+      ),
+    );
+  }
+
+  function hasRecentAuthentication() {
+    return (
+      state.session?.elevatedUntil !== null
+      && Date.parse(state.session.elevatedUntil) > now()
+    );
+  }
+
+  function resetSecretField(input, toggle = null) {
+    input.value = "";
+    input.type = "password";
+    if (toggle) {
+      toggle.setAttribute("aria-pressed", "false");
+      if (toggle === elements.wechatSecretToggle) {
+        toggle.setAttribute("aria-label", "显示 AppSecret");
+      }
+    }
+  }
+
+  function clearWechatSecretInput() {
+    resetSecretField(
+      elements.wechatSecretInput,
+      elements.wechatSecretToggle,
+    );
+    elements.wechatSecretInput.setCustomValidity("");
+  }
+
+  function clearOneTimeSecret() {
+    state.oneTimeSecret = null;
+    elements.oneTimeSecretValue.value = "";
+    elements.oneTimeSecretValue.type = "password";
+    elements.oneTimeSecretToggle.setAttribute("aria-pressed", "false");
+    elements.oneTimeSecretToggle.textContent = "显示一次";
+    elements.oneTimeSecretToggle.disabled = false;
+    elements.oneTimeSecretContext.textContent = "";
+    elements.oneTimeSecretConfirm.checked = false;
+    elements.oneTimeSecretClose.disabled = true;
+  }
+
+  function closeReauthenticationDialog({ clearAction = true } = {}) {
+    resetSecretField(
+      elements.reauthenticatePassword,
+      elements.reauthenticatePasswordToggle,
+    );
+    elements.reauthenticateError.hidden = true;
+    elements.reauthenticateErrorMessage.textContent = "";
+    if (clearAction) {
+      state.elevatedAction = null;
+      state.elevatedActionOpener = null;
+    }
+    if (elements.reauthenticateDialog.open) {
+      elements.reauthenticateDialog.close();
+    }
+  }
+
+  function closeWechatSecretDialog() {
+    clearWechatSecretInput();
+    elements.wechatSecretError.hidden = true;
+    elements.wechatSecretErrorMessage.textContent = "";
+    if (elements.wechatSecretDialog.open) {
+      elements.wechatSecretDialog.close();
+    }
+  }
+
+  function closeMachineIdentityDialog() {
+    if (elements.machineIdentityDialog.open) {
+      elements.machineIdentityDialog.close();
+    }
+  }
+
+  function closeMachineRevokeDialog() {
+    elements.machineRevokeReason.value = "";
+    elements.machineRevokeError.hidden = true;
+    elements.machineRevokeErrorMessage.textContent = "";
+    if (elements.machineRevokeDialog.open) {
+      elements.machineRevokeDialog.close();
+    }
+  }
+
+  function closeOneTimeSecretDialog() {
+    if (elements.oneTimeSecretDialog.open) {
+      elements.oneTimeSecretDialog.close();
+    }
+    clearOneTimeSecret();
+  }
+
+  function clearSensitiveState() {
+    clearWechatSecretInput();
+    closeWechatSecretDialog();
+    closeReauthenticationDialog();
+    closeMachineIdentityDialog();
+    closeMachineRevokeDialog();
+    closeOneTimeSecretDialog();
+  }
+
+  function clearConfigurationState() {
+    configurationRequests.invalidate();
+    state.configurationGeneration += 1;
+    state.configurationGameId = null;
+    state.integration = null;
+    state.directorySettings = null;
+    state.configurationServers = [];
+    state.machineIdentities = [];
+    state.configurationAudit = [];
+    state.configurationLoaded = false;
+    state.configurationSubmitting = false;
+    elements.integrationGameSelect.replaceChildren();
+    elements.integrationContent.hidden = true;
+    elements.integrationLoading.hidden = true;
+    elements.integrationError.hidden = true;
+    elements.integrationErrorMessage.textContent = "";
+    elements.integrationForm.reset();
+    elements.integrationFormError.hidden = true;
+    elements.integrationFormErrorMessage.textContent = "";
+    elements.configurationCheckList.replaceChildren();
+    elements.machineIdentitiesList.replaceChildren();
+    elements.machineIdentitiesEmpty.hidden = true;
+    elements.configurationAuditList.replaceChildren();
+    elements.configurationAuditEmpty.hidden = true;
+    clearSensitiveState();
+  }
+
+  function availableConfigurationGames() {
+    const projects = state.session?.canManageGames && state.managedGamesLoaded
+      ? state.managedGames
+      : state.session?.games ?? [];
+    const seen = new Set();
+    return projects.filter((game) => {
+      if (seen.has(game.gameId)) {
+        return false;
+      }
+      seen.add(game.gameId);
+      return true;
+    });
+  }
+
+  function populateConfigurationGames() {
+    const games = availableConfigurationGames();
+    const previous = state.configurationGameId;
+    if (!games.some((game) => game.gameId === previous)) {
+      state.configurationGameId = games[0]?.gameId ?? null;
+    }
+    const options = games.map((game) => {
+      const option = document.createElement("option");
+      option.value = game.gameId;
+      option.textContent = `${game.name} · ${game.gameId}`;
+      return option;
+    });
+    if (options.length === 0) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "没有可配置游戏";
+      options.push(option);
+    }
+    elements.integrationGameSelect.replaceChildren(...options);
+    elements.integrationGameSelect.value =
+      state.configurationGameId ?? "";
+    elements.integrationGameSelect.disabled = games.length === 0;
+  }
+
+  function setConfigurationFormDisabled(disabled) {
+    for (const control of elements.integrationForm.elements) {
+      control.disabled = disabled;
+    }
+    elements.integrationRefresh.disabled = disabled;
+    elements.integrationGameSelect.disabled =
+      disabled || availableConfigurationGames().length === 0;
+    if (!disabled) {
+      const canManage = Boolean(
+        state.session?.canManageIntegrations && state.integration,
+      );
+      for (const control of elements.integrationForm.elements) {
+        control.disabled = !canManage;
+      }
+      elements.wechatSecretReplace.disabled =
+        !canManage || !state.session?.canRotateSecrets;
+      elements.directorySave.disabled =
+        !canManage || !state.directorySettings;
+    }
+  }
+
+  function renderConfigurationCompleteness() {
+    const integration = state.integration;
+    const checks = [
+      {
+        label: "微信 AppID",
+        complete: Boolean(integration?.wechatAppId),
+      },
+      {
+        label: "微信 AppSecret",
+        complete: integration?.wechatSecret.configured === true,
+      },
+      {
+        label: "至少一个区服",
+        complete: state.configurationServers.length > 0,
+      },
+      {
+        label: "游戏已完成配置",
+        complete: integration?.configurationState === "configured",
+      },
+    ];
+    const completeCount = checks.filter((check) => check.complete).length;
+    elements.configurationCompletenessScore.textContent =
+      `${completeCount} / ${checks.length}`;
+    elements.configurationCompletenessSummary.textContent =
+      completeCount === checks.length
+        ? "必需接入配置已完整。"
+        : `还有 ${checks.length - completeCount} 项需要处理。`;
+    setBadge(
+      elements.configurationStateBadge,
+      integration?.configurationState === "configured" ? "配置完成" : "草稿",
+      integration?.configurationState === "configured" ? "success" : "warning",
+    );
+    elements.configurationLoadedRevision.textContent =
+      integration?.loadedRevision === null
+        ? "运行时尚未加载当前配置。"
+        : `运行时已加载第 ${integration?.loadedRevision ?? "—"} 版；`
+          + `数据库当前为第 ${integration?.revision ?? "—"} 版。`;
+    elements.configurationCheckList.replaceChildren(...checks.map((check) => {
+      const item = document.createElement("li");
+      item.className = check.complete ? "gmk-check-complete" : "";
+      const marker = document.createElement("span");
+      marker.setAttribute("aria-hidden", "true");
+      marker.textContent = check.complete ? "✓" : "○";
+      const label = document.createElement("span");
+      label.textContent = check.label;
+      item.append(marker, label);
+      return item;
+    }));
+  }
+
+  function renderIntegrationSettings() {
+    const integration = state.integration;
+    const canManage = Boolean(
+      state.session?.canManageIntegrations && integration,
+    );
+    elements.integrationSettingsSection.hidden =
+      !state.session?.canManageIntegrations;
+    if (!integration) {
+      return;
+    }
+    elements.integrationWechatAppId.value = integration.wechatAppId ?? "";
+    elements.integrationWechatEndpoint.value = integration.wechatEndpoint;
+    elements.integrationWechatTimeout.value =
+      String(integration.wechatTimeoutMs);
+    elements.integrationBreakerThreshold.value =
+      String(integration.wechatBreakerThreshold);
+    elements.integrationBreakerOpen.value =
+      String(integration.wechatBreakerOpenMs);
+    elements.integrationSessionTtl.value =
+      String(integration.sessionTtlSeconds);
+    elements.integrationLoginCapacity.value =
+      String(integration.loginRateCapacity);
+    elements.integrationLoginRefill.value =
+      String(integration.loginRateRefillPerSecond);
+    elements.integrationAdminCapacity.value =
+      String(integration.adminRateCapacity);
+    elements.integrationAdminRefill.value =
+      String(integration.adminRateRefillPerSecond);
+    setBadge(
+      elements.wechatSecretStatusBadge,
+      integration.wechatSecret.configured ? "已生效" : "未配置",
+      integration.wechatSecret.configured ? "success" : "warning",
+    );
+    elements.directoryIsOps.checked = state.directorySettings?.isOps ?? false;
+    elements.directoryRevisionLabel.textContent = state.directorySettings
+      ? `当前目录修订第 ${state.directorySettings.revision} 版。`
+      : "";
+    elements.wechatSecretReplace.hidden =
+      !state.session?.canRotateSecrets;
+    elements.wechatSecretReplace.disabled =
+      !canManage || !state.session?.canRotateSecrets;
+    elements.directorySave.disabled =
+      !canManage || !state.directorySettings;
+    elements.integrationSave.disabled = !canManage;
+  }
+
+  function secretStatePresentation(stateValue) {
+    if (stateValue === "current") {
+      return { text: "当前版本", variant: "success" };
+    }
+    if (stateValue === "previous") {
+      return { text: "过渡版本", variant: "warning" };
+    }
+    return { text: "已撤销", variant: "danger" };
+  }
+
+  function upsertMachineIdentity(identity) {
+    const index = state.machineIdentities.findIndex(
+      (candidate) => candidate.identityId === identity.identityId,
+    );
+    state.machineIdentities = index === -1
+      ? [...state.machineIdentities, identity]
+      : state.machineIdentities.map((candidate, candidateIndex) => (
+          candidateIndex === index ? identity : candidate
+        ));
+    renderMachineIdentities();
+  }
+
+  function createMachineIdentityCard(identity) {
+    const card = document.createElement("article");
+    card.className = "wsk-panel gmk-machine-card";
+    card.setAttribute("role", "listitem");
+
+    const head = document.createElement("div");
+    head.className = "gmk-machine-card-head";
+    const titleGroup = document.createElement("div");
+    const title = document.createElement("h3");
+    title.textContent = identity.displayName;
+    const identifier = document.createElement("code");
+    identifier.className = "gmk-game-id";
+    identifier.textContent = identity.identityId;
+    titleGroup.append(title, identifier);
+    const badges = document.createElement("div");
+    badges.className = "gmk-machine-badges";
+    const typeBadge = document.createElement("span");
+    setBadge(
+      typeBadge,
+      identity.identityType === "service" ? "Service" : "机器 Admin",
+      "accent",
+    );
+    const statusBadge = document.createElement("span");
+    setBadge(
+      statusBadge,
+      identity.status === "enabled" ? "已启用" : "已停用",
+      identity.status === "enabled" ? "success" : "danger",
+    );
+    badges.append(typeBadge, statusBadge);
+    head.append(titleGroup, badges);
+
+    const scopes = document.createElement("p");
+    scopes.className = "gmk-machine-scopes";
+    scopes.textContent = identity.gameIds.length > 0
+      ? `游戏范围：${identity.gameIds.join("、")}`
+      : "游戏范围：无";
+
+    const versions = document.createElement("div");
+    versions.className = "gmk-secret-version-list";
+    for (const secretVersion of identity.secretVersions) {
+      const row = document.createElement("div");
+      row.className = "gmk-secret-version";
+      const summary = document.createElement("div");
+      const versionLabel = document.createElement("strong");
+      versionLabel.textContent = `Secret v${secretVersion.version}`;
+      const stateBadge = document.createElement("span");
+      const presentation = secretStatePresentation(secretVersion.state);
+      setBadge(stateBadge, presentation.text, presentation.variant);
+      summary.append(versionLabel, stateBadge);
+      const metadata = document.createElement("p");
+      metadata.className = "wsk-help";
+      metadata.textContent = secretVersion.expiresAt
+        ? `失效时间：${formatDateTime(secretVersion.expiresAt)}`
+        : `创建时间：${formatDateTime(secretVersion.createdAt)}`;
+      row.append(summary, metadata);
+      if (
+        state.session?.canRotateSecrets
+        && secretVersion.state !== "revoked"
+      ) {
+        const revoke = document.createElement("button");
+        revoke.className = "wsk-button wsk-danger";
+        revoke.type = "button";
+        revoke.dataset.machineRevoke =
+          `${identity.identityId}:${secretVersion.version}`;
+        revoke.textContent = "撤销此版本";
+        revoke.addEventListener("click", () => {
+          requestElevatedAction(
+            () => openMachineRevoke(identity, secretVersion, revoke),
+            revoke,
+          );
+        });
+        row.append(revoke);
+      }
+      versions.append(row);
+    }
+    if (identity.secretVersions.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "wsk-help";
+      empty.textContent = "暂无 Secret 版本。";
+      versions.append(empty);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "gmk-machine-actions";
+    const edit = document.createElement("button");
+    edit.className = "wsk-button wsk-secondary";
+    edit.type = "button";
+    edit.dataset.machineEdit = identity.identityId;
+    edit.textContent = "编辑身份与范围";
+    edit.addEventListener("click", () => {
+      requestElevatedAction(
+        () => openMachineIdentityForm("edit", identity, edit),
+        edit,
+      );
+    });
+    actions.append(edit);
+    if (state.session?.canRotateSecrets) {
+      const validityLabel = document.createElement("label");
+      validityLabel.className = "wsk-label";
+      validityLabel.textContent = "旧版本过渡窗口";
+      const validity = document.createElement("select");
+      validity.className = "wsk-select";
+      validity.setAttribute("aria-label", `${identity.displayName} 旧版本过渡窗口`);
+      for (const [seconds, label] of [
+        [300, "5 分钟"],
+        [1_800, "30 分钟"],
+        [3_600, "1 小时"],
+        [86_400, "24 小时"],
+      ]) {
+        const option = document.createElement("option");
+        option.value = String(seconds);
+        option.textContent = label;
+        validity.append(option);
+      }
+      const rotate = document.createElement("button");
+      rotate.className = "wsk-button";
+      rotate.type = "button";
+      rotate.dataset.machineRotate = identity.identityId;
+      rotate.textContent = "轮换 Secret";
+      rotate.disabled = identity.status !== "enabled";
+      rotate.addEventListener("click", () => {
+        requestElevatedAction(
+          () => rotateMachineSecret(
+            identity,
+            Number(validity.value),
+            rotate,
+          ),
+          rotate,
+        );
+      });
+      actions.append(validityLabel, validity, rotate);
+    }
+
+    card.append(head, scopes, versions, actions);
+    return card;
+  }
+
+  function renderMachineIdentities() {
+    const allowed = Boolean(state.session?.canManageMachineIdentities);
+    elements.machineIdentitiesSection.hidden = !allowed;
+    if (!allowed) {
+      elements.machineIdentitiesList.replaceChildren();
+      elements.machineIdentitiesEmpty.hidden = true;
+      return;
+    }
+    const identities = [...state.machineIdentities].sort((left, right) => (
+      left.identityType.localeCompare(right.identityType, "en")
+      || left.identityId.localeCompare(right.identityId, "en")
+    ));
+    elements.machineIdentitiesList.replaceChildren(
+      ...identities.map(createMachineIdentityCard),
+    );
+    elements.machineIdentitiesList.hidden = identities.length === 0;
+    elements.machineIdentitiesEmpty.hidden = identities.length > 0;
+    elements.machineIdentityCreate.hidden =
+      !state.session?.canRotateSecrets;
+  }
+
+  function renderConfigurationAudit() {
+    elements.configurationAuditSection.hidden = !hasConfigurationAccess();
+    const records = state.configurationAudit;
+    elements.configurationAuditList.replaceChildren(...records.map((record) => {
+      const item = document.createElement("article");
+      item.className = "gmk-audit-item";
+      const head = document.createElement("div");
+      const action = document.createElement("strong");
+      action.textContent = record.action;
+      const kind = document.createElement("span");
+      kind.className = "wsk-badge";
+      kind.textContent = {
+        game_configuration: "游戏配置",
+        machine_identity: "机器身份",
+        secret: "Secret",
+      }[record.auditType];
+      head.append(action, kind);
+      const target = document.createElement("p");
+      target.textContent = [
+        record.gameId ? `游戏 ${record.gameId}` : null,
+        record.identityId ? `身份 ${record.identityId}` : null,
+        `结果 ${record.result}`,
+      ].filter(Boolean).join(" · ");
+      const metadata = document.createElement("p");
+      metadata.className = "wsk-help";
+      const versionText =
+        record.oldVersion === null && record.newVersion === null
+          ? ""
+          : ` · 版本 ${record.oldVersion ?? "—"} → ${record.newVersion ?? "—"}`;
+      metadata.textContent =
+        `${record.operatorId} · ${formatDateTime(record.createdAt)}`
+        + versionText;
+      item.append(head, target, metadata);
+      return item;
+    }));
+    elements.configurationAuditList.hidden = records.length === 0;
+    elements.configurationAuditEmpty.hidden = records.length > 0;
+  }
+
+  function renderConfiguration() {
+    elements.integrationLoading.hidden = true;
+    elements.integrationError.hidden = true;
+    elements.integrationContent.hidden = false;
+    renderIntegrationSettings();
+    if (state.session?.canManageIntegrations) {
+      renderConfigurationCompleteness();
+    }
+    renderMachineIdentities();
+    renderConfigurationAudit();
+    setConfigurationFormDisabled(false);
+  }
+
+  async function loadConfiguration({ focusError = false } = {}) {
+    if (!hasConfigurationAccess()) {
+      return;
+    }
+    const gameId = state.configurationGameId;
+    const version = configurationRequests.begin();
+    const authGeneration = state.authGeneration;
+    const generation = ++state.configurationGeneration;
+    elements.integrationContent.hidden = true;
+    elements.integrationError.hidden = true;
+    elements.integrationLoading.hidden = false;
+    elements.integrationRefresh.disabled = true;
+    try {
+      const [
+        integration,
+        directorySettings,
+        serverResult,
+        identities,
+        audit,
+      ] = await Promise.all([
+        state.session.canManageIntegrations && gameId
+          ? api.getGameIntegration(gameId)
+          : null,
+        state.session.canManageIntegrations && gameId
+          ? api.getDirectorySettings(gameId)
+          : null,
+        state.session.canManageIntegrations && gameId
+          ? api.listGameServers(gameId)
+          : null,
+        state.session.canManageMachineIdentities
+          ? api.listMachineIdentities()
+          : [],
+        api.listConfigurationAudit(gameId, 50),
+      ]);
+      if (
+        !configurationRequests.isCurrent(version)
+        || generation !== state.configurationGeneration
+        || authGeneration !== state.authGeneration
+        || !hasConfigurationAccess()
+      ) {
+        return;
+      }
+      state.integration = integration;
+      state.directorySettings = directorySettings;
+      state.configurationServers = serverResult?.servers ?? [];
+      state.machineIdentities = identities;
+      state.configurationAudit = audit;
+      state.configurationLoaded = true;
+      touchSessionActivity();
+      renderConfiguration();
+    } catch (error) {
+      if (
+        !configurationRequests.isCurrent(version)
+        || generation !== state.configurationGeneration
+        || authGeneration !== state.authGeneration
+      ) {
+        return;
+      }
+      elements.integrationLoading.hidden = true;
+      elements.integrationContent.hidden = true;
+      if (error instanceof AdminApiError && error.status === 401) {
+        clearSensitiveState();
+        becomeAnonymous("管理员会话已过期，请重新登录。");
+        return;
+      }
+      if (error instanceof AdminApiError && error.status === 403) {
+        clearSensitiveState();
+        await refreshPermissions();
+        return;
+      }
+      if (error instanceof AdminApiError && error.status === 404) {
+        state.managedGamesLoaded = false;
+        state.configurationGameId = null;
+        populateConfigurationGames();
+      }
+      elements.integrationErrorMessage.textContent =
+        describeApiError(error, "configuration");
+      elements.integrationError.hidden = false;
+      if (focusError) {
+        elements.integrationError.focus();
+      }
+    } finally {
+      if (
+        configurationRequests.isCurrent(version)
+        && generation === state.configurationGeneration
+      ) {
+        elements.integrationRefresh.disabled = false;
+      }
+    }
+  }
+
+  async function prepareConfigurationPage() {
+    if (!hasConfigurationAccess()) {
+      return;
+    }
+    if (state.session.canManageGames && !state.managedGamesLoaded) {
+      const authGeneration = state.authGeneration;
+      try {
+        state.managedGames = await api.listGames();
+        if (
+          authGeneration !== state.authGeneration
+          || !hasConfigurationAccess()
+        ) {
+          return;
+        }
+        state.managedGamesLoaded = true;
+      } catch (error) {
+        if (error instanceof AdminApiError && error.status === 401) {
+          becomeAnonymous("管理员会话已过期，请重新登录。");
+          return;
+        }
+        if (error instanceof AdminApiError && error.status === 403) {
+          await refreshPermissions();
+          return;
+        }
+        elements.integrationLoading.hidden = true;
+        elements.integrationErrorMessage.textContent =
+          describeApiError(error, "configuration");
+        elements.integrationError.hidden = false;
+        return;
+      }
+    }
+    populateConfigurationGames();
+    await loadConfiguration();
+  }
+
   function hideAccountPanels() {
     elements.accountEmpty.hidden = true;
     elements.accountLoading.hidden = true;
@@ -1301,6 +2924,7 @@ export function bootstrapAdminConsole({
     sessionRequests.invalidate();
     gameRequests.invalidate();
     serverRequests.invalidate();
+    configurationRequests.invalidate();
     clearExpiryTimer();
     state.idleExpiresAt = null;
     state.session = null;
@@ -1318,6 +2942,7 @@ export function bootstrapAdminConsole({
     state.gameSubmitting = false;
     state.gameOpener = null;
     state.serverGame = null;
+    state.directoryRevision = null;
     state.managedServers = [];
     state.managedServersLoaded = false;
     state.serverFormMode = null;
@@ -1326,6 +2951,7 @@ export function bootstrapAdminConsole({
     state.serverDialogOpener = null;
     state.serverFormOpener = null;
     state.serverDialogGeneration += 1;
+    clearConfigurationState();
     state.logoutSubmitting = false;
     elements.sessionTools.hidden = true;
     elements.gameSelect.replaceChildren();
@@ -1333,7 +2959,11 @@ export function bootstrapAdminConsole({
     elements.selectedGameLabel.textContent = "";
     elements.gameStatusBadge.textContent = "";
     elements.accountsGamesLink.hidden = true;
+    elements.accountsIntegrationLink.hidden = true;
     elements.gamesAccountsLink.hidden = false;
+    elements.gamesIntegrationLink.hidden = true;
+    elements.integrationAccountsLink.hidden = true;
+    elements.integrationGamesLink.hidden = true;
     elements.gamesList.replaceChildren();
     elements.gamesList.hidden = true;
     elements.gamesLoading.hidden = true;
@@ -1762,7 +3392,7 @@ export function bootstrapAdminConsole({
     elements.serverSummary.textContent = "正在读取区服…";
     elements.serversErrorMessage.textContent = "";
     try {
-      const servers = await api.listGameServers(gameId);
+      const result = await api.listGameServers(gameId);
       if (
         !serverRequests.isCurrent(requestVersion)
         || dialogGeneration !== state.serverDialogGeneration
@@ -1772,7 +3402,8 @@ export function bootstrapAdminConsole({
       ) {
         return;
       }
-      state.managedServers = servers;
+      state.directoryRevision = result.directoryRevision;
+      state.managedServers = result.servers;
       state.managedServersLoaded = true;
       touchSessionActivity();
       renderManagedServers();
@@ -1817,6 +3448,7 @@ export function bootstrapAdminConsole({
     serverRequests.invalidate();
     state.serverDialogGeneration += 1;
     state.serverGame = game;
+    state.directoryRevision = null;
     state.managedServers = [];
     state.managedServersLoaded = false;
     state.serverFormMode = null;
@@ -2120,6 +3752,7 @@ export function bootstrapAdminConsole({
     }
 
     const input = {
+      directoryRevision: state.directoryRevision,
       ...(creating ? { serverId } : {}),
       name,
       tag,
@@ -2137,7 +3770,7 @@ export function bootstrapAdminConsole({
     const dialogGeneration = state.serverDialogGeneration;
     const authGeneration = state.authGeneration;
     try {
-      const server = creating
+      const result = creating
         ? await api.createGameServer(game.gameId, input)
         : await api.updateGameServer(game.gameId, serverId, input);
       if (
@@ -2149,6 +3782,8 @@ export function bootstrapAdminConsole({
         return;
       }
       touchSessionActivity();
+      state.directoryRevision = result.directoryRevision;
+      const server = result.server;
       upsertManagedServer(server);
       setServerFormBusy(false);
       hideServerEditor();
@@ -2203,11 +3838,878 @@ export function bootstrapAdminConsole({
     }
   }
 
+  function requestElevatedAction(action, opener = null) {
+    if (
+      typeof action !== "function"
+      || !hasConfigurationAccess()
+    ) {
+      return;
+    }
+    if (hasRecentAuthentication()) {
+      void action();
+      return;
+    }
+    state.elevatedAction = action;
+    state.elevatedActionOpener = opener ?? document.activeElement;
+    resetSecretField(
+      elements.reauthenticatePassword,
+      elements.reauthenticatePasswordToggle,
+    );
+    elements.reauthenticateError.hidden = true;
+    elements.reauthenticateErrorMessage.textContent = "";
+    elements.reauthenticateDialog.showModal();
+    window.queueMicrotask(() => elements.reauthenticatePassword.focus());
+  }
+
+  function setReauthenticationBusy(busy) {
+    state.reauthenticationSubmitting = busy;
+    elements.reauthenticatePassword.disabled = busy;
+    elements.reauthenticatePasswordToggle.disabled = busy;
+    elements.reauthenticateClose.disabled = busy;
+    elements.reauthenticateCancel.disabled = busy;
+    setButtonBusy(elements.reauthenticateSubmit, busy, {
+      idleLabel: "重新认证",
+      busyLabel: "正在验证…",
+    });
+  }
+
+  async function submitReauthentication(event) {
+    event.preventDefault();
+    if (state.reauthenticationSubmitting || !state.session) {
+      return;
+    }
+    elements.reauthenticatePassword.setCustomValidity(
+      isValidAdminPasswordInput(elements.reauthenticatePassword.value)
+        ? ""
+        : "密码必须为 12–256 个 Unicode 字符，且不超过 1024 字节。",
+    );
+    if (!elements.reauthenticateForm.reportValidity()) {
+      return;
+    }
+    elements.reauthenticatePassword.setCustomValidity("");
+    const action = state.elevatedAction;
+    const password = elements.reauthenticatePassword.value;
+    const authGeneration = state.authGeneration;
+    elements.reauthenticateError.hidden = true;
+    setReauthenticationBusy(true);
+    try {
+      await api.reauthenticate(password);
+      const session = await api.session();
+      if (
+        authGeneration !== state.authGeneration
+        || !state.session
+      ) {
+        return;
+      }
+      closeReauthenticationDialog({ clearAction: false });
+      state.elevatedAction = null;
+      state.elevatedActionOpener = null;
+      if (!applySession(session, { focus: false })) {
+        return;
+      }
+      if (!hasRecentAuthentication()) {
+        throw new AdminApiError("重新认证状态未生效", {
+          code: "ELEVATION_NOT_ACTIVE",
+        });
+      }
+      if (typeof action === "function") {
+        await action();
+      }
+    } catch (error) {
+      if (authGeneration !== state.authGeneration || !state.session) {
+        return;
+      }
+      if (error instanceof AdminApiError && error.status === 401) {
+        clearSensitiveState();
+        becomeAnonymous("管理员会话已过期，请重新登录。");
+        return;
+      }
+      if (error instanceof AdminApiError && error.status === 403) {
+        clearSensitiveState();
+        await refreshPermissions();
+        return;
+      }
+      elements.reauthenticateErrorMessage.textContent =
+        describeApiError(error, "reauthentication");
+      elements.reauthenticateError.hidden = false;
+      elements.reauthenticateError.focus();
+    } finally {
+      resetSecretField(
+        elements.reauthenticatePassword,
+        elements.reauthenticatePasswordToggle,
+      );
+      if (elements.reauthenticateDialog.open) {
+        setReauthenticationBusy(false);
+      } else {
+        state.reauthenticationSubmitting = false;
+      }
+    }
+  }
+
+  function integrationNumber(element, { integer = false } = {}) {
+    const value = element.valueAsNumber;
+    return integer ? Math.trunc(value) : value;
+  }
+
+  function integrationInput() {
+    const appId = elements.integrationWechatAppId.value.trim();
+    const integration = state.integration;
+    return {
+      wechatAppId: appId.length === 0 ? null : appId,
+      wechatEndpoint: elements.integrationWechatEndpoint.value.trim(),
+      wechatTimeoutMs: integrationNumber(
+        elements.integrationWechatTimeout,
+        { integer: true },
+      ),
+      wechatBreakerThreshold: integrationNumber(
+        elements.integrationBreakerThreshold,
+        { integer: true },
+      ),
+      wechatBreakerOpenMs: integrationNumber(
+        elements.integrationBreakerOpen,
+        { integer: true },
+      ),
+      sessionTtlSeconds: integrationNumber(
+        elements.integrationSessionTtl,
+        { integer: true },
+      ),
+      loginRateCapacity: integrationNumber(
+        elements.integrationLoginCapacity,
+      ),
+      loginRateRefillPerSecond: integrationNumber(
+        elements.integrationLoginRefill,
+      ),
+      adminRateCapacity: integrationNumber(
+        elements.integrationAdminCapacity,
+      ),
+      adminRateRefillPerSecond: integrationNumber(
+        elements.integrationAdminRefill,
+      ),
+      revision: integration.revision,
+    };
+  }
+
+  async function handleConfigurationWriteError(
+    error,
+    context,
+    { close = null, unknownStatusFirst = false } = {},
+  ) {
+    if (error instanceof AdminApiError && error.status === 401) {
+      clearSensitiveState();
+      becomeAnonymous("管理员会话已过期，请重新登录。");
+      return true;
+    }
+    if (error instanceof AdminApiError && error.status === 403) {
+      clearSensitiveState();
+      close?.();
+      await refreshPermissions();
+      return true;
+    }
+    if (
+      error instanceof AdminApiError
+      && (error.status === 404 || error.status === 409)
+    ) {
+      clearSensitiveState();
+      close?.();
+      await loadConfiguration();
+      toast(describeApiError(error, context), "warning");
+      return true;
+    }
+    if (
+      !unknownStatusFirst
+      && error instanceof AdminApiError
+      && (error.status === 0 || error.status >= 500)
+    ) {
+      clearWechatSecretInput();
+      await loadConfiguration();
+      toast(
+        "结果暂时未知，已先刷新服务器状态；请核对后再决定是否重试。",
+        "warning",
+      );
+      return true;
+    }
+    return false;
+  }
+
+  async function submitIntegration(event) {
+    event.preventDefault();
+    if (
+      state.configurationSubmitting
+      || !state.session?.canManageIntegrations
+      || !state.integration
+      || !state.configurationGameId
+    ) {
+      return;
+    }
+    try {
+      requiredWechatEndpoint(
+        elements.integrationWechatEndpoint.value.trim(),
+        "微信接口地址",
+      );
+      elements.integrationWechatEndpoint.setCustomValidity("");
+    } catch {
+      elements.integrationWechatEndpoint.setCustomValidity(
+        "仅允许微信官方接口，或非生产环境的 loopback 地址。",
+      );
+    }
+    if (!elements.integrationForm.reportValidity()) {
+      return;
+    }
+    elements.integrationFormError.hidden = true;
+    state.configurationSubmitting = true;
+    setConfigurationFormDisabled(true);
+    setButtonBusy(elements.integrationSave, true, {
+      idleLabel: "保存运行参数",
+      busyLabel: "正在保存…",
+    });
+    const authGeneration = state.authGeneration;
+    const gameId = state.configurationGameId;
+    try {
+      const integration = await api.updateGameIntegration(
+        gameId,
+        integrationInput(),
+      );
+      if (
+        authGeneration !== state.authGeneration
+        || gameId !== state.configurationGameId
+      ) {
+        return;
+      }
+      state.integration = integration;
+      touchSessionActivity();
+      renderConfiguration();
+      toast("接入参数已保存；微信凭据尚需实际调用验证。");
+      void reloadConfigurationAudit();
+    } catch (error) {
+      if (
+        authGeneration !== state.authGeneration
+        || gameId !== state.configurationGameId
+      ) {
+        return;
+      }
+      if (await handleConfigurationWriteError(error, "integration-update")) {
+        return;
+      }
+      elements.integrationFormErrorMessage.textContent =
+        describeApiError(error, "integration-update");
+      elements.integrationFormError.hidden = false;
+      elements.integrationFormError.focus();
+    } finally {
+      state.configurationSubmitting = false;
+      setButtonBusy(elements.integrationSave, false, {
+        idleLabel: "保存运行参数",
+        busyLabel: "正在保存…",
+      });
+      if (state.session && state.configurationLoaded) {
+        setConfigurationFormDisabled(false);
+      }
+    }
+  }
+
+  async function submitDirectorySettings() {
+    if (
+      state.configurationSubmitting
+      || !state.session?.canManageIntegrations
+      || !state.directorySettings
+      || !state.configurationGameId
+    ) {
+      return;
+    }
+    state.configurationSubmitting = true;
+    setConfigurationFormDisabled(true);
+    const authGeneration = state.authGeneration;
+    const gameId = state.configurationGameId;
+    try {
+      state.directorySettings = await api.updateDirectorySettings(gameId, {
+        isOps: elements.directoryIsOps.checked,
+        revision: state.directorySettings.revision,
+      });
+      if (
+        authGeneration !== state.authGeneration
+        || gameId !== state.configurationGameId
+      ) {
+        return;
+      }
+      touchSessionActivity();
+      renderConfiguration();
+      toast("运营目录设置已保存。");
+      void reloadConfigurationAudit();
+    } catch (error) {
+      if (
+        authGeneration !== state.authGeneration
+        || gameId !== state.configurationGameId
+      ) {
+        return;
+      }
+      if (await handleConfigurationWriteError(error, "directory-update")) {
+        return;
+      }
+      elements.integrationFormErrorMessage.textContent =
+        describeApiError(error, "directory-update");
+      elements.integrationFormError.hidden = false;
+      elements.integrationFormError.focus();
+    } finally {
+      state.configurationSubmitting = false;
+      if (state.session && state.configurationLoaded) {
+        setConfigurationFormDisabled(false);
+      }
+    }
+  }
+
+  async function reloadConfigurationAudit() {
+    if (!hasConfigurationAccess()) {
+      return;
+    }
+    try {
+      const records = await api.listConfigurationAudit(
+        state.configurationGameId,
+        50,
+      );
+      if (!hasConfigurationAccess()) {
+        return;
+      }
+      state.configurationAudit = records;
+      renderConfigurationAudit();
+    } catch {
+      // The primary mutation already succeeded. A later refresh can recover
+      // this non-sensitive audit panel without repeating the write.
+    }
+  }
+
+  function openWechatSecretDialog() {
+    if (
+      !state.session?.canManageIntegrations
+      || !state.session.canRotateSecrets
+      || !state.integration
+    ) {
+      return;
+    }
+    clearWechatSecretInput();
+    elements.wechatSecretError.hidden = true;
+    elements.wechatSecretErrorMessage.textContent = "";
+    elements.wechatSecretDialog.showModal();
+    window.queueMicrotask(() => elements.wechatSecretInput.focus());
+  }
+
+  function setWechatSecretBusy(busy) {
+    state.wechatSecretSubmitting = busy;
+    elements.wechatSecretInput.disabled = busy;
+    elements.wechatSecretToggle.disabled = busy;
+    elements.wechatSecretClose.disabled = busy;
+    elements.wechatSecretCancel.disabled = busy;
+    setButtonBusy(elements.wechatSecretSubmit, busy, {
+      idleLabel: "确认替换",
+      busyLabel: "正在保存…",
+    });
+  }
+
+  async function submitWechatSecret(event) {
+    event.preventDefault();
+    if (
+      state.wechatSecretSubmitting
+      || !state.session?.canManageIntegrations
+      || !state.session.canRotateSecrets
+      || !state.integration
+      || !state.configurationGameId
+    ) {
+      clearWechatSecretInput();
+      return;
+    }
+    let submittedSecret = elements.wechatSecretInput.value;
+    elements.wechatSecretInput.setCustomValidity(
+      submittedSecret.length > 0 && submittedSecret.length <= 512
+        ? ""
+        : "AppSecret 必须为 1–512 个字符。",
+    );
+    if (!elements.wechatSecretForm.reportValidity()) {
+      submittedSecret = "";
+      clearWechatSecretInput();
+      return;
+    }
+    const gameId = state.configurationGameId;
+    const revision = state.integration.revision;
+    const operationId = createConfigurationOperationId(randomUUID);
+    const authGeneration = state.authGeneration;
+    elements.wechatSecretError.hidden = true;
+    setWechatSecretBusy(true);
+    try {
+      const result = await api.replaceWechatAppSecret(gameId, {
+        wechatAppSecret: submittedSecret,
+        revision,
+        operationId,
+      });
+      if (
+        authGeneration !== state.authGeneration
+        || gameId !== state.configurationGameId
+      ) {
+        return;
+      }
+      state.integration = Object.freeze({
+        ...state.integration,
+        configurationState: result.configurationState,
+        wechatSecret: result.wechatSecret,
+        revision: result.revision,
+        loadedRevision: result.loadedRevision,
+      });
+      touchSessionActivity();
+      closeWechatSecretDialog();
+      renderConfiguration();
+      toast("AppSecret 已安全保存；尚未声明微信侧验证成功。");
+      void reloadConfigurationAudit();
+    } catch (error) {
+      if (
+        authGeneration !== state.authGeneration
+        || gameId !== state.configurationGameId
+      ) {
+        return;
+      }
+      if (
+        await handleConfigurationWriteError(
+          error,
+          "wechat-secret",
+          { close: closeWechatSecretDialog },
+        )
+      ) {
+        return;
+      }
+      setBadge(
+        elements.wechatSecretStatusBadge,
+        "替换失败",
+        "danger",
+      );
+      elements.wechatSecretErrorMessage.textContent =
+        describeApiError(error, "wechat-secret");
+      elements.wechatSecretError.hidden = false;
+      elements.wechatSecretError.focus();
+    } finally {
+      submittedSecret = "";
+      clearWechatSecretInput();
+      if (elements.wechatSecretDialog.open) {
+        setWechatSecretBusy(false);
+      } else {
+        state.wechatSecretSubmitting = false;
+      }
+    }
+  }
+
+  function renderMachineScopeOptions(selectedGameIds = []) {
+    const selected = new Set(selectedGameIds);
+    elements.machineScopeOptions.replaceChildren(
+      ...availableConfigurationGames().map((game) => {
+        const label = document.createElement("label");
+        label.className = "gmk-confirm-label";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.value = game.gameId;
+        checkbox.dataset.machineScope = game.gameId;
+        checkbox.checked = selected.has(game.gameId);
+        label.append(checkbox, `${game.name} · ${game.gameId}`);
+        return label;
+      }),
+    );
+  }
+
+  function openMachineIdentityForm(mode, identity = null, opener = null) {
+    if (
+      !state.session?.canManageMachineIdentities
+      || (
+        mode === "create"
+        && !state.session.canRotateSecrets
+      )
+      || !["create", "edit"].includes(mode)
+    ) {
+      return;
+    }
+    state.machineFormMode = mode;
+    state.editingMachineIdentity = identity;
+    state.machineIdentityOpener = opener ?? document.activeElement;
+    elements.machineIdentityForm.reset();
+    elements.machineIdentityError.hidden = true;
+    elements.machineIdentityErrorMessage.textContent = "";
+    const creating = mode === "create";
+    elements.machineIdentityDialogKind.textContent = creating
+      ? "CREATE MACHINE IDENTITY"
+      : "EDIT MACHINE IDENTITY";
+    elements.machineIdentityDialogTitle.textContent = creating
+      ? "新增机器身份"
+      : "编辑机器身份";
+    elements.machineIdentityId.value = identity?.identityId ?? "";
+    elements.machineIdentityId.readOnly = !creating;
+    elements.machineIdentityType.value = identity?.identityType ?? "service";
+    elements.machineIdentityType.disabled = !creating;
+    elements.machineIdentityName.value = identity?.displayName ?? "";
+    elements.machineIdentityStatus.value = identity?.status ?? "enabled";
+    elements.machineIdentityStatus.disabled = creating;
+    renderMachineScopeOptions(identity?.gameIds ?? []);
+    elements.machineIdentitySubmit.querySelector(
+      "[data-button-label]",
+    ).textContent = creating ? "创建并生成 Secret" : "保存修改";
+    elements.machineIdentityDialog.showModal();
+    window.queueMicrotask(() => (
+      creating ? elements.machineIdentityId : elements.machineIdentityName
+    ).focus());
+  }
+
+  function setMachineIdentityBusy(busy) {
+    state.machineIdentitySubmitting = busy;
+    for (const control of elements.machineIdentityForm.elements) {
+      control.disabled = busy;
+    }
+    elements.machineIdentityClose.disabled = busy;
+    elements.machineIdentityCancel.disabled = busy;
+    setButtonBusy(elements.machineIdentitySubmit, busy, {
+      idleLabel:
+        state.machineFormMode === "create"
+          ? "创建并生成 Secret"
+          : "保存修改",
+      busyLabel: "正在保存…",
+    });
+    if (!busy) {
+      elements.machineIdentityId.disabled = false;
+      elements.machineIdentityType.disabled =
+        state.machineFormMode !== "create";
+      elements.machineIdentityStatus.disabled =
+        state.machineFormMode === "create";
+    }
+  }
+
+  function selectedMachineScopes() {
+    return [...elements.machineScopeOptions.querySelectorAll(
+      "[data-machine-scope]",
+    )].filter((checkbox) => checkbox.checked).map((checkbox) => checkbox.value);
+  }
+
+  async function submitMachineIdentity(event) {
+    event.preventDefault();
+    if (
+      state.machineIdentitySubmitting
+      || !state.session?.canManageMachineIdentities
+      || !state.machineFormMode
+    ) {
+      return;
+    }
+    const creating = state.machineFormMode === "create";
+    const identityId = elements.machineIdentityId.value.trim();
+    const displayName = elements.machineIdentityName.value.trim();
+    elements.machineIdentityId.value = identityId;
+    elements.machineIdentityName.value = displayName;
+    elements.machineIdentityId.setCustomValidity(
+      MACHINE_ID_PATTERN.test(identityId) ? "" : "请输入合法的身份 ID。",
+    );
+    elements.machineIdentityName.setCustomValidity(
+      [...displayName].length >= 1 && [...displayName].length <= 128
+        ? ""
+        : "显示名称必须为 1–128 个字符。",
+    );
+    if (!elements.machineIdentityForm.reportValidity()) {
+      return;
+    }
+    const operationId = creating
+      ? createConfigurationOperationId(randomUUID)
+      : null;
+    const authGeneration = state.authGeneration;
+    elements.machineIdentityError.hidden = true;
+    setMachineIdentityBusy(true);
+    try {
+      if (creating) {
+        const result = await api.createMachineIdentity({
+          identityId,
+          identityType: elements.machineIdentityType.value,
+          displayName,
+          gameIds: selectedMachineScopes(),
+          operationId,
+        });
+        if (
+          authGeneration !== state.authGeneration
+          || !state.session?.canManageMachineIdentities
+        ) {
+          return;
+        }
+        upsertMachineIdentity(result.identity);
+        closeMachineIdentityDialog();
+        if (typeof result.secret === "string") {
+          openOneTimeSecret(
+            result.secret,
+            `${result.identity.displayName} · Secret v${result.version}`,
+          );
+        } else {
+          toast(
+            "身份已创建，但一次性 Secret 已无法恢复；请按需重新轮换。",
+            "warning",
+          );
+        }
+      } else {
+        const identity = state.editingMachineIdentity;
+        const result = await api.updateMachineIdentity(identityId, {
+          displayName,
+          status: elements.machineIdentityStatus.value,
+          gameIds: selectedMachineScopes(),
+          revision: identity.revision,
+        });
+        if (
+          authGeneration !== state.authGeneration
+          || !state.session?.canManageMachineIdentities
+        ) {
+          return;
+        }
+        upsertMachineIdentity(result);
+        closeMachineIdentityDialog();
+        toast(`机器身份 ${identityId} 已更新。`);
+      }
+      touchSessionActivity();
+      void reloadConfigurationAudit();
+    } catch (error) {
+      if (authGeneration !== state.authGeneration || !state.session) {
+        return;
+      }
+      if (
+        creating
+        && error instanceof AdminApiError
+        && (error.status === 0 || error.status >= 500)
+      ) {
+        closeMachineIdentityDialog();
+        await recoverMachineOperation(identityId, operationId);
+        return;
+      }
+      if (
+        await handleConfigurationWriteError(
+          error,
+          creating ? "machine-create" : "machine-update",
+          { close: closeMachineIdentityDialog, unknownStatusFirst: creating },
+        )
+      ) {
+        return;
+      }
+      elements.machineIdentityErrorMessage.textContent =
+        describeApiError(
+          error,
+          creating ? "machine-create" : "machine-update",
+        );
+      elements.machineIdentityError.hidden = false;
+      elements.machineIdentityError.focus();
+    } finally {
+      if (elements.machineIdentityDialog.open) {
+        setMachineIdentityBusy(false);
+      } else {
+        state.machineIdentitySubmitting = false;
+      }
+    }
+  }
+
+  function openOneTimeSecret(secret, context) {
+    closeOneTimeSecretDialog();
+    state.oneTimeSecret = secret;
+    elements.oneTimeSecretValue.value = secret;
+    elements.oneTimeSecretValue.type = "password";
+    elements.oneTimeSecretContext.textContent = context;
+    elements.oneTimeSecretConfirm.checked = false;
+    elements.oneTimeSecretClose.disabled = true;
+    elements.oneTimeSecretDialog.showModal();
+    window.queueMicrotask(() => elements.oneTimeSecretToggle.focus());
+  }
+
+  async function recoverMachineOperation(identityId, operationId) {
+    try {
+      const status = await api.machineSecretOperationStatus(
+        identityId,
+        operationId,
+      );
+      await loadConfiguration();
+      toast(
+        status.deliveryLost
+          ? "操作已完成，但一次性 Secret 已无法恢复；请重新轮换。"
+          : "操作已完成；已刷新状态，请核对后继续。",
+        "warning",
+      );
+    } catch (statusError) {
+      if (
+        statusError instanceof AdminApiError
+        && statusError.status === 401
+      ) {
+        clearSensitiveState();
+        becomeAnonymous("管理员会话已过期，请重新登录。");
+        return;
+      }
+      if (
+        statusError instanceof AdminApiError
+        && statusError.status === 403
+      ) {
+        clearSensitiveState();
+        await refreshPermissions();
+        return;
+      }
+      await loadConfiguration();
+      toast(
+        "操作结果未知；已先查询并刷新状态，未自动重复生成 Secret。",
+        "warning",
+      );
+    }
+  }
+
+  async function rotateMachineSecret(identity, previousValiditySeconds) {
+    if (
+      !state.session?.canManageMachineIdentities
+      || !state.session.canRotateSecrets
+    ) {
+      return;
+    }
+    const operationId = createConfigurationOperationId(randomUUID);
+    const authGeneration = state.authGeneration;
+    try {
+      const result = await api.rotateMachineSecret(identity.identityId, {
+        operationId,
+        revision: identity.revision,
+        previousValiditySeconds,
+      });
+      if (authGeneration !== state.authGeneration || !state.session) {
+        return;
+      }
+      upsertMachineIdentity(result.identity);
+      touchSessionActivity();
+      if (typeof result.secret === "string") {
+        openOneTimeSecret(
+          result.secret,
+          `${result.identity.displayName} · Secret v${result.version}`,
+        );
+      } else {
+        toast(
+          "轮换已完成，但一次性 Secret 已无法恢复；请重新轮换。",
+          "warning",
+        );
+      }
+      void reloadConfigurationAudit();
+    } catch (error) {
+      if (authGeneration !== state.authGeneration || !state.session) {
+        return;
+      }
+      if (
+        error instanceof AdminApiError
+        && (error.status === 0 || error.status >= 500)
+      ) {
+        await recoverMachineOperation(identity.identityId, operationId);
+        return;
+      }
+      if (
+        await handleConfigurationWriteError(
+          error,
+          "machine-rotate",
+          { unknownStatusFirst: true },
+        )
+      ) {
+        return;
+      }
+      toast(describeApiError(error, "machine-rotate"), "danger");
+    }
+  }
+
+  function openMachineRevoke(identity, secretVersion, opener) {
+    state.machineRevokeTarget = { identity, secretVersion };
+    elements.machineRevokeTarget.textContent =
+      `${identity.displayName}（${identity.identityId}）/ Secret v`
+      + `${secretVersion.version}`;
+    elements.machineRevokeReason.value = "";
+    elements.machineRevokeError.hidden = true;
+    state.machineIdentityOpener = opener;
+    elements.machineRevokeDialog.showModal();
+    window.queueMicrotask(() => elements.machineRevokeReason.focus());
+  }
+
+  function setMachineRevokeBusy(busy) {
+    state.machineRevokeSubmitting = busy;
+    elements.machineRevokeReason.disabled = busy;
+    elements.machineRevokeClose.disabled = busy;
+    elements.machineRevokeCancel.disabled = busy;
+    setButtonBusy(elements.machineRevokeSubmit, busy, {
+      idleLabel: "确认撤销",
+      busyLabel: "正在撤销…",
+    });
+  }
+
+  async function submitMachineRevoke(event) {
+    event.preventDefault();
+    const target = state.machineRevokeTarget;
+    if (
+      state.machineRevokeSubmitting
+      || !target
+      || !state.session?.canManageMachineIdentities
+      || !state.session.canRotateSecrets
+    ) {
+      return;
+    }
+    const reason = elements.machineRevokeReason.value.trim();
+    elements.machineRevokeReason.value = reason;
+    if (!elements.machineRevokeForm.reportValidity()) {
+      return;
+    }
+    const operationId = createConfigurationOperationId(randomUUID);
+    const authGeneration = state.authGeneration;
+    setMachineRevokeBusy(true);
+    try {
+      const result = await api.revokeMachineSecret(
+        target.identity.identityId,
+        target.secretVersion.version,
+        {
+          operationId,
+          revision: target.identity.revision,
+          reason,
+        },
+      );
+      if (authGeneration !== state.authGeneration || !state.session) {
+        return;
+      }
+      closeMachineRevokeDialog();
+      await loadConfiguration();
+      touchSessionActivity();
+      toast(
+        `机器 Secret v${result.version} 已撤销。`,
+      );
+    } catch (error) {
+      if (authGeneration !== state.authGeneration || !state.session) {
+        return;
+      }
+      if (
+        error instanceof AdminApiError
+        && (error.status === 0 || error.status >= 500)
+      ) {
+        closeMachineRevokeDialog();
+        await recoverMachineOperation(
+          target.identity.identityId,
+          operationId,
+        );
+        return;
+      }
+      if (
+        await handleConfigurationWriteError(
+          error,
+          "machine-revoke",
+          { close: closeMachineRevokeDialog, unknownStatusFirst: true },
+        )
+      ) {
+        return;
+      }
+      elements.machineRevokeErrorMessage.textContent =
+        describeApiError(error, "machine-revoke");
+      elements.machineRevokeError.hidden = false;
+      elements.machineRevokeError.focus();
+    } finally {
+      if (elements.machineRevokeDialog.open) {
+        setMachineRevokeBusy(false);
+      } else {
+        state.machineRevokeSubmitting = false;
+      }
+    }
+  }
+
   function routeAuthenticated({ focus = true } = {}) {
     const view = chooseAdminView(state.session, window.location.hash);
+    if (view !== "integration") {
+      clearSensitiveState();
+    }
     showView(view, { focus });
     if (view === "games") {
       void loadManagedGames();
+    } else if (view === "integration") {
+      void prepareConfigurationPage();
     }
   }
 
@@ -2578,7 +5080,13 @@ export function bootstrapAdminConsole({
     elements.operatorName.textContent = session.operator.displayName;
     elements.sessionTools.hidden = false;
     elements.accountsGamesLink.hidden = !session.canManageGames;
+    elements.accountsIntegrationLink.hidden =
+      !hasConfigurationAccess(session);
     elements.gamesAccountsLink.hidden = session.games.length === 0;
+    elements.gamesIntegrationLink.hidden =
+      !hasConfigurationAccess(session);
+    elements.integrationAccountsLink.hidden = session.games.length === 0;
+    elements.integrationGamesLink.hidden = !session.canManageGames;
     if (!session.canManageGames) {
       gameRequests.invalidate();
       serverRequests.invalidate();
@@ -2587,6 +5095,11 @@ export function bootstrapAdminConsole({
       elements.gamesList.replaceChildren();
       closeGameDialog();
       closeServerDialog();
+    }
+    if (!hasConfigurationAccess(session)) {
+      clearConfigurationState();
+    } else {
+      state.configurationLoaded = false;
     }
     hideLoginError();
     populateGames();
@@ -3208,6 +5721,7 @@ export function bootstrapAdminConsole({
     const opener = state.serverDialogOpener;
     state.serverDialogGeneration += 1;
     state.serverGame = null;
+    state.directoryRevision = null;
     state.managedServers = [];
     state.managedServersLoaded = false;
     state.serverFormMode = null;
@@ -3238,6 +5752,277 @@ export function bootstrapAdminConsole({
     }
   });
 
+  elements.integrationGameSelect.addEventListener("change", () => {
+    clearSensitiveState();
+    state.configurationGameId =
+      elements.integrationGameSelect.value || null;
+    state.integration = null;
+    state.directorySettings = null;
+    state.configurationServers = [];
+    state.configurationLoaded = false;
+    void loadConfiguration();
+  });
+  elements.integrationRefresh.addEventListener("click", () => {
+    clearSensitiveState();
+    void loadConfiguration({ focusError: true });
+  });
+  elements.integrationRetry.addEventListener("click", () => {
+    void prepareConfigurationPage();
+  });
+  elements.integrationForm.addEventListener("submit", submitIntegration);
+  elements.directorySave.addEventListener(
+    "click",
+    () => void submitDirectorySettings(),
+  );
+  for (const input of elements.integrationForm.elements) {
+    input.addEventListener?.("input", () => {
+      input.setCustomValidity?.("");
+      elements.integrationFormError.hidden = true;
+    });
+  }
+
+  elements.wechatSecretReplace.addEventListener("click", () => {
+    requestElevatedAction(
+      () => openWechatSecretDialog(),
+      elements.wechatSecretReplace,
+    );
+  });
+  elements.wechatSecretForm.addEventListener("submit", submitWechatSecret);
+  elements.wechatSecretInput.addEventListener("input", () => {
+    elements.wechatSecretInput.setCustomValidity("");
+    elements.wechatSecretError.hidden = true;
+  });
+  elements.wechatSecretToggle.addEventListener("click", () => {
+    const visible = elements.wechatSecretInput.type === "text";
+    elements.wechatSecretInput.type = visible ? "password" : "text";
+    elements.wechatSecretToggle.setAttribute(
+      "aria-pressed",
+      String(!visible),
+    );
+    elements.wechatSecretToggle.setAttribute(
+      "aria-label",
+      visible ? "显示 AppSecret" : "隐藏 AppSecret",
+    );
+  });
+  for (const button of [
+    elements.wechatSecretClose,
+    elements.wechatSecretCancel,
+  ]) {
+    button.addEventListener("click", () => {
+      if (!state.wechatSecretSubmitting) {
+        closeWechatSecretDialog();
+      }
+    });
+  }
+  elements.wechatSecretDialog.addEventListener("cancel", (event) => {
+    if (state.wechatSecretSubmitting) {
+      event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    closeWechatSecretDialog();
+  });
+  elements.wechatSecretDialog.addEventListener("click", (event) => {
+    if (
+      event.target === elements.wechatSecretDialog
+      && !state.wechatSecretSubmitting
+    ) {
+      closeWechatSecretDialog();
+    }
+  });
+  elements.wechatSecretDialog.addEventListener("close", () => {
+    clearWechatSecretInput();
+    state.wechatSecretSubmitting = false;
+  });
+
+  elements.reauthenticateForm.addEventListener(
+    "submit",
+    submitReauthentication,
+  );
+  elements.reauthenticatePassword.addEventListener("input", () => {
+    elements.reauthenticatePassword.setCustomValidity("");
+    elements.reauthenticateError.hidden = true;
+  });
+  for (const button of [
+    elements.reauthenticateClose,
+    elements.reauthenticateCancel,
+  ]) {
+    button.addEventListener("click", () => {
+      if (!state.reauthenticationSubmitting) {
+        closeReauthenticationDialog();
+      }
+    });
+  }
+  elements.reauthenticateDialog.addEventListener("cancel", (event) => {
+    if (state.reauthenticationSubmitting) {
+      event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    closeReauthenticationDialog();
+  });
+  elements.reauthenticateDialog.addEventListener("click", (event) => {
+    if (
+      event.target === elements.reauthenticateDialog
+      && !state.reauthenticationSubmitting
+    ) {
+      closeReauthenticationDialog();
+    }
+  });
+  elements.reauthenticateDialog.addEventListener("close", () => {
+    resetSecretField(
+      elements.reauthenticatePassword,
+      elements.reauthenticatePasswordToggle,
+    );
+    state.reauthenticationSubmitting = false;
+  });
+
+  elements.machineIdentityCreate.addEventListener("click", () => {
+    requestElevatedAction(
+      () => openMachineIdentityForm(
+        "create",
+        null,
+        elements.machineIdentityCreate,
+      ),
+      elements.machineIdentityCreate,
+    );
+  });
+  elements.machineIdentityForm.addEventListener(
+    "submit",
+    submitMachineIdentity,
+  );
+  for (const input of [
+    elements.machineIdentityId,
+    elements.machineIdentityName,
+  ]) {
+    input.addEventListener("input", () => input.setCustomValidity(""));
+  }
+  for (const button of [
+    elements.machineIdentityClose,
+    elements.machineIdentityCancel,
+  ]) {
+    button.addEventListener("click", () => {
+      if (!state.machineIdentitySubmitting) {
+        closeMachineIdentityDialog();
+      }
+    });
+  }
+  elements.machineIdentityDialog.addEventListener("cancel", (event) => {
+    if (state.machineIdentitySubmitting) {
+      event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    closeMachineIdentityDialog();
+  });
+  elements.machineIdentityDialog.addEventListener("click", (event) => {
+    if (
+      event.target === elements.machineIdentityDialog
+      && !state.machineIdentitySubmitting
+    ) {
+      closeMachineIdentityDialog();
+    }
+  });
+  elements.machineIdentityDialog.addEventListener("close", () => {
+    if (elements.machineIdentityDialog.open) {
+      return;
+    }
+    const opener = state.machineIdentityOpener;
+    state.machineFormMode = null;
+    state.editingMachineIdentity = null;
+    state.machineIdentitySubmitting = false;
+    state.machineIdentityOpener = null;
+    elements.machineIdentityForm.reset();
+    elements.machineScopeOptions.replaceChildren();
+    elements.machineIdentityError.hidden = true;
+    elements.machineIdentityErrorMessage.textContent = "";
+    if (state.session && !elements.views.get("integration")?.hidden) {
+      window.queueMicrotask(() => opener?.focus());
+    }
+  });
+
+  elements.machineRevokeForm.addEventListener(
+    "submit",
+    submitMachineRevoke,
+  );
+  elements.machineRevokeReason.addEventListener("input", () => {
+    elements.machineRevokeError.hidden = true;
+  });
+  for (const button of [
+    elements.machineRevokeClose,
+    elements.machineRevokeCancel,
+  ]) {
+    button.addEventListener("click", () => {
+      if (!state.machineRevokeSubmitting) {
+        closeMachineRevokeDialog();
+      }
+    });
+  }
+  elements.machineRevokeDialog.addEventListener("cancel", (event) => {
+    if (state.machineRevokeSubmitting) {
+      event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    closeMachineRevokeDialog();
+  });
+  elements.machineRevokeDialog.addEventListener("click", (event) => {
+    if (
+      event.target === elements.machineRevokeDialog
+      && !state.machineRevokeSubmitting
+    ) {
+      closeMachineRevokeDialog();
+    }
+  });
+  elements.machineRevokeDialog.addEventListener("close", () => {
+    state.machineRevokeTarget = null;
+    state.machineRevokeSubmitting = false;
+    elements.machineRevokeReason.value = "";
+    elements.machineRevokeTarget.textContent = "";
+  });
+
+  elements.oneTimeSecretToggle.addEventListener("click", () => {
+    if (state.oneTimeSecret === null) {
+      return;
+    }
+    elements.oneTimeSecretValue.type = "text";
+    elements.oneTimeSecretToggle.setAttribute("aria-pressed", "true");
+    elements.oneTimeSecretToggle.textContent = "已显示";
+    elements.oneTimeSecretToggle.disabled = true;
+  });
+  elements.oneTimeSecretCopy.addEventListener("click", async () => {
+    if (state.oneTimeSecret === null) {
+      return;
+    }
+    try {
+      if (typeof window.navigator?.clipboard?.writeText === "function") {
+        await window.navigator.clipboard.writeText(state.oneTimeSecret);
+      } else {
+        elements.oneTimeSecretValue.select();
+        if (!document.execCommand?.("copy")) {
+          throw new Error("copy unavailable");
+        }
+      }
+      toast("一次性 Secret 已复制，请立即存入受控系统。");
+    } catch {
+      toast("无法自动复制，请手动保存一次性 Secret。", "warning");
+    }
+  });
+  elements.oneTimeSecretConfirm.addEventListener("change", () => {
+    elements.oneTimeSecretClose.disabled =
+      !elements.oneTimeSecretConfirm.checked;
+  });
+  elements.oneTimeSecretClose.addEventListener("click", () => {
+    if (elements.oneTimeSecretConfirm.checked) {
+      closeOneTimeSecretDialog();
+    }
+  });
+  elements.oneTimeSecretDialog.addEventListener(
+    "cancel",
+    (event) => event.preventDefault(),
+  );
+  elements.oneTimeSecretDialog.addEventListener("close", clearOneTimeSecret);
+
   for (const button of elements.logoutButtons) {
     button.addEventListener("click", () => void logout());
   }
@@ -3248,6 +6033,7 @@ export function bootstrapAdminConsole({
       routeAuthenticated();
     }
   });
+  window.addEventListener("pagehide", clearSensitiveState);
 
   void restoreSession();
   return Object.freeze({

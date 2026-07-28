@@ -302,6 +302,9 @@
               <a id="accounts-games-link" href="#games" hidden>
                 游戏项目
               </a>
+              <a id="accounts-integration-link" href="#integration" hidden>
+                接入配置
+              </a>
               <button class="gmk-nav-action" id="sidebar-logout" type="button">
                 退出登录
               </button>
@@ -469,6 +472,9 @@
               <a class="wsk-active" href="#games" aria-current="page">
                 游戏项目
               </a>
+              <a id="games-integration-link" href="#integration" hidden>
+                接入配置
+              </a>
               <button class="gmk-nav-action" id="games-sidebar-logout" type="button">
                 退出登录
               </button>
@@ -540,6 +546,401 @@
 
               <div class="gmk-game-grid" id="games-list" role="list" hidden></div>
             </section>
+          </div>
+        </div>
+      </section>
+
+      <section
+        class="wsk-page gmk-admin-view"
+        id="integration-view"
+        data-view="integration"
+        hidden
+      >
+        <div class="wsk-reference-shell">
+          <aside class="gmk-sidebar">
+            <nav class="wsk-reference-nav" aria-label="管理员导航">
+              <div class="wsk-reference-brand">
+                <strong>运营管理</strong>
+                <span>OPERATIONS</span>
+              </div>
+              <a id="integration-accounts-link" href="#accounts">账号管理</a>
+              <a id="integration-games-link" href="#games" hidden>游戏项目</a>
+              <a class="wsk-active" href="#integration" aria-current="page">
+                接入配置
+              </a>
+              <button
+                class="gmk-nav-action"
+                id="integration-sidebar-logout"
+                type="button"
+              >
+                退出登录
+              </button>
+            </nav>
+          </aside>
+
+          <div class="wsk-reference-content gmk-admin-content gmk-config-content">
+            <div class="wsk-page-head gmk-config-page-head">
+              <div>
+                <p class="wsk-panel-title">INTEGRATION CONTROL</p>
+                <h1 tabindex="-1">接入配置</h1>
+                <p>
+                  维护微信、运行参数和机器身份。Secret 只可替换或一次性领取。
+                </p>
+              </div>
+              <div class="gmk-config-toolbar">
+                <label class="wsk-label" for="integration-game-select">
+                  配置游戏
+                </label>
+                <div class="wsk-select-wrap">
+                  <select
+                    class="wsk-select"
+                    id="integration-game-select"
+                    aria-label="配置游戏"
+                  ></select>
+                  <svg class="wsk-icon" aria-hidden="true">
+                    <use href="#chevron"></use>
+                  </svg>
+                </div>
+                <button
+                  class="wsk-button wsk-secondary"
+                  id="integration-refresh"
+                  type="button"
+                >
+                  刷新状态
+                </button>
+              </div>
+            </div>
+
+            <div class="gmk-config-state" id="integration-loading">
+              <span class="wsk-spinner gmk-large-spinner" aria-hidden="true"></span>
+              <h2>正在读取接入配置</h2>
+              <p>请稍候。</p>
+            </div>
+
+            <div
+              class="wsk-alert wsk-danger gmk-config-alert"
+              id="integration-error"
+              role="alert"
+              tabindex="-1"
+              hidden
+            >
+              <svg class="wsk-icon" aria-hidden="true">
+                <use href="#warning"></use>
+              </svg>
+              <div>
+                <strong>接入配置加载失败</strong>
+                <p id="integration-error-message"></p>
+                <button
+                  class="wsk-button wsk-secondary gmk-inline-retry"
+                  id="integration-retry"
+                  type="button"
+                >
+                  重新加载
+                </button>
+              </div>
+            </div>
+
+            <div id="integration-content" hidden>
+              <section
+                class="wsk-section"
+                id="integration-settings-section"
+                aria-labelledby="configuration-completeness-title"
+              >
+                <div class="wsk-panel gmk-completeness-card">
+                  <div>
+                    <p class="wsk-panel-title">CONFIGURATION HEALTH</p>
+                    <h2 id="configuration-completeness-title">游戏配置完整度</h2>
+                    <p class="wsk-help" id="configuration-completeness-summary">
+                      正在检查必需配置。
+                    </p>
+                  </div>
+                  <div class="gmk-completeness-score">
+                    <strong id="configuration-completeness-score">0 / 4</strong>
+                    <span class="wsk-badge" id="configuration-state-badge">
+                      读取中
+                    </span>
+                  </div>
+                  <ul class="gmk-check-list" id="configuration-check-list"></ul>
+                  <p class="wsk-help" id="configuration-loaded-revision"></p>
+                </div>
+
+                <form
+                  class="wsk-panel gmk-config-form"
+                  id="integration-form"
+                  autocomplete="off"
+                >
+                  <div class="wsk-section-head">
+                    <div>
+                      <h2>微信与运行参数</h2>
+                      <p class="wsk-help">
+                        保存普通参数不会读取或改写已有 AppSecret。
+                      </p>
+                    </div>
+                    <span class="wsk-badge" id="wechat-secret-status-badge">
+                      未配置
+                    </span>
+                  </div>
+
+                  <div class="gmk-config-grid">
+                    <div class="wsk-field">
+                      <label class="wsk-label" for="integration-wechat-app-id">
+                        微信 AppID
+                      </label>
+                      <input
+                        class="wsk-control"
+                        id="integration-wechat-app-id"
+                        name="wechatAppId"
+                        type="text"
+                        maxlength="128"
+                        autocapitalize="none"
+                        spellcheck="false"
+                        placeholder="wx…"
+                      />
+                    </div>
+                    <div class="wsk-field gmk-config-span-two">
+                      <label class="wsk-label" for="integration-wechat-endpoint">
+                        微信接口地址
+                      </label>
+                      <input
+                        class="wsk-control"
+                        id="integration-wechat-endpoint"
+                        name="wechatEndpoint"
+                        type="url"
+                        maxlength="2048"
+                        required
+                      />
+                    </div>
+                    <div class="wsk-field">
+                      <label class="wsk-label" for="integration-wechat-timeout">
+                        微信超时（毫秒）
+                      </label>
+                      <input
+                        class="wsk-control"
+                        id="integration-wechat-timeout"
+                        name="wechatTimeoutMs"
+                        type="number"
+                        min="100"
+                        max="30000"
+                        step="1"
+                        required
+                      />
+                    </div>
+                    <div class="wsk-field">
+                      <label class="wsk-label" for="integration-breaker-threshold">
+                        熔断失败阈值
+                      </label>
+                      <input
+                        class="wsk-control"
+                        id="integration-breaker-threshold"
+                        name="wechatBreakerThreshold"
+                        type="number"
+                        min="1"
+                        max="1000"
+                        step="1"
+                        required
+                      />
+                    </div>
+                    <div class="wsk-field">
+                      <label class="wsk-label" for="integration-breaker-open">
+                        熔断开启时长（毫秒）
+                      </label>
+                      <input
+                        class="wsk-control"
+                        id="integration-breaker-open"
+                        name="wechatBreakerOpenMs"
+                        type="number"
+                        min="100"
+                        max="600000"
+                        step="1"
+                        required
+                      />
+                    </div>
+                    <div class="wsk-field">
+                      <label class="wsk-label" for="integration-session-ttl">
+                        会话 TTL（秒）
+                      </label>
+                      <input
+                        class="wsk-control"
+                        id="integration-session-ttl"
+                        name="sessionTtlSeconds"
+                        type="number"
+                        min="60"
+                        max="31536000"
+                        step="1"
+                        required
+                      />
+                    </div>
+                    <div class="wsk-field">
+                      <label class="wsk-label" for="integration-login-capacity">
+                        登录突发容量
+                      </label>
+                      <input
+                        class="wsk-control"
+                        id="integration-login-capacity"
+                        name="loginRateCapacity"
+                        type="number"
+                        min="0.001"
+                        max="1000000"
+                        step="any"
+                        required
+                      />
+                    </div>
+                    <div class="wsk-field">
+                      <label class="wsk-label" for="integration-login-refill">
+                        登录每秒补充
+                      </label>
+                      <input
+                        class="wsk-control"
+                        id="integration-login-refill"
+                        name="loginRateRefillPerSecond"
+                        type="number"
+                        min="0.001"
+                        max="1000000"
+                        step="any"
+                        required
+                      />
+                    </div>
+                    <div class="wsk-field">
+                      <label class="wsk-label" for="integration-admin-capacity">
+                        管理突发容量
+                      </label>
+                      <input
+                        class="wsk-control"
+                        id="integration-admin-capacity"
+                        name="adminRateCapacity"
+                        type="number"
+                        min="0.001"
+                        max="1000000"
+                        step="any"
+                        required
+                      />
+                    </div>
+                    <div class="wsk-field">
+                      <label class="wsk-label" for="integration-admin-refill">
+                        管理每秒补充
+                      </label>
+                      <input
+                        class="wsk-control"
+                        id="integration-admin-refill"
+                        name="adminRateRefillPerSecond"
+                        type="number"
+                        min="0.001"
+                        max="1000000"
+                        step="any"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div class="gmk-directory-setting">
+                    <div>
+                      <strong>运营目录</strong>
+                      <p class="wsk-help" id="directory-revision-label"></p>
+                    </div>
+                    <label class="gmk-confirm-label" for="directory-is-ops">
+                      <input id="directory-is-ops" type="checkbox" />
+                      标记为运营目录
+                    </label>
+                    <button
+                      class="wsk-button wsk-secondary"
+                      id="directory-save"
+                      type="button"
+                    >
+                      保存目录设置
+                    </button>
+                  </div>
+
+                  <div
+                    class="wsk-alert wsk-danger"
+                    id="integration-form-error"
+                    role="alert"
+                    tabindex="-1"
+                    hidden
+                  >
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#warning"></use>
+                    </svg>
+                    <div>
+                      <strong>接入参数未保存</strong>
+                      <p id="integration-form-error-message"></p>
+                    </div>
+                  </div>
+
+                  <div class="gmk-config-actions">
+                    <button
+                      class="wsk-button wsk-secondary"
+                      id="wechat-secret-replace"
+                      type="button"
+                    >
+                      替换 AppSecret
+                    </button>
+                    <button class="wsk-button" id="integration-save" type="submit">
+                      <span
+                        class="wsk-spinner"
+                        data-button-spinner
+                        aria-hidden="true"
+                        hidden
+                      ></span>
+                      <span data-button-label>保存运行参数</span>
+                    </button>
+                  </div>
+                </form>
+              </section>
+
+              <section
+                class="wsk-section"
+                id="machine-identities-section"
+                aria-labelledby="machine-identities-title"
+              >
+                <div class="wsk-section-head">
+                  <div>
+                    <h2 id="machine-identities-title">机器身份与授权范围</h2>
+                    <p class="wsk-help">
+                      Service 和机器 Admin 的 Secret 仅在生成时显示一次。
+                    </p>
+                  </div>
+                  <button
+                    class="wsk-button"
+                    id="machine-identity-create"
+                    type="button"
+                  >
+                    <svg class="wsk-icon" aria-hidden="true">
+                      <use href="#plus"></use>
+                    </svg>
+                    新增机器身份
+                  </button>
+                </div>
+                <div
+                  class="gmk-machine-list"
+                  id="machine-identities-list"
+                  role="list"
+                ></div>
+                <div class="gmk-config-state" id="machine-identities-empty" hidden>
+                  <h3>还没有机器身份</h3>
+                  <p>创建 Service 或机器 Admin 后，服务端会生成一次性 Secret。</p>
+                </div>
+              </section>
+
+              <section
+                class="wsk-section"
+                id="configuration-audit-section"
+                aria-labelledby="configuration-audit-title"
+              >
+                <div class="wsk-section-head">
+                  <div>
+                    <h2 id="configuration-audit-title">最近配置与 Secret 审计</h2>
+                    <p class="wsk-help">
+                      只展示版本和操作元数据，不展示明文或摘要。
+                    </p>
+                  </div>
+                </div>
+                <div class="wsk-panel gmk-audit-list" id="configuration-audit-list"></div>
+                <div class="gmk-config-state" id="configuration-audit-empty" hidden>
+                  <h3>暂无审计记录</h3>
+                  <p>完成配置或 Secret 操作后会显示在这里。</p>
+                </div>
+              </section>
+            </div>
           </div>
         </div>
       </section>
@@ -1055,6 +1456,455 @@
               </div>
             </form>
           </section>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog
+      class="wsk-dialog"
+      id="reauthenticate-dialog"
+      aria-labelledby="reauthenticate-title"
+    >
+      <form id="reauthenticate-form" autocomplete="off">
+        <div class="wsk-dialog-head">
+          <div>
+            <p class="wsk-panel-title">RECENT AUTHENTICATION</p>
+            <h2 id="reauthenticate-title">重新验证管理员身份</h2>
+          </div>
+          <button
+            class="wsk-icon-button"
+            id="reauthenticate-close"
+            type="button"
+            aria-label="关闭重新认证窗口"
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#x"></use></svg>
+          </button>
+        </div>
+        <div class="wsk-dialog-body">
+          <p class="wsk-help">
+            Secret 和授权范围操作需要最近 5 分钟内再次验证密码。
+          </p>
+          <div class="wsk-field">
+            <label class="wsk-label" for="reauthenticate-password">
+              当前密码
+            </label>
+            <div class="wsk-input-wrap">
+              <input
+                class="wsk-control"
+                id="reauthenticate-password"
+                type="password"
+                autocomplete="current-password"
+                minlength="12"
+                maxlength="512"
+                required
+              />
+              <button
+                class="wsk-icon-button"
+                id="reauthenticate-password-toggle"
+                type="button"
+                data-password
+                aria-controls="reauthenticate-password"
+                aria-label="显示密码"
+                aria-pressed="false"
+              >
+                <svg class="wsk-icon" aria-hidden="true">
+                  <use href="#eye"></use>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div
+            class="wsk-alert wsk-danger"
+            id="reauthenticate-error"
+            role="alert"
+            tabindex="-1"
+            hidden
+          >
+            <svg class="wsk-icon" aria-hidden="true">
+              <use href="#warning"></use>
+            </svg>
+            <div>
+              <strong>重新认证失败</strong>
+              <p id="reauthenticate-error-message"></p>
+            </div>
+          </div>
+        </div>
+        <div class="wsk-dialog-foot">
+          <button
+            class="wsk-button wsk-secondary"
+            id="reauthenticate-cancel"
+            type="button"
+          >
+            取消
+          </button>
+          <button class="wsk-button" id="reauthenticate-submit" type="submit">
+            <span
+              class="wsk-spinner"
+              data-button-spinner
+              aria-hidden="true"
+              hidden
+            ></span>
+            <span data-button-label>验证密码</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog
+      class="wsk-dialog"
+      id="wechat-secret-dialog"
+      aria-labelledby="wechat-secret-dialog-title"
+    >
+      <form id="wechat-secret-form" autocomplete="off">
+        <div class="wsk-dialog-head">
+          <div>
+            <p class="wsk-panel-title">REPLACE CREDENTIAL</p>
+            <h2 id="wechat-secret-dialog-title">替换微信 AppSecret</h2>
+          </div>
+          <button
+            class="wsk-icon-button"
+            id="wechat-secret-close"
+            type="button"
+            aria-label="关闭 AppSecret 窗口"
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#x"></use></svg>
+          </button>
+        </div>
+        <div class="wsk-dialog-body">
+          <div class="wsk-alert wsk-warning">
+            <svg class="wsk-icon" aria-hidden="true">
+              <use href="#warning"></use>
+            </svg>
+            <div>
+              <strong>旧值将立即被覆盖</strong>
+              <p>
+                保存仅表示 gameManageKit 已写入凭据，不代表微信侧已经验证成功。
+              </p>
+            </div>
+          </div>
+          <div class="wsk-field">
+            <label class="wsk-label" for="wechat-secret-input">
+              新 AppSecret
+            </label>
+            <div class="wsk-input-wrap">
+              <input
+                class="wsk-control"
+                id="wechat-secret-input"
+                type="password"
+                autocomplete="new-password"
+                minlength="1"
+                maxlength="512"
+                required
+              />
+              <button
+                class="wsk-icon-button"
+                id="wechat-secret-toggle"
+                type="button"
+                aria-controls="wechat-secret-input"
+                aria-label="显示 AppSecret"
+                aria-pressed="false"
+              >
+                <svg class="wsk-icon" aria-hidden="true">
+                  <use href="#eye"></use>
+                </svg>
+              </button>
+            </div>
+            <p class="wsk-help">
+              输入框永远不会预填，提交结束后会立即清空。
+            </p>
+          </div>
+          <div
+            class="wsk-alert wsk-danger"
+            id="wechat-secret-error"
+            role="alert"
+            tabindex="-1"
+            hidden
+          >
+            <svg class="wsk-icon" aria-hidden="true">
+              <use href="#warning"></use>
+            </svg>
+            <div>
+              <strong>AppSecret 未保存</strong>
+              <p id="wechat-secret-error-message"></p>
+            </div>
+          </div>
+        </div>
+        <div class="wsk-dialog-foot">
+          <button
+            class="wsk-button wsk-secondary"
+            id="wechat-secret-cancel"
+            type="button"
+          >
+            取消
+          </button>
+          <button
+            class="wsk-button wsk-danger"
+            id="wechat-secret-submit"
+            type="submit"
+          >
+            <span
+              class="wsk-spinner"
+              data-button-spinner
+              aria-hidden="true"
+              hidden
+            ></span>
+            <span data-button-label>确认替换</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog
+      class="wsk-dialog"
+      id="machine-identity-dialog"
+      aria-labelledby="machine-identity-dialog-title"
+    >
+      <form id="machine-identity-form" autocomplete="off">
+        <div class="wsk-dialog-head">
+          <div>
+            <p class="wsk-panel-title" id="machine-identity-dialog-kind">
+              CREATE MACHINE IDENTITY
+            </p>
+            <h2 id="machine-identity-dialog-title">新增机器身份</h2>
+          </div>
+          <button
+            class="wsk-icon-button"
+            id="machine-identity-close"
+            type="button"
+            aria-label="关闭机器身份窗口"
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#x"></use></svg>
+          </button>
+        </div>
+        <div class="wsk-dialog-body">
+          <div class="gmk-config-grid">
+            <div class="wsk-field">
+              <label class="wsk-label" for="machine-identity-id">身份 ID</label>
+              <input
+                class="wsk-control"
+                id="machine-identity-id"
+                type="text"
+                minlength="3"
+                maxlength="64"
+                pattern="[a-z][a-z0-9_.\-]{2,63}"
+                required
+              />
+            </div>
+            <div class="wsk-field">
+              <label class="wsk-label" for="machine-identity-type">身份类型</label>
+              <div class="wsk-select-wrap">
+                <select class="wsk-select" id="machine-identity-type">
+                  <option value="service">Service</option>
+                  <option value="machine_admin">机器 Admin</option>
+                </select>
+                <svg class="wsk-icon" aria-hidden="true">
+                  <use href="#chevron"></use>
+                </svg>
+              </div>
+            </div>
+            <div class="wsk-field">
+              <label class="wsk-label" for="machine-identity-name">显示名称</label>
+              <input
+                class="wsk-control"
+                id="machine-identity-name"
+                type="text"
+                maxlength="128"
+                required
+              />
+            </div>
+            <div class="wsk-field">
+              <label class="wsk-label" for="machine-identity-status">状态</label>
+              <div class="wsk-select-wrap">
+                <select class="wsk-select" id="machine-identity-status">
+                  <option value="enabled">已启用</option>
+                  <option value="disabled">已停用</option>
+                </select>
+                <svg class="wsk-icon" aria-hidden="true">
+                  <use href="#chevron"></use>
+                </svg>
+              </div>
+            </div>
+          </div>
+          <fieldset class="gmk-scope-fieldset">
+            <legend>游戏授权范围</legend>
+            <div class="gmk-scope-options" id="machine-scope-options"></div>
+          </fieldset>
+          <div
+            class="wsk-alert wsk-danger"
+            id="machine-identity-error"
+            role="alert"
+            tabindex="-1"
+            hidden
+          >
+            <svg class="wsk-icon" aria-hidden="true">
+              <use href="#warning"></use>
+            </svg>
+            <div>
+              <strong>机器身份未保存</strong>
+              <p id="machine-identity-error-message"></p>
+            </div>
+          </div>
+        </div>
+        <div class="wsk-dialog-foot">
+          <button
+            class="wsk-button wsk-secondary"
+            id="machine-identity-cancel"
+            type="button"
+          >
+            取消
+          </button>
+          <button class="wsk-button" id="machine-identity-submit" type="submit">
+            <span
+              class="wsk-spinner"
+              data-button-spinner
+              aria-hidden="true"
+              hidden
+            ></span>
+            <span data-button-label>创建并生成 Secret</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog
+      class="wsk-dialog"
+      id="machine-revoke-dialog"
+      aria-labelledby="machine-revoke-title"
+    >
+      <form id="machine-revoke-form" autocomplete="off">
+        <div class="wsk-dialog-head">
+          <div>
+            <p class="wsk-panel-title">REVOKE SECRET</p>
+            <h2 id="machine-revoke-title">撤销机器 Secret</h2>
+          </div>
+          <button
+            class="wsk-icon-button"
+            id="machine-revoke-close"
+            type="button"
+            aria-label="关闭撤销窗口"
+          >
+            <svg class="wsk-icon" aria-hidden="true"><use href="#x"></use></svg>
+          </button>
+        </div>
+        <div class="wsk-dialog-body">
+          <p class="gmk-dialog-target" id="machine-revoke-target"></p>
+          <div class="wsk-field">
+            <label class="wsk-label" for="machine-revoke-reason">撤销原因</label>
+            <textarea
+              class="wsk-textarea"
+              id="machine-revoke-reason"
+              minlength="1"
+              maxlength="255"
+              required
+            ></textarea>
+          </div>
+          <div
+            class="wsk-alert wsk-danger"
+            id="machine-revoke-error"
+            role="alert"
+            tabindex="-1"
+            hidden
+          >
+            <svg class="wsk-icon" aria-hidden="true">
+              <use href="#warning"></use>
+            </svg>
+            <div>
+              <strong>Secret 未撤销</strong>
+              <p id="machine-revoke-error-message"></p>
+            </div>
+          </div>
+        </div>
+        <div class="wsk-dialog-foot">
+          <button
+            class="wsk-button wsk-secondary"
+            id="machine-revoke-cancel"
+            type="button"
+          >
+            取消
+          </button>
+          <button
+            class="wsk-button wsk-danger"
+            id="machine-revoke-submit"
+            type="submit"
+          >
+            <span
+              class="wsk-spinner"
+              data-button-spinner
+              aria-hidden="true"
+              hidden
+            ></span>
+            <span data-button-label>确认撤销</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog
+      class="wsk-dialog gmk-secret-delivery-dialog"
+      id="one-time-secret-dialog"
+      aria-labelledby="one-time-secret-title"
+    >
+      <div>
+        <div class="wsk-dialog-head">
+          <div>
+            <p class="wsk-panel-title">ONE-TIME DELIVERY</p>
+            <h2 id="one-time-secret-title">保存一次性 Secret</h2>
+          </div>
+        </div>
+        <div class="wsk-dialog-body">
+          <div class="wsk-alert wsk-warning">
+            <svg class="wsk-icon" aria-hidden="true">
+              <use href="#warning"></use>
+            </svg>
+            <div>
+              <strong>关闭后无法恢复</strong>
+              <p>请立即保存到受控的 Secret 管理系统，丢失后只能重新轮换。</p>
+            </div>
+          </div>
+          <p class="wsk-help" id="one-time-secret-context"></p>
+          <div class="wsk-field">
+            <label class="wsk-label" for="one-time-secret-value">
+              一次性 Secret
+            </label>
+            <div class="gmk-secret-delivery">
+              <input
+                class="wsk-control"
+                id="one-time-secret-value"
+                type="password"
+                readonly
+                autocomplete="off"
+              />
+              <button
+                class="wsk-button wsk-secondary"
+                id="one-time-secret-toggle"
+                type="button"
+                aria-pressed="false"
+              >
+                显示一次
+              </button>
+              <button
+                class="wsk-button wsk-secondary"
+                id="one-time-secret-copy"
+                type="button"
+              >
+                复制
+              </button>
+            </div>
+          </div>
+          <label class="gmk-confirm-label" for="one-time-secret-confirm">
+            <input id="one-time-secret-confirm" type="checkbox" />
+            我已将 Secret 安全保存
+          </label>
+        </div>
+        <div class="wsk-dialog-foot">
+          <button
+            class="wsk-button"
+            id="one-time-secret-close"
+            type="button"
+            disabled
+          >
+            确认并关闭
+          </button>
         </div>
       </div>
     </dialog>
