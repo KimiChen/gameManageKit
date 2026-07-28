@@ -296,30 +296,28 @@ test("机器鉴权只比较摘要，按类型隔离并返回数据库授权范�
         if (values[1] !== "service") {
           return [[], []];
         }
-        return [revoked
-          ? []
-          : [
-              {
-                identity_id: "service-a",
-                game_id: "game-a",
-                version: 2,
-                secret_digest: digest,
-              },
-              {
-                identity_id: "service-a",
-                game_id: "game-b",
-                version: 2,
-                secret_digest: digest,
-              },
-            ], []];
+        return [[
+          {
+            identity_id: "service-a",
+            game_id: "game-a",
+            version: 2,
+            secret_digest: digest,
+            usable: revoked ? 0 : 1,
+          },
+          {
+            identity_id: "service-a",
+            game_id: "game-b",
+            version: 2,
+            secret_digest: digest,
+            usable: revoked ? 0 : 1,
+          },
+        ], []];
       }
       throw new Error(`未实现 query: ${sql}`);
     },
     async execute(rawSql: string, values: readonly unknown[]) {
-      assert.match(
-        compact(rawSql),
-        /UPDATE machine_secret_versions SET last_used_at/u,
-      );
+      const sql = compact(rawSql);
+      assert.match(sql, /UPDATE machine_secret_versions SET last_used_at/u);
       assert.deepEqual(values, ["service-a", 2]);
       lastUsedUpdates += 1;
       return [{ affectedRows: 1 }, []];
@@ -351,4 +349,5 @@ test("机器鉴权只比较摘要，按类型隔离并返回数据库授权范�
     await resolver.authenticateService("service-a", currentSecret),
     null,
   );
+  assert.equal(lastUsedUpdates, 2);
 });

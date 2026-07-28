@@ -138,6 +138,7 @@ interface MachineAuthenticationRow extends RowDataPacket {
   readonly game_id: string | null;
   readonly version: number | string;
   readonly secret_digest: Buffer | string;
+  readonly usable: number | boolean | string;
 }
 
 interface CachedGame {
@@ -800,18 +801,18 @@ export class GameConfigResolver implements GameRuntimeRegistry {
       return null;
     }
     const [rows] = await this.pool.query<MachineAuthenticationRow[]>(
-      `SELECT i.identity_id, g.game_id, s.version, s.secret_digest
+      `SELECT i.identity_id, g.game_id, s.version, s.secret_digest,
+              (
+                s.state = 'current'
+                OR (
+                  s.state = 'previous'
+                  AND s.expires_at IS NOT NULL
+                  AND s.expires_at > NOW(3)
+                )
+              ) AS usable
          FROM machine_identities i
          JOIN machine_secret_versions s
            ON s.identity_id = i.identity_id
-          AND (
-            s.state = 'current'
-            OR (
-              s.state = 'previous'
-              AND s.expires_at IS NOT NULL
-              AND s.expires_at > NOW(3)
-            )
-          )
          LEFT JOIN machine_identity_games g
            ON g.identity_id = i.identity_id
         WHERE i.identity_id = ?
@@ -821,6 +822,7 @@ export class GameConfigResolver implements GameRuntimeRegistry {
       [identityId, identityType],
     );
     let matchedVersion: number | null = null;
+    let matchedUsable = false;
     for (const row of rows) {
       const expected = digestBuffer(row.secret_digest);
       const versionValue = Number(row.version);
@@ -830,9 +832,17 @@ export class GameConfigResolver implements GameRuntimeRegistry {
         && timingSafeEqual(actualDigest, expected)
       ) {
         matchedVersion = versionValue;
+        matchedUsable = Number(row.usable) === 1;
       }
     }
     if (matchedVersion === null) {
+      return null;
+    }
+    if (!matchedUsable) {
+      await this.recordRejectedMachineSecretUse(
+        identityId,
+        matchedVersion,
+      );
       return null;
     }
     const gameIds = Object.freeze([
@@ -858,11 +868,28 @@ export class GameConfigResolver implements GameRuntimeRegistry {
       [identityId, matchedVersion],
     );
     if (updated.affectedRows !== 1) {
+      await this.recordRejectedMachineSecretUse(
+        identityId,
+        matchedVersion,
+      );
       return null;
     }
     return {
       identityId,
       gameIds,
     };
+  }
+
+  private async recordRejectedMachineSecretUse(
+    identityId: string,
+    version: number,
+  ): Promise<void> {
+    await this.pool.execute(
+      `UPDATE machine_secret_versions
+          SET last_used_at = NOW(3)
+        WHERE identity_id = ?
+          AND version = ?`,
+      [identityId, version],
+    ).catch(() => undefined);
   }
 }

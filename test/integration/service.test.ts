@@ -754,6 +754,17 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       401,
       revokedCurrentRejected.body,
     );
+    const [revokedUse] = await runtime.database.pool.query<RowDataPacket[]>(
+      `SELECT last_used_at, revoked_at
+         FROM machine_secret_versions
+        WHERE identity_id = 'game-a-service' AND version = 2`,
+    );
+    assert.ok(revokedUse[0]?.last_used_at);
+    assert.ok(revokedUse[0]?.revoked_at);
+    assert.ok(
+      new Date(String(revokedUse[0].last_used_at)).getTime()
+      >= new Date(String(revokedUse[0].revoked_at)).getTime(),
+    );
     const recoveredRotation = await mutate(
       "POST",
       "/v1/admin/machine-identities/game-a-service/secret-rotations",
