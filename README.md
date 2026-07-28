@@ -1,19 +1,23 @@
 # gameManageKit
 
-gameManageKit 是多游戏独立账号门户服务。一套进程可接入多个游戏，并通过 HTTP
-提供登录、会话校验、角色足迹、选服目录与账号管理能力。同一微信身份在不同游戏中
-拥有相互隔离的账号。
+gameManageKit 是多游戏独立账号门户服务。一套进程通过 HTTP 提供登录、会话校验、
+角色足迹、选服目录和账号管理能力。同一微信身份在不同游戏中拥有相互隔离的账号。
 
-硬边界：
+核心边界：
 
-- HTTP-only：不发布可供游戏服直调的领域源码。
+- HTTP-only：不发布供游戏服直调的领域源码。
 - MySQL-only：不连接游戏 Redis、游戏 MySQL 或 coord Redis。
-- 强租户隔离：HTTP、账号、会话、角色、审计和调用方权限都以 `gameId` 为边界。
-- Public、Internal、Admin 端点分监听面注册。
+- 强租户隔离：账号、会话、角色、审计和调用方权限都以 `gameId` 为边界。
+- Public、Internal/Admin 端点分监听面注册。
+- MySQL 是游戏、区服、接入参数和机器身份的唯一业务配置真源。
+
+运行时不读取游戏或区服 JSON，也不从环境变量读取每游戏微信、Service 或机器 Admin
+Secret。管理员保存配置后，当前实例立即失效缓存，其他实例在有界 TTL 内按数据库
+revision 刷新，无需人工重启。
 
 ## 本地启动
 
-推荐直接使用本机 Homebrew MySQL 8.4。首次 checkout：
+推荐使用 MySQL 8.4。首次 checkout：
 
 ```bash
 npm ci
@@ -21,49 +25,48 @@ cp .env.example .env
 
 brew services start mysql@8.4
 mysqladmin --protocol=tcp -h 127.0.0.1 -P 3306 -u root ping
-mysql --protocol=tcp -h 127.0.0.1 -P 3306 -u root -e 'CREATE DATABASE IF NOT EXISTS game_manage_kit CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci'
+mysql --protocol=tcp -h 127.0.0.1 -P 3306 -u root \
+  -e 'CREATE DATABASE IF NOT EXISTS game_manage_kit CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci'
 
 npm run migrate
+npm run admin:create -- \
+  --operator-id ops_kimi \
+  --display-name Kimi \
+  --full-config
 npm run dev
 ```
 
-`npm run dev`、`npm run migrate`、`npm run migrate:prod` 和
-`npm run test:int` 都会读取仓库根目录的 `.env`。如果本机 MySQL root 账号设有
-密码，请在上述 MySQL 命令中增加 `-p`，并同步修改 `.env` 中的连接 URL。
+创建命令使用系统加密随机源生成初始密码，只在成功后显示一次。请立即存入受控密码
+管理器，不要写入 Shell history、环境变量、配置文件或 Git。`--full-config` 授予游戏、
+接入参数、Secret 和机器身份管理能力；首个管理员可以在尚无游戏时创建。更细的权限和
+逐游戏账号访问方式见[管理员控制台运维指南](docs/admin-console.md)。
 
-必需配置：
+管理员网页位于 Internal/Admin origin 的 `/admin/`。从空库开始的配置顺序是：
+
+1. 创建草稿游戏项目。
+2. 配置目录设置和全部区服；没有区服也是合法状态。
+3. 在独立“接入配置”页面保存微信 AppID、调用参数和 AppSecret。
+4. 创建 Service 或机器 Admin 身份，安全保存只显示一次的 Secret。
+5. 游戏变为 `configured` 后，再按需要切换为 `enabled` 并允许客户端发现。
+
+完整流程见[游戏接入指南](docs/game-onboarding.md)。
+
+### 系统级环境变量
+
+必需的部署信任根只有：
 
 - `GAME_MANAGE_KIT_MYSQL_URL`
-- `GAME_MANAGE_KIT_GAMES_CONFIG`
 - 生产环境的 `GAME_MANAGE_KIT_ADMIN_ORIGIN`
-- 游戏配置中 `appIdEnv`、`secretEnv` 和各调用方 `secretEnv` 引用的全部环境变量
 
-`AUTH_DEV_ENABLED` 默认关闭，只允许在 `NODE_ENV=development` 或 `test` 时显式设为
-`1`。生产环境即使请求 dev-login 契约路径也固定返回 404。
+监听地址、MySQL 连接池、可信代理、请求体上限、请求/关闭超时和日志开关都是可选的
+进程级配置，示例见 [.env.example](.env.example)。`AUTH_DEV_ENABLED` 默认关闭，只允许
+在 `NODE_ENV=development` 或 `test` 时显式设为 `1`；生产即使请求 dev-login 路径也
+固定返回 404。
 
-仓库默认 `config/games.json` 会同时加载 `game-a` 与 `game-b`。`.env.example`
-只包含可公开的本地开发占位值；生产密钥必须通过部署平台的 Secret 机制注入。
-游戏与调用方接入步骤见 [游戏接入指南](docs/game-onboarding.md)。
-
-默认监听为 Public `127.0.0.1:2570`、Internal/Admin `127.0.0.1:2571`。
-使用容器 bridge 网络时，应把 `GAME_MANAGE_KIT_PUBLIC_HOST` 与
-`GAME_MANAGE_KIT_INTERNAL_HOST` 配成 `0.0.0.0`，并只向受信网络发布 Internal 端口。
-Public 登录与 Admin 写操作分别使用独立的进程内令牌桶；多实例的全局限流仍应由
-LB/WAF 承担。
-
-管理员网页位于 Internal/Admin origin 的 `/admin/`。完成 migration 并至少启动一次
-服务以同步游戏配置后，创建个人管理员：
-
-```bash
-npm run admin:create -- --operator-id ops_kimi --display-name Kimi --games game-a,game-b --manage-games
-```
-
-命令使用系统加密随机源生成 16 位初始密码，并仅在创建成功后显示一次；请立即交付给
-对应管理员并存入受控密码管理器。管理员密码不允许作为命令行参数。网页登录不会接收
-或保存游戏配置里的 Admin Secret。`--manage-games` 显式授予新增、编辑游戏项目、
-管理每个游戏的区服及配置客户端下发列表的全局能力；不需要该能力的账号请省略。
-账号权限、HTTPS 反向代理、Cookie 和会话失效要求见
-[管理员控制台运维指南](docs/admin-console.md)。
+`npm run dev`、migration、管理员创建和集成测试都会读取仓库根目录的 `.env`。
+本地 MySQL root 有密码时，请同步修改连接 URL。默认监听为 Public
+`127.0.0.1:2570`、Internal/Admin `127.0.0.1:2571`。容器 bridge 网络应将两个 host
+设置为 `0.0.0.0`，但只向受信网络发布 Internal/Admin 端口。
 
 ### 数据库维护
 
@@ -73,10 +76,11 @@ npm run admin:create -- --operator-id ops_kimi --display-name Kimi --games game-
 npm run migrate
 ```
 
-需要从空库重新开始时，明确删除并重建本地开发库，然后重新迁移：
+需要从空库重新开始时，明确删除并重建本地开发库：
 
 ```bash
-mysql --protocol=tcp -h 127.0.0.1 -P 3306 -u root -e 'DROP DATABASE IF EXISTS game_manage_kit; CREATE DATABASE game_manage_kit CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci'
+mysql --protocol=tcp -h 127.0.0.1 -P 3306 -u root \
+  -e 'DROP DATABASE IF EXISTS game_manage_kit; CREATE DATABASE game_manage_kit CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci'
 npm run migrate
 ```
 
@@ -88,64 +92,62 @@ brew services stop mysql@8.4
 
 ### 可选：Docker MySQL
 
-没有本机 MySQL 时，可以只用 Compose 启动数据库：
+没有本机 MySQL 时，可以只启动 Compose 数据库：
 
 ```bash
 npm run mysql:docker:up
 ```
 
-Compose 将 MySQL 绑定到 `127.0.0.1:3316`。此时把 `.env` 中
-`GAME_MANAGE_KIT_MYSQL_URL` 的端口改为 `3316`，再运行 migration 和服务。
-该 Compose 数据库使用空 root 密码且仅供本机开发，禁止用于共享或生产环境。
+MySQL 绑定到 `127.0.0.1:3316`。将 `.env` 中业务和测试管理连接的端口改为 `3316`，
+再运行 migration 和服务。Compose 使用空 root 密码，仅供单机开发，禁止用于共享或
+生产环境。
 
 ```bash
 npm run migrate
 npm run dev
 ```
 
-停止容器会保留数据；清空命名卷会永久删除 Compose 本地数据库：
+停止容器会保留数据；以下命令会永久删除 Compose 本地数据库卷：
 
 ```bash
 npm run mysql:docker:down
 npm run mysql:docker:clean
 ```
 
-不要让 Homebrew MySQL 与 Compose MySQL 使用同一个主机端口。
-
 ## 测试
 
-单元与契约测试不要求数据库：
+单元、契约和网页测试不要求数据库：
 
 ```bash
 npm test
 npm run test:web
 ```
 
-集成测试会根据 `.env` 中的管理连接创建并删除名字唯一的临时数据库：
+集成测试根据 `.env` 中的管理连接创建并删除名字唯一的临时数据库：
 
 ```bash
 npm run test:int
 ```
 
-使用 Compose MySQL 时，还要把 `.env` 中
-`GAME_MANAGE_KIT_TEST_MYSQL_ADMIN_URL` 的端口改成 `3316`。该账号必须拥有
+`GAME_MANAGE_KIT_TEST_MYSQL_ADMIN_URL` 对应账号必须拥有测试环境的
 `CREATE DATABASE` 和 `DROP DATABASE` 权限。
 
-Docker 可用时，还可以构建生产镜像并运行双游戏数据隔离冒烟测试：
+Docker 可用时，可以构建生产镜像并执行动态配置冒烟测试：
 
 ```bash
 npm run test:docker
 npm run mysql:docker:down
 ```
 
-冒烟测试会依次启动 MySQL、执行 migration、启动应用，再以同一个开发身份分别登录
-`game-a` 与 `game-b`。它会核对两条租户账号记录、同游戏 token 校验、跨游戏 token
-拒绝和 Service 凭证越权拒绝。Compose 数据卷默认保留；需要空库重测时先运行
+冒烟测试先在空或已有 schema 中创建一次性的引导管理员，然后只通过管理员 API 创建
+两个游戏、区服、微信接入和机器身份。它验证租户账号隔离、Service 越权拒绝、机器
+Admin 范围、Secret 摘要和无停机轮换。测试不依赖静态游戏文件或每游戏环境变量；每次
+使用唯一 fixture，命名卷会保留数据，需要彻底清理时运行
 `npm run mysql:docker:clean`。
 
 ## 生产部署
 
-生产使用：
+生产发布顺序：
 
 ```bash
 npm run build
@@ -153,68 +155,81 @@ node --env-file=.env.production dist/migrate.js
 node --env-file=.env.production dist/main.js
 ```
 
-`.env.production` 只表示由部署系统生成或挂载的运行时文件，不得提交到 Git。若平台直接
-注入环境变量，则省略 `--env-file`；migration job 与服务进程必须使用同一组数据库和
-游戏配置。
-
-镜像也包含同一 migration 入口，部署时应先以一次性 job 执行：
+`.env.production` 由部署系统生成或挂载，不得提交到 Git。migration job 与服务进程
+必须指向同一数据库；不再需要游戏配置文件或每游戏 Secret 环境变量。容器也提供相同
+migration 入口：
 
 ```bash
-docker run --rm -e GAME_MANAGE_KIT_MYSQL_URL=mysql://... game-manage-kit:1.0.0 node dist/migrate.js
+docker run --rm \
+  -e GAME_MANAGE_KIT_MYSQL_URL=mysql://... \
+  game-manage-kit:1.0.0 node dist/migrate.js
 ```
 
 生产镜像默认监听容器内 Public `0.0.0.0:2570` 与 Internal/Admin
-`0.0.0.0:2571`，并通过 Public `/readyz` 执行健康检查。运行服务时仅公开
-Public 端口；Internal/Admin 端口必须绑定到受信网络，例如：
+`0.0.0.0:2571`。只公开 Public 端口；Internal/Admin 必须位于受信网络和独立 HTTPS
+origin 后，例如：
 
 ```bash
-docker run --rm --env-file .env.production -p 2570:2570 -p 127.0.0.1:2571:2571 game-manage-kit:1.0.0
+docker run --rm --env-file .env.production \
+  -p 2570:2570 \
+  -p 127.0.0.1:2571:2571 \
+  game-manage-kit:1.0.0
 ```
 
-生产配置中的微信接口与区服 URL 必须使用 `https/wss`。仓库默认多游戏配置已满足
-启动校验，但其中 `.invalid` 区服域名和开发密钥只是安全占位值，部署前必须替换。
-`GameRegistry` 的微信、限流和机器身份配置是启动快照；修改这些技术配置或密钥后需要
-滚动重启实例。`directoryPath` 指向的区服文件只在该游戏首次同步时导入数据库，此后
-不会在启动时覆盖运营修改。游戏展示信息、运行状态、客户端可见性、区服目录和开服
-状态由数据库管理，可在管理员网页即时编辑。新建项目先处于 `draft`，只有补齐部署
-配置并重启通过校验后才会成为 `configured`。
-`/readyz` 同时检查数据库 schema 与 `GameRegistry`，只有返回 HTTP 200 才可接流量。
-管理员 origin 必须配置为独立的 HTTPS 主机名，并且只代理 Internal/Admin 监听面；
-不能只用同一主机的不同端口隔离 Public 和管理员 Cookie。
+服务允许在零游戏、零区服和草稿游戏状态启动。`/readyz` 校验数据库连接、schema 和
+动态配置 Resolver；合法的未完成业务配置不会阻止管理员继续配置。
 
-客户端从 Public 接口获取已配置且允许下发的游戏：
+生产环境还必须在应用外落实以下信任边界：
+
+- 应用与 MySQL 强制 TLS，应用账号使用最小权限。
+- 仅 gameManageKit 运行账号可以读取明文 `wechat_app_secret`；禁止任意导出、复制和
+  数据库管理权限。
+- MySQL 数据盘、快照和备份加密，限制下载并记录访问审计。
+- 测试/开发环境不得直接恢复生产备份；脱敏副本必须删除 AppSecret。
+- 反向代理、WAF、APM、SQL/慢查询和错误追踪不得采集 Secret 路由请求体。
+- 定期在隔离环境演练恢复；疑似泄露后替换微信 AppSecret，并轮换全部机器 Secret。
+
+微信 AppSecret 按设计以明文保存在 MySQL，替换会覆盖旧值。Service 与机器 Admin
+Secret 由服务端生成，数据库只保存 SHA-256 摘要，明文仅在创建或轮换响应中显示一次。
+这两类 Secret 都不会通过 GET API 回显。
+
+## 接口与运行规则
+
+客户端发现可下发游戏：
 
 ```bash
 curl --fail http://127.0.0.1:2570/v1/games
 ```
 
-`maintenance` 游戏会保留在列表中，便于客户端显示维护状态；`draft`、未勾选下发和
-`disabled` 游戏不会返回。
-
-客户端区服列表仍从具体游戏的 Public 接口获取：
+客户端获取当前可进入的区服：
 
 ```bash
-curl --fail http://127.0.0.1:2570/v1/games/game-a/areas
+curl --fail http://127.0.0.1:2570/v1/games/example-game/areas
 ```
 
-只有后台勾选“已开放”的区服会下发，并按区服顺序和 `serverId` 排序。已开放但状态为
-`maintenance` 的区服仍会下发，供客户端显示维护状态，但登录该区服会被拒绝；取消
-“已开放”会将区服从列表移除并拒绝新登录。
+`/areas` 与登录共用一条准入规则：游戏必须 `configured + enabled`，区服必须
+`isOpen=true`、状态为 `smooth|busy`，且 `openTime` 已到。正常游戏没有可进入区服时
+返回 HTTP 200 和空列表；维护、未开放或未来开服的区服都不下发。含角色足迹的响应
+始终使用 `Cache-Control: private, no-store` 和 `Vary: Authorization`。
 
 ### 可观测性
 
-`/livez`、`/readyz` 和 `/version` 同时注册在两个监听面。Prometheus 文本指标只注册在
-Internal/Admin 监听面的 `/metrics`，并要求一个有效的 Service 身份：
+`/livez`、`/readyz` 和 `/version` 同时注册在两个监听面。Prometheus 指标只在
+Internal/Admin 的 `/metrics` 提供，并要求数据库中已启用且具备对应游戏范围的
+Service 身份：
 
 ```bash
-curl --fail -H 'x-service-id: game-a-service' -H "x-service-secret: ${GAME_A_SERVICE_SECRET}" http://127.0.0.1:2571/metrics
+curl --fail \
+  -H "x-service-id: ${SERVICE_ID}" \
+  -H "x-service-secret: ${SERVICE_SECRET}" \
+  http://127.0.0.1:2571/metrics
 ```
 
-指标按该 Service 获准访问的 `gameId` 过滤，只使用有界的结果、surface 和数据库操作
-标签；`userId`、token 与任意请求输入不会成为 label。请求日志会在可用时加入
-`gameId`、`serviceId` 或 `operatorId`，并对 Authorization、token 和 secret 字段脱敏。
+`SERVICE_SECRET` 应从受控 Secret Manager 注入调用进程，不要写入仓库或普通日志。
+指标只使用有界标签；请求日志会关联 `gameId`、`serviceId` 或 `operatorId`，并脱敏
+Authorization、Token、Cookie、密码和全部 Secret 字段。
 
-HTTP 契约真源是 `openapi/openapi.yaml`。修改契约后必须执行：
+HTTP 契约真源是 `openapi/openapi.yaml`。修改契约后执行：
 
 ```bash
 npm run generate:contract

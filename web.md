@@ -1,228 +1,250 @@
 # 管理员网页技术方案
 
-## 1. 目标与范围
+## 1. 目标与边界
 
-本方案在 `todo.md` 的多游戏改造基础上，为 gameManageKit 增加仅供内部使用的管理员网页。第一版只覆盖以下闭环：
+管理员网页部署在 Internal/Admin 监听面，提供完整的业务配置和账号管理闭环：
 
-1. 管理员使用个人账号登录。
-2. 服务端返回该管理员允许管理的游戏。
-3. 管理员选择游戏并查询账号。
-4. 管理员撤销指定账号的全部会话，或封禁账号。
-5. 具备全局能力的管理员新增、编辑游戏项目。
-6. 配置哪些已接入游戏下发给客户端，以及展示顺序。
-7. 为每个游戏新增、编辑区服，并控制客户端下发的区服列表。
-8. 所有登录和管理操作均可审计。
+1. 个人管理员账号登录。
+2. 按逐游戏权限查询、封禁账号和撤销全部会话。
+3. 创建和编辑游戏项目、目录设置及全部区服。
+4. 配置微信 AppID、AppSecret、endpoint、会话、超时、熔断和限流参数。
+5. 创建、编辑、轮换和撤销 Service/机器 Admin 身份及其 Secret。
+6. 查看不含 Secret 的最近配置审计。
 
-第一版不提供管理员自助注册、密码找回、角色编辑、微信或密钥配置编辑、游戏或区服
-删除、批量账号操作和数据大盘。
+MySQL 是全部业务配置的唯一真源。网页不处理数据库连接、TLS 私钥或首个管理员引导等
+部署信任根。运行时不再读取静态游戏/区服 JSON 或每游戏 Secret 环境变量。
 
 ## 2. 基础框架
 
-网页显示统一基于 Web Standard Kit：
+页面继续基于 Web Standard Kit：
 
 - 来源：<https://github.com/KimiChen/wheels/tree/main/web-standard-kit>
 - 固定版本：`f920dc584db1cb8d1b3e4206a54e1f1eebe497eb`
 - 技术栈：原生 HTML、CSS、JavaScript
 - 浏览器范围：Chrome/Edge 111+、Safari 16.2+、Firefox 113+
 
-不引入 React、Vue、前端路由库、CSS 框架或组件库。管理页规模较小，原生实现可以减少构建链、运行依赖和供应链风险。
-
-复用 Web Standard Kit 时遵循以下约定：
+不引入框架、前端路由库、CSS 框架或构建步骤。复用约定：
 
 - 保留 `wsk-*` 类名和 `@layer wsk`。
-- gameManageKit 自有类使用 `gmk-*` 前缀，并放入 `@layer gmk`。
-- 只复制实际使用的设计令牌、组件样式和交互函数，不复制演示页面的无关内容。
-- 在复用文件头部记录上游地址和固定提交，方便后续比对升级。
-- 第一版只有一个菜单、一个数据表格和一个确认对话框，保留套件的单实例行为；出现多个实例需求后再改造成 `data-*` 多实例初始化。
+- 自有类使用 `gmk-*` 前缀并放入 `@layer gmk`。
+- 只复制实际使用的令牌、组件和交互，文件头记录上游版本。
+- 业务数据只通过 `textContent` 或 DOM 属性写入，不用 `innerHTML`。
 
-## 3. 文件结构
+文件结构：
 
 ```text
 web/admin/
-├── index.html       # 页面结构、SVG 图标和首屏主题初始化
-├── wsk.css          # 从 Web Standard Kit 提取的基础令牌和组件
-├── admin.css        # gameManageKit 页面布局及业务状态样式
-├── wsk.js           # 主题、密码显示、对话框和 Toast 等基础行为
-└── app.js           # 认证、路由、API 调用及账号操作
+├── index.html
+├── wsk.css
+├── admin.css
+├── wsk.js
+└── app.js
 ```
 
-页面不需要编译。Fastify 的 Internal/Admin 应用负责提供 `/admin/` 及其静态资源，Public 应用不得注册这些路由。
+Fastify 只在 Internal/Admin 应用挂载 `/admin/` 和静态资源；Public 监听面固定返回 404。
 
-## 4. 页面与导航
+## 3. 页面与导航
 
-管理网页使用 Hash 表达视图状态，避免为静态页面增加 History API 回退逻辑：
+Hash 只表达视图，不包含游戏 ID、管理员、用户、密码、Secret、operationId 或错误信息：
 
 ```text
 /admin/#login
 /admin/#accounts
 /admin/#games
+/admin/#configuration
 ```
 
-页面初始化流程：
+已登录页面共用侧栏和顶栏：
+
+- “账号管理”：管理员至少有一个逐游戏访问权限时显示。
+- “游戏项目”：`canManageGames=true` 时显示。
+- “接入配置”：具备接入或机器身份管理权限时显示。
+- “退出登录”：始终显示。
+
+直接修改 Hash 不能绕过权限。没有任何可用能力时显示无权限状态，只允许退出。初始化
+流程：
 
 ```text
-加载 /admin/
-→ GET /v1/admin/auth/session
-→ 未登录：显示 #login
-→ 已登录：加载管理员与游戏权限
-→ 单游戏：自动选中并显示 #accounts
-→ 多游戏：要求选择游戏后显示 #accounts
-→ 只有游戏项目全局权限：显示 #games
-→ 两类权限都没有：显示无权限状态，只允许退出
+GET /v1/admin/auth/session
+→ 401：显示登录
+→ 已登录：保存非敏感会话元数据
+→ 根据实时权限选择第一个可用视图
+→ 并行加载该视图的必要 GET 数据
 ```
 
-Hash 只记录页面视图，不记录管理员、账号、密码、会话或操作原因等敏感信息。
+## 4. 登录、会话和重新认证
 
-## 5. 登录页
-
-登录页复用 `wsk-auth-card`、`wsk-field`、`wsk-control`、`wsk-button`、`wsk-alert` 和密码显示按钮。
-
-页面字段：
+登录页字段：
 
 - 管理员账号：`autocomplete="username"`。
-- 登录密码：`autocomplete="current-password"`。
-- 登录按钮：提交期间显示 `wsk-loading` 和 `aria-busy="true"`。
+- 密码：`autocomplete="current-password"`。
+- 登录提交期间设置 `aria-busy=true` 并禁止重复提交。
 
-交互要求：
+登录成功只接收 HttpOnly Cookie，不接收 JavaScript 可读 token；清空密码后进入业务
+页面。登录失败统一提示账号或密码错误，不区分不存在、密码错误和停用。
 
-- 不提供“记住密码”。
-- 不允许输入或保存游戏配置中 Admin 身份所引用的 Secret 环境变量值。
-- 登录失败统一提示“账号或密码错误”，不向客户端区分账号不存在、密码错误或管理员停用。
-- 限流、网络错误和服务不可用使用不同的可恢复提示。
-- 错误提示使用 `aria-live`；失败后焦点回到第一个需要处理的字段。
-- 登录成功后清空密码输入框，再进入账号管理页。
-- `localStorage` 只允许保存 `light`/`dark` 主题，不保存任何认证信息。
+普通会话响应包含四项全局能力和 `elevatedUntil`。Secret 写入或机器范围修改前，如果
+提升会话不存在或即将过期，打开重新认证对话框：
 
-## 6. 账号管理页
+- 只提交当前密码到 `/v1/admin/auth/reauthenticate`。
+- 不签发或保存独立高权限 Bearer Token。
+- 成功后重新读取会话，随后由管理员主动继续原操作。
+- 失败、关闭或页面隐藏时立即清空密码。
 
-账号管理页复用 Web Standard Kit 的参考应用外壳：
+网页不把密码写入 Toast、`aria-live`、URL、日志或任意存储。
 
-- `wsk-reference-shell`：侧栏与主内容布局。
-- `wsk-topbar`：游戏选择器、管理员菜单和主题切换。
-- `wsk-panel`：查询和账号信息卡片。
-- `wsk-table`：账号信息或会话摘要。
-- `wsk-badge`：游戏及账号状态。
-- `wsk-dialog`：危险操作确认。
-- `wsk-toast`：操作结果反馈。
+## 5. 账号管理
 
-侧栏保留“账号管理”“游戏项目”和“退出登录”。“游戏项目”只对会话返回
-`canManageGames=true` 的管理员显示；修改 Hash 不能绕过服务端授权。
-
-账号操作流程：
+账号流程保持：
 
 ```text
-选择有权限的游戏
+选择授权游戏
 → 输入 userId
 → 查询账号
-→ 显示账号状态、最近登录时间和活跃会话数
-→ 选择“撤销全部会话”或“封禁账号”
-→ 填写操作原因
-→ 确认游戏、用户和影响范围
-→ 提交操作并显示结果
+→ 显示状态、最近登录和活跃会话数
+→ 确认“撤销全部会话”或“封禁账号”
+→ 填写原因并提交
 ```
 
-限制：
+切换游戏立即清空账号数据和操作原因。每次新操作使用 `crypto.randomUUID()` 作为
+`operationId`；人工重试同一操作时复用该值。封禁和撤销只影响 URL 中的 `gameId`，
+服务端仍会实时复核逐游戏权限。
 
-- 未完成账号查询前不允许执行写操作。
-- `userId` 在浏览器端进行格式校验，但服务端仍必须独立校验。
-- 每次新操作使用 `crypto.randomUUID()` 生成 `operationId`。
-- 同一次操作因超时或网络错误重试时必须复用原 `operationId`。
-- 切换游戏后立即清空查询结果、操作原因和待确认操作。
-- “撤销”在界面上明确命名为“撤销全部会话”，不使用容易被理解为注销账号的文字。
-- 封禁按钮使用危险色；确认对话框必须显示游戏名称、`gameId`、`userId` 和影响说明。
-- 游戏是否允许操作以服务端返回的权限和能力为准，前端不能仅根据游戏状态自行推断授权。
+## 6. 游戏项目与区服
 
-## 7. 游戏项目与客户端列表
+游戏列表展示名称、`gameId`、运行状态、配置完整度、客户端可见性、顺序、revision 和
+更新时间。
 
-游戏项目页使用数据库作为非敏感元数据真源，列表项展示名称、`gameId`、运行状态、
-接入状态、客户端下发状态、顺序和最后更新时间。新增与编辑复用一个对话框：
+- 新项目只接收 `gameId`、名称和说明，固定创建为
+  `draft + maintenance + clientVisible=false`。
+- `gameId` 创建后不可修改、删除或复用。
+- `configured` 后才允许 `enabled` 或客户端可见。
+- `disabled` 是不可逆终态。
+- 编辑携带当前 revision；409 时保留非敏感输入，但禁止继续使用旧版本提交。
 
-- 新增只接收 `gameId`、名称和说明，固定创建为 `draft + maintenance`、
-  `clientVisible=false`、`sortOrder=0`。
-- `gameId` 创建后只读，不提供删除或复用入口。
-- `draft` 表示尚未完成微信、区服、环境变量和机器身份等部署配置，不能启用或下发。
-- `configured` 项目允许在 `enabled` 与 `maintenance` 间切换，并可配置下发开关和
-  0..65535 的展示顺序。
-- 任意项目可永久停用；`disabled` 是终态且必须取消客户端下发。
-- 编辑请求携带当前 `revision`；服务端以乐观锁拒绝过期版本，页面保留输入并要求刷新。
-- 页面只按文本渲染名称和说明，不使用 `innerHTML` 注入业务数据。
+区服管理显示全部区服，包括未开放、未来开服和维护状态。目录设置与区服共用
+`directoryRevision`：
 
-Public `GET /v1/games` 按 `sortOrder, gameId` 返回 `configured`、显式允许下发且状态为
-`enabled` 或 `maintenance` 的游戏。保留维护中游戏是为了让客户端展示维护提示；
-`draft`、未勾选下发与 `disabled` 游戏不返回。
+- 修改 `isOps`、新增区服和编辑区服都携带当前目录 revision。
+- `serverId` 创建后只读，不提供删除。
+- URL、Unix 秒开放时间、标签、状态、开关和排序在前端预校验，服务端独立复核。
+- 409 后重新读取完整目录，再允许管理员编辑。
 
-每个游戏项目卡片提供“管理区服”按钮。点击后打开该游戏的区服管理大对话框，先展示
-区服列表，再通过内嵌的新增或编辑表单修改单个区服；不增加新的 Hash 路由。表单字段
-与限制：
+Public `/areas` 不复用管理员列表模型。只有 `isOpen=true`、`status=smooth|busy` 且
+`openTime` 已到的区服可以下发和登录；维护区服不会下发。
 
-- `serverId` 为 0..65535 的整数，新增时填写，创建后只读。
-- 名称为 1..64 个有效 Unicode 字符。
-- 标签为 `normal`、`new`、`full` 或 `maintenance`。
-- 状态为 `smooth`、`busy` 或 `maintenance`。
-- 开放时间使用 `datetime-local` 输入，并转换为非负安全整数 Unix 秒。
-- HTTP URL 只允许 `http/https`，WebSocket URL 只允许 `ws/wss`；均不得包含用户名、
-  密码或 fragment，长度不超过 2048。
-- `isOpen` 控制是否下发，`sortOrder` 是 0..65535 的整数；编辑请求必须携带当前
-  `revision`。
+## 7. 独立“接入配置”页面
 
-`isOpen` 与维护状态必须使用不同的界面文案：
+页面按所选游戏分为六块：
 
-- 未开放（`isOpen=false`）：不下发且不可登录。
-- 已开放并维护（`isOpen=true`、`status=maintenance`）：仍下发供客户端展示维护，
-  但不可登录。
-- 已开放且状态为 `smooth` 或 `busy`：下发并允许登录。
+1. 配置完整度和游戏 revision。
+2. 微信接入。
+3. 会话、超时、熔断和限流参数。
+4. Service 身份及游戏范围。
+5. 机器 Admin 身份及游戏范围。
+6. 最近配置与 Secret 审计。
 
-区服对话框分别处理加载、空列表、请求失败和 `revision` 冲突；冲突时保留管理员输入并
-禁止用旧版本重复提交，管理员取消本次编辑后自动加载最新数据，再重新确认。关闭对话框
-或提交成功后，焦点返回原“管理区服”按钮。
-Public `GET /v1/games/{gameId}/areas` 只返回 `isOpen=true` 的区服，并按
-`sortOrder, serverId` 排序；公开 `AreaServer` 不增加后台字段。
+普通接入表单使用 integration revision，只提交非 Secret 字段。页面同时展示保存
+revision 与当前请求实例的 `loadedRevision`；文案必须说明这不代表所有实例已经同步。
+
+### 7.1 微信 AppSecret
+
+AppID 可以完整显示和编辑。AppSecret 只显示：
+
+- 未配置。
+- 已生效及版本。
+- 最近更新时间。
+- 本次替换结果未知或失败。
+
+AppSecret 输入框永远为空，不预填旧值。替换使用独立对话框和唯一 operationId，请求
+包含当前 integration revision。保存成功响应仍不含明文，只能说明已经写入 MySQL，
+不能宣称微信凭据已验证。
+
+输入值只存在于输入元素和最短生命周期的局部变量中。提交开始即从通用页面状态移出；
+无论成功、失败、关闭、409、401、`pagehide` 或超时都调用统一清理函数：
+
+```text
+input.value = ""
+局部引用 = null
+移除可能包含值的文本节点
+```
+
+AppSecret 不进入 URL、Hash、Toast、`aria-live`、DOM `data-*`、浏览器存储、调试日志或
+错误对象。
+
+### 7.2 机器身份
+
+身份列表只显示 ID、类型、名称、状态、游戏范围、revision 和 Secret 版本元数据，不
+显示摘要。创建和编辑表单要求：
+
+- `identityId` 创建后不可修改。
+- 类型仅为 `service` 或 `machine_admin`。
+- 游戏范围使用显式多选，默认不自动授予全部游戏。
+- 修改范围前重新认证。
+- 停用身份不删除历史审计。
+
+创建和轮换由服务端生成 Secret。首次成功响应进入专用一次性对话框：
+
+- 默认遮罩，只有管理员主动点击才显示。
+- 提供复制按钮，但不把内容放入 Toast 或 live region。
+- 未勾选“我已安全保存”时，关闭需要再次确认。
+- 关闭、确认、退出、路由切换、`pagehide`、401/403/409 或超时后，删除文本节点并清空
+  内存引用；重新打开无法恢复。
+- `Cache-Control: no-store`，不得缓存响应。
+
+浏览器无法可靠清空系统剪贴板，因此复制后明确提醒管理员立即保存到 Secret Manager，
+并避免在共享终端操作。
+
+轮换请求携带 operationId、identity revision 和 previous 有效窗口。网络超时或 5xx
+后将结果标为“未知”，只允许调用对应的状态 GET；绝不自动重发 POST。状态 GET 只说明
+操作是否发生，不能恢复一次性明文。若 Secret 已生成但响应丢失，管理员只能发起下一次
+明确轮换。
+
+### 7.3 审计
+
+审计列表只渲染后端白名单字段：审计类型、资源、动作、操作者、版本、结果和时间。
+不得渲染通用 before/after JSON、请求体、请求头、Secret 或摘要。
 
 ## 8. HTTP 契约
 
-管理员认证发生在选择游戏之前，因此认证端点是全局端点：
+管理员认证：
 
 ```text
 POST   /v1/admin/auth/login
 GET    /v1/admin/auth/session
+POST   /v1/admin/auth/reauthenticate
 DELETE /v1/admin/auth/session
+```
+
+游戏、目录和区服：
+
+```text
 GET    /v1/admin/games
 POST   /v1/admin/games
 PATCH  /v1/admin/games/{gameId}
+GET    /v1/admin/games/{gameId}/directory-settings
+PATCH  /v1/admin/games/{gameId}/directory-settings
 GET    /v1/admin/games/{gameId}/servers
 POST   /v1/admin/games/{gameId}/servers
 PATCH  /v1/admin/games/{gameId}/servers/{serverId}
 ```
 
-区服列表响应使用管理模型，不与公开的 `AreaServer` 混用：
+接入和 Secret：
 
-```json
-{
-  "servers": [
-    {
-      "gameId": "game-a",
-      "serverId": 1,
-      "name": "一区",
-      "tag": "new",
-      "status": "smooth",
-      "openTime": 1785168000,
-      "gameHttpUrl": "https://game-a.example.invalid",
-      "gameWsUrl": "wss://game-a.example.invalid",
-      "isOpen": true,
-      "sortOrder": 0,
-      "revision": 1,
-      "createdAt": "2026-07-28T00:00:00.000Z",
-      "updatedAt": "2026-07-28T00:00:00.000Z"
-    }
-  ]
-}
+```text
+GET    /v1/admin/games/{gameId}/integration
+PATCH  /v1/admin/games/{gameId}/integration
+PUT    /v1/admin/games/{gameId}/secrets/wechat-app-secret
+GET    /v1/admin/machine-identities
+POST   /v1/admin/machine-identities
+PATCH  /v1/admin/machine-identities/{identityId}
+POST   /v1/admin/machine-identities/{identityId}/secret-rotations
+POST   /v1/admin/machine-identities/{identityId}/secret-versions/{version}/revoke
+GET    /v1/admin/machine-identities/{identityId}/secret-rotations/{operationId}
+GET    /v1/admin/config-audit
 ```
 
-新增请求包含除 `gameId`、`revision` 和审计时间之外的全部字段；编辑请求不接收
-`serverId`，但必须包含其余可编辑字段和 `revision`。服务端拒绝未知字段。重复
-`serverId` 或 revision 过期返回 HTTP 409 `GAME_SERVER_CONFLICT`。
-
-账号查询和操作必须位于具体游戏下：
+账号接口仍位于具体游戏：
 
 ```text
 GET  /v1/games/{gameId}/admin/accounts/{userId}
@@ -230,182 +252,91 @@ POST /v1/games/{gameId}/admin/accounts/{userId}/ban
 POST /v1/games/{gameId}/admin/accounts/{userId}/revoke
 ```
 
-客户端发现端点位于 Public 监听面：
+OpenAPI 是唯一契约真源。`app.js` 只做必要的运行时响应验证，拒绝未知或缺失的安全关键
+字段，不复制维护另一套类型定义。所有 GET 响应都不允许包含 Secret 或摘要。
+
+## 9. 前端状态
+
+`app.js` 使用小型显式状态对象：
 
 ```text
-GET /v1/games
+auth:
+  booting | anonymous | authenticated
+
+session:
+  operator | games | capabilities | expiresAt | elevatedUntil
+
+selection:
+  gameId | queriedUserId
+
+accounts:
+  idle | loading | found | notFound | error
+
+projects:
+  idle | loading | ready | empty | error
+
+directory:
+  idle | loading | ready | empty | conflict | error
+
+integration:
+  idle | loading | ready | conflict | unknown | error
+
+machines:
+  idle | loading | ready | empty | conflict | unknown | error
+
+audit:
+  idle | loading | ready | empty | error
 ```
 
-建议的登录请求：
+Secret 明文不属于该通用状态对象，只允许存在于专用对话框的局部闭包。统一
+`clearSensitiveState()` 清空密码、AppSecret 和一次性 Secret，并由以下事件调用：
 
-```json
-{
-  "operatorId": "ops_kimi",
-  "password": "仅在请求体中传输"
-}
-```
+- 视图切换、退出和 `pagehide`。
+- 401、403、404、409。
+- 对话框关闭、请求结束或请求超时。
+- 全局未捕获错误处理前。
 
-登录成功只通过响应头设置会话 Cookie，响应体不返回会话令牌。
+`localStorage` 只允许保存 `light`/`dark` 主题；`sessionStorage`、IndexedDB、Cache API
+和 Service Worker 不保存管理数据。
 
-建议的会话响应：
+## 10. 请求和错误处理
 
-```json
-{
-  "operator": {
-    "operatorId": "ops_kimi",
-    "displayName": "Kimi"
-  },
-  "games": [
-    {
-      "gameId": "game-a",
-      "name": "示例游戏",
-      "status": "enabled",
-      "canOperateAccounts": true
-    }
-  ],
-  "expiresAt": "2026-07-28T18:00:00.000Z"
-}
-```
+所有 API 请求通过一个 `request()`：
 
-建议的账号查询响应：
+- `credentials: "same-origin"` 和 `Accept: application/json`。
+- 写请求设置 `Content-Type: application/json`，服务端校验精确 Origin。
+- 使用 `AbortController` 实现超时。
+- 统一解析错误码、`Retry-After` 和 `x-request-id`，但错误对象不附加敏感请求体。
+- 普通安全 GET 可由管理员主动重试；写请求默认不自动重试。
 
-```json
-{
-  "userId": "u_12345",
-  "status": "active",
-  "lastLoginAt": "2026-07-28T05:20:00.000Z",
-  "activeSessionCount": 2
-}
-```
+错误动作：
 
-封禁和撤销请求继续使用：
+- 401：清空全部敏感和业务状态，回到登录。
+- 403：关闭表单，清空敏感值并刷新会话权限。
+- 404：清空目标数据并返回列表。
+- 409：清空 Secret，标记 revision 冲突并重新加载。
+- 429：展示明确重试时间，不循环重试。
+- 网络超时/5xx：Secret 操作为未知；先查询状态或读取最新元数据，绝不自动再次生成。
 
-```json
-{
-  "operationId": "3f1a0d6c-3a43-4a43-bfad-f13f7baed362",
-  "reason": "人工确认的操作原因"
-}
-```
+普通成功消息可以使用 Toast；Secret、密码、token 和可能含敏感值的错误永远不进入
+Toast 或 `aria-live`。
 
-OpenAPI 仍是唯一契约真源。网页代码不得复制维护另一份请求或响应类型定义；实现阶段应提供少量运行时响应校验，防止后端异常响应直接进入页面状态。
+## 11. 服务与浏览器安全
 
-## 9. 管理员身份与数据模型
+- 管理网页/API 同源部署，不开放任意 CORS。
+- 生产使用独立 HTTPS Admin 主机名和 `__Host-`、Secure、HttpOnly、
+  SameSite=Strict Cookie。
+- 所有写请求校验 Origin，每次事务实时复核管理员状态、权限、auth version 和提升
+  会话。
+- Secret 路由关闭请求体日志，日志脱敏覆盖所有 Secret/密码/token/Cookie 字段名。
+- 页面不向浏览器暴露微信旧 Secret、机器摘要或数据库字段结构。
+- 管理端响应使用 `Cache-Control: no-store`；一次性 Secret 响应强制 no-store。
 
-现有 `x-operator-id + x-admin-secret` 不能作为浏览器登录方案：
-
-- `x-operator-id` 由调用方填写，不能证明真实身份。
-- 共享 Admin Secret 一旦进入网页，就可能被浏览器存储、扩展、日志或前端构建产物泄露。
-- 共享 Secret 无法单独停用某个管理员，也无法可靠限制管理员可访问的游戏。
-
-建议增加：
-
-```text
-admin_operators
-  operator_id
-  display_name
-  password_hash
-  status
-  auth_version
-  can_manage_games
-  created_at
-  updated_at
-
-admin_game_access
-  operator_id
-  game_id
-  can_operate_accounts
-
-admin_sessions
-  token_hash
-  operator_id
-  created_at
-  last_seen_at
-  expires_at
-
-games
-  game_id
-  name
-  description
-  status
-  configuration_state
-  client_visible
-  sort_order
-  revision
-
-game_directory_settings
-  game_id
-  is_ops
-
-game_servers
-  game_id
-  server_id
-  name
-  tag
-  status
-  open_time
-  game_http_url
-  game_ws_url
-  is_open
-  sort_order
-  revision
-
-admin_game_audit
-  game_id
-  operator_id
-  action                  # create/update/server_create/server_update
-  before_data
-  after_data
-  ip
-```
-
-密码使用 Node.js `crypto.scrypt` 和每个管理员独立的随机盐，保存带版本和参数的哈希结果，不保存明文或可逆密文。
-
-首个管理员通过命令行创建，例如：
-
-```text
-npm run admin:create -- --operator-id ops_kimi --games game-a,game-b --manage-games
-```
-
-创建命令使用 Node.js `crypto.randomBytes` 生成 12 字节随机值，并以 16 位 Base64URL
-初始密码仅显示一次，不要求用户输入，也不允许密码作为命令行参数进入 Shell history。
-`--manage-games` 显式授予全局项目管理能力；它与逐游戏账号权限相互独立。第一版不提供
-网页注册入口。
-
-## 10. 会话与请求安全
-
-管理员会话使用至少 256 bit 的随机令牌。浏览器保存原始令牌，数据库只保存 SHA-256 哈希。
-
-Cookie 建议：
-
-```text
-Name: __Host-gmk_admin_session
-HttpOnly: true
-Secure: true
-SameSite: Strict
-Path: /
-Domain: 不设置
-```
-
-默认采用 8 小时绝对有效期和 30 分钟空闲有效期。退出、管理员停用、修改密码或权限收回时应立即删除相关会话。
-
-其他安全要求：
-
-- 管理网页与 API 同源部署，不开放任意跨域。
-- 所有写请求验证 `Origin`。
-- 每个请求重新校验管理员状态和目标 `gameId` 权限，不能信任页面保存的权限。
-- 登录限流键包含规范化 `operatorId` 和 IP。
-- 账号管理限流键包含 `operatorId`、`gameId` 和 IP；游戏与区服写入限流键包含
-  `operatorId` 和 IP。
-- 登录成功、登录失败、退出、会话过期、权限拒绝、封禁、撤销、游戏项目和区服变更均
-  写入对应审计表。
-- 日志不得记录密码、Cookie、会话令牌、Admin Secret 或完整请求体。
-- Internal/Admin 服务必须位于 TLS 反向代理或等价的安全传输层之后。
-
-建议的 Content-Security-Policy：
+Content-Security-Policy：
 
 ```text
 default-src 'none';
-script-src 'self' 'sha256-<首屏主题脚本哈希>';
+script-src 'self' 'sha256-<固定首屏主题脚本哈希>';
 style-src 'self';
 img-src 'self' data:;
 connect-src 'self';
@@ -416,120 +347,34 @@ base-uri 'none';
 object-src 'none';
 ```
 
-Web Standard Kit 的首屏主题脚本需要保留以避免主题闪烁，实现时为固定脚本计算 CSP Hash，不使用宽泛的 `unsafe-inline`。
+固定首屏主题脚本使用哈希，不启用宽泛的 `unsafe-inline`。
 
-## 11. 前端状态管理
+## 12. 测试
 
-`app.js` 使用一个小型显式状态对象，不引入状态管理库：
+### 单元与网页测试
 
-```text
-auth:
-  booting | anonymous | authenticated
+- 权限控制下的导航和 Hash 回退。
+- 登录、重新认证、会话过期和退出清理。
+- 游戏/目录/integration/机器 identity revision 冲突。
+- `/areas` 和登录统一准入文案。
+- AppSecret 输入永不预填，所有退出路径都清空。
+- 一次性 Secret 默认遮罩、显示、复制、确认关闭和不可恢复。
+- 401/403/404/409/429/超时/5xx 的敏感状态清理。
+- Secret 轮换未知结果只发状态 GET，不自动 POST。
+- 页面、URL、Toast、live region 和浏览器存储不出现 canary Secret。
 
-session:
-  operator | games | canManageGames | expiresAt
+### 契约与集成测试
 
-selection:
-  gameId | queriedUserId
-
-account:
-  idle | loading | found | notFound | error
-
-gameProjects:
-  idle | loading | ready | empty | error
-
-gameEditor:
-  closed | creating | editing | submitting
-
-serverManager:
-  closed | loading | ready | empty | error
-
-serverEditor:
-  closed | creating | editing | submitting
-
-operation:
-  idle | confirming | submitting | succeeded | failed
-```
-
-所有网络请求统一经过 `request()`：
-
-- 默认 `credentials: "same-origin"`。
-- 设置 `Accept: application/json`。
-- 写请求设置 `Content-Type: application/json`。
-- 统一解析错误码和 `x-request-id`。
-- 收到 `401` 时清空业务状态并切回登录页。
-- 收到 `403` 时刷新当前会话权限。
-- 收到 `429` 时显示限流提示，不自动循环重试。
-- 不自动重试封禁或撤销；由管理员主动重试并复用相同 `operationId`。
-
-## 12. 静态资源服务
-
-静态资源只挂载到 Internal/Admin Fastify 实例：
-
-```text
-GET /admin/
-GET /admin/wsk.css
-GET /admin/admin.css
-GET /admin/wsk.js
-GET /admin/app.js
-```
-
-要求：
-
-- Public Fastify 实例访问 `/admin` 或相关资源时返回 404。
-- `index.html` 使用 `Cache-Control: no-cache`。
-- CSS 和 JavaScript 使用 ETag；没有文件名指纹前不设置长期 immutable 缓存。
-- 静态文件根目录必须固定为 `web/admin`，不得接受用户输入拼接文件路径。
-- API 和静态页面共享 Internal/Admin 源，避免 CORS 和跨站 Cookie。
-
-## 13. 测试方案
-
-### 单元测试
-
-- 登录表单校验和提交锁定。
-- 密码显示按钮的可访问状态。
-- Hash 页面切换。
-- 会话过期后的状态清理。
-- 游戏切换后账号数据清理。
-- 游戏项目响应校验、状态转换、客户端下发约束和 revision 冲突。
-- 区服响应校验、时间和 URL 转换、开放/维护语义及 revision 冲突。
-- API 错误码到页面提示的映射。
-- 同一操作重试复用 `operationId`。
-
-### 契约测试
-
-- OpenAPI 包含管理员认证和账号查询端点。
 - Public 与 Internal/Admin 监听面隔离。
-- 会话响应只包含管理员有权访问的游戏。
-- 账号操作路径必须包含 `gameId`。
-- 游戏和区服管理端点只使用 Cookie 管理员身份；Public 保持原 `AreaServer` 结构。
+- GET integration/identity/audit 不含 Secret 或摘要。
+- Secret 权限与提升会话在事务内复核。
+- operationId 重放不产生新版本，也不再次返回一次性 Secret。
+- Service previous 在窗口内有效，到期/撤销后拒绝。
+- 动态保存后无需重启生效，多实例在 TTL 内收敛。
+- AppSecret 只保留当前明文；机器 Secret 只保存摘要。
+- 两个游戏的账号、token、区服和机器范围不串租户。
 
-### 集成测试
-
-- 正确密码登录成功，错误密码返回统一错误。
-- 停用管理员无法登录，已有会话立即失效。
-- A 游戏管理员不能查询或操作 B 游戏。
-- 修改 URL 中的 `gameId` 不能绕过权限。
-- 会话空闲过期、绝对过期和退出均立即生效。
-- 相同 `operationId` 重放不会产生重复副作用。
-- 登录和写操作限流生效。
-- 非法 Origin 被拒绝。
-- 无全局能力不能新增或编辑游戏，草稿不能启用或下发。
-- 客户端列表只包含 configured、显式可见且未停用的游戏，并按顺序返回。
-- 两名管理员使用相同 revision 编辑时，后提交者收到冲突且不会覆盖。
-- 仅开放区服按顺序下发，维护区服仍可见但拒绝登录，未开放区服不可见且拒绝登录。
-- 相同 `serverId` 可存在于不同游戏，重复创建或过期 revision 返回区服冲突。
-
-### 浏览器测试
-
-- 键盘可以完成登录、查询、确认、新增/编辑游戏和新增/编辑区服操作。
-- 登录中、失败、限流、断网和会话过期状态正确。
-- 深色与浅色主题首屏无明显闪烁。
-- 确认对话框包含正确的游戏和用户。
-- Public 监听面不能加载管理网页。
-- 1024px 及以上桌面宽度布局可用；窄屏不出现不可操作的控件。
-
-验收命令在现有命令基础上增加网页测试：
+验收命令：
 
 ```bash
 npm run verify:contract
@@ -542,31 +387,13 @@ npm run build
 npm audit --omit=dev
 ```
 
-## 14. 实施顺序
+## 13. 完成定义
 
-1. 完成 `todo.md` 中游戏模型、OpenAPI 路径、GameRegistry 和管理员游戏权限设计。
-2. 增加管理员、游戏权限、会话表和管理员初始化命令。
-3. 实现登录、当前会话、退出和账号查询 API。
-4. 从固定版本的 Web Standard Kit 提取所需基础组件。
-5. 完成登录页和认证状态切换。
-6. 完成游戏选择、账号查询、封禁和撤销流程。
-7. 完成游戏项目列表、新增、编辑和客户端下发配置。
-8. 完成每个游戏的区服列表、新增、编辑和开放状态配置。
-9. 将网页静态资源挂载到 Internal/Admin 监听面。
-10. 增加安全响应头、审计、限流和会话清理。
-11. 完成契约、集成和浏览器验收测试。
-
-## 15. 完成定义
-
-- 管理员可以使用个人账号登录、选择授权游戏并完成账号查询和操作。
-- 具备全局能力的管理员可以新增 draft、编辑游戏，并配置客户端下发列表和顺序。
-- 具备全局能力的管理员可以为每个游戏新增、编辑和开关区服，并处理 revision 冲突。
-- 客户端只能发现 configured、显式可见且未永久停用的游戏。
-- 客户端区服列表只包含已开放区服；维护区服可见但不能登录。
-- Admin Secret 不出现在 HTML、JavaScript、浏览器存储、请求日志或构建产物中。
-- 未登录、会话过期和停用管理员均不能访问管理数据。
-- 管理员无法通过修改 Hash、请求体或 URL 访问未授权游戏。
-- 封禁和撤销只影响当前 `gameId`，且重试不会重复执行。
+- 管理员可以从空库完成游戏、区服、微信参数和机器身份配置。
+- 独立“接入配置”页面覆盖完整度、微信、运行参数、两类机器身份和审计。
+- Secret 只在允许的写请求/一次性响应出现，关闭后无法恢复。
+- 未授权、未提升或 revision 过期的请求由服务端拒绝。
+- 管理保存后运行时动态加载，不依赖 JSON、每游戏环境变量或人工重启。
+- Public `/areas` 与登录只接受同一组可进入区服。
 - Public 监听面不暴露管理页面和管理 API。
-- 页面遵循 Web Standard Kit 的主题、组件命名、键盘操作和无障碍基线。
-- 所有契约、类型、单元、集成、浏览器和构建检查通过。
+- 页面满足键盘操作、焦点恢复、主题和无障碍基线。

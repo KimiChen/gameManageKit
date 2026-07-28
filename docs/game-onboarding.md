@@ -1,130 +1,145 @@
 # 游戏接入指南
 
-gameManageKit 使用两层游戏模型：MySQL 保存展示名称、说明、运行状态、客户端下发
-设置和区服目录；启动时加载的 `GameRegistry` 保存微信、限流及机器身份等技术接入
-配置。所有微信、Service 和 Admin 密钥只通过环境变量或 Secret Manager 注入。技术
-配置变更后需要滚动重启；数据库中的非敏感游戏和区服元数据可由管理员网页即时编辑。
+gameManageKit 使用 MySQL 作为游戏项目、区服、微信参数、限流参数和机器身份的唯一业务
+配置真源。运行时不读取 `config/games.json`、区服 JSON、`directoryPath` 或每游戏
+Secret 环境变量。管理员保存后通过 revision 自动热更新，不需要把配置发布和滚动重启
+绑定在一起。
 
-## 0. 在管理员网页创建项目
+## 0. 准备管理员
 
-具备 `can_manage_games` 能力的管理员可在 `/admin/#games` 新增游戏项目。新项目固定为
-`draft + maintenance`，默认不向客户端下发。`gameId` 创建后不可修改、删除或复用。
-
-网页只管理以下非敏感字段：
-
-- 展示名称与客户端说明；
-- `enabled`、`maintenance`、`disabled` 运行状态；
-- 游戏是否下发给客户端及展示顺序；
-- 每个区服的名称、标签、状态、开放时间、HTTP/WebSocket URL、开服开关及顺序。
-
-网页不接收目录路径、微信 endpoint、环境变量名或任何 Secret。新项目必须继续按下文
-补齐 JSON、用于首次导入的区服文件、环境变量和机器身份范围；服务重启通过完整校验
-后，项目才会从 `draft` 原子变为 `configured`。`draft` 不能启用或下发，`disabled`
-是不可逆终态。
-
-## 1. 定义游戏和区服目录
-
-在 `GAME_MANAGE_KIT_GAMES_CONFIG` 指向的文件中增加游戏。`gameId` 创建后不可复用或
-修改，必须匹配 `^[a-z][a-z0-9-]{1,31}$`，即 2 至 32 个小写 ASCII 字母、数字或
-连字符，并以字母开头。
-
-```json
-{
-  "gameId": "example-game",
-  "status": "enabled",
-  "directoryPath": "areas.example-game.json",
-  "sessionTtlSeconds": 259200,
-  "wechat": {
-    "appIdEnv": "EXAMPLE_GAME_WX_APPID",
-    "secretEnv": "EXAMPLE_GAME_WX_SECRET",
-    "endpoint": "https://api.weixin.qq.com/sns/jscode2session",
-    "timeoutMs": 3000,
-    "breakerThreshold": 5,
-    "breakerOpenMs": 10000
-  },
-  "loginRate": {
-    "capacity": 5,
-    "refillPerSecond": 0.2
-  },
-  "adminRate": {
-    "capacity": 10,
-    "refillPerSecond": 1
-  }
-}
-```
-
-相对的 `directoryPath` 以游戏配置文件所在目录为基准。每个游戏必须使用独立的目录
-文件；`serverId` 只要求在本游戏内唯一。该文件是首次接入的种子数据：当数据库中还
-没有该游戏的 `game_directory_settings` 时，服务一次性导入 `isOps` 和全部区服，
-默认令每个区服 `isOpen=true`，并按文件顺序生成 `sortOrder`。导入完成后，数据库是
-唯一真源；后续启动不会用文件覆盖后台修改。
-
-生产环境的微信 endpoint、`gameHttpUrl` 和 `gameWsUrl` 必须分别使用 `https`、
-`https` 和 `wss`。开发环境只额外允许 loopback 地址使用 `http/ws`。首次导入后可在
-管理员网页新增或编辑区服，无需修改区服文件或重启。
-
-区服开放与维护是两个正交状态：
-
-- `isOpen=false`：不向客户端下发，登录和角色登记等需要可用区服的入口会拒绝访问。
-- `isOpen=true`、`status=maintenance`：仍向客户端下发，方便展示维护提示，但登录会
-  被拒绝。
-- `isOpen=true`、`status=smooth|busy`：正常下发并允许登录。
-
-区服按 `sortOrder, serverId` 下发。`serverId` 创建后不可修改或删除；编辑必须携带
-当前 `revision`，冲突时刷新最新数据后再提交。
-
-JSON 中的状态用于项目首次接入时初始化数据库；项目成为 `configured` 后，数据库状态
-是请求处理和客户端列表的真源。游戏状态含义：
-
-- `enabled`：正常提供业务请求。
-- `maintenance`：暂时停止业务请求，返回 HTTP 503 `GAME_DISABLED`。
-- `disabled`：永久停用业务请求，返回 HTTP 403 `GAME_DISABLED`。
-
-已接入游戏不能从配置中删除；即使已在网页永久停用，也必须保留对应技术配置，确保
-历史租户标识不被误用。`disabled` 不能恢复为 `enabled` 或 `maintenance`，`gameId`
-也不能分配给另一个游戏。启动同步允许配置文件暂时缺少尚未接入的 `draft`，但会拒绝
-遗漏任何 `configured` 游戏。
-
-## 2. 配置调用方权限
-
-在同一文件的 `serviceIdentities` 和 `adminIdentities` 中配置最小游戏范围：
-
-```json
-{
-  "serviceId": "example-game-server",
-  "secretEnv": "EXAMPLE_GAME_SERVICE_SECRET",
-  "gameIds": ["example-game"]
-}
-```
-
-```json
-{
-  "operatorId": "example-game-admin",
-  "secretEnv": "EXAMPLE_GAME_ADMIN_SECRET",
-  "gameIds": ["example-game"]
-}
-```
-
-轮换时可以临时增加 `previousSecretEnv`。不同 Service/Admin 身份不得复用相同密钥；
-每个 Secret 必须是 16 至 512 个字符；客户端传入的 `gameId` 也不能扩大配置中的授权
-范围。
-
-## 3. 注入密钥并验收
-
-将 JSON 中引用的环境变量写入本地 `.env`，或通过部署平台注入。不要把真实值提交到
-Git、普通业务表或日志。
-
-启动前执行：
+先完成 migration，并创建具备全量配置能力的个人管理员：
 
 ```bash
 npm run migrate
-npm run typecheck
-npm test
-npm run test:int
-npm run build
+npm run admin:create -- \
+  --operator-id ops_kimi \
+  --display-name Kimi \
+  --full-config
 ```
 
-启动后确认：
+初始密码只显示一次。登录 Internal/Admin origin 的 `/admin/` 后，从“游戏项目”和
+“接入配置”完成以下步骤。Secret 写入与机器身份范围修改会要求再次输入当前管理员密码，
+提升会话约 5 分钟。
+
+## 1. 创建草稿游戏
+
+在“游戏项目”创建项目：
+
+- `gameId` 必须匹配 `^[a-z][a-z0-9-]{1,31}$`，即 2 至 32 个小写 ASCII 字母、数字或
+  连字符，并以字母开头。
+- `gameId` 创建后不可修改、删除或复用。
+- 新项目固定为 `draft + maintenance`、`clientVisible=false`、`sortOrder=0`。
+- 创建事务会同时建立空目录设置、默认接入配置和账号序列。
+
+零游戏、草稿游戏和零区服都属于合法管理状态，不影响服务启动或管理员登录。
+
+## 2. 配置目录和区服
+
+在游戏项目中打开区服管理，先设置目录的 `isOps`，再创建全部区服。每个区服包含：
+
+- `serverId`：0..65535，只在本游戏内唯一；不同游戏可以使用相同值。
+- 名称和展示标签。
+- 状态：`smooth`、`busy` 或 `maintenance`。
+- Unix 秒 `openTime`。
+- 游戏 HTTP 与 WebSocket URL。
+- `isOpen` 和 0..65535 的 `sortOrder`。
+
+生产 URL 必须分别使用 `https://` 和 `wss://`；开发环境只额外允许 loopback 的
+`http://` 和 `ws://`。`serverId` 创建后不可修改，第一阶段也不物理删除区服；退役时
+设置 `isOpen=false`。
+
+目录设置和区服共用目录级 revision。任何新增或编辑都会在同一事务中递增
+`directoryRevision`；HTTP 409 表示其他管理员已经修改，刷新后再确认。
+
+Public `/areas` 与登录共用以下准入规则：
+
+```text
+游戏 configurationState = configured
+AND 游戏 status = enabled
+AND 区服 isOpen = true
+AND 区服 status IN (smooth, busy)
+AND 区服 openTime <= 当前时间
+```
+
+维护、未开放或尚未到开放时间的区服不会下发，也不能登录。正常游戏暂时没有可进入
+区服时，`/areas` 返回 HTTP 200 和空 `servers`。
+
+## 3. 配置微信和运行参数
+
+在独立“接入配置”页面填写：
+
+- 微信 AppID 和 endpoint。
+- 微信请求 timeout、熔断阈值和熔断开启时间。
+- 玩家会话 TTL。
+- 登录与管理接口的令牌桶 capacity 和 refill rate。
+
+普通参数保存使用 integration `revision` 乐观锁，不包含 Secret。生产微信 endpoint
+必须为 HTTPS。
+
+随后选择“替换 AppSecret”，完成重新认证并输入新值。请求携带当前 revision 和唯一
+`operationId`；同一个 operationId 的重放不会再次覆盖或递增版本。AppID 与 AppSecret
+都存在后，项目自动从 `draft` 变为 `configured`。
+
+微信 AppSecret 的边界：
+
+- AppSecret 以明文保存在 `game_integrations`，替换时直接覆盖旧值。
+- GET API 和网页永不返回明文，只返回是否配置、版本和更新时间。
+- 管理页面的输入框永远为空；成功、失败、关闭、冲突或会话过期后立即清空。
+- 成功保存只表示 gameManageKit 已持久化，不能宣称微信侧已经验证。
+- 数据库 TLS、最小权限、磁盘/快照/备份加密和脱敏恢复属于部署强制项。
+
+不要把 AppSecret 放入环境变量、URL、Hash、命令行、日志、工单、浏览器存储或普通
+审计。
+
+## 4. 创建机器身份
+
+接入配置页可以创建两类身份：
+
+- `service`：游戏服务调用 Internal API 和指标。
+- `machine_admin`：受信自动化调用账号管理 API，不用于浏览器登录。
+
+为每个身份选择最小 `gameIds` 范围。身份 ID 全局唯一；不同游戏、环境和调用程序不得
+共享身份或 Secret。创建时服务端生成 32 字节随机值并返回 43 位 Base64URL Secret，
+MySQL 只保存 SHA-256 摘要。
+
+明文只在首次成功响应中显示一次。请在关闭对话框前复制到对应服务的 Secret Manager
+并确认已安全保存；之后无法查询或恢复，丢失只能轮换。不要把 Secret 写入仓库、镜像、
+普通配置表或日志。
+
+调用 Service API 时使用：
+
+```text
+x-service-id: <identityId>
+x-service-secret: <one-time Secret>
+```
+
+受信机器 Admin 使用：
+
+```text
+x-operator-id: <identityId>
+x-admin-secret: <one-time Secret>
+```
+
+服务端先验证当前或未过期 previous 摘要，再检查请求 URL 中的 `gameId` 是否属于身份
+范围；客户端不能通过修改路径扩大权限。
+
+### 无停机轮换
+
+轮换时指定 previous 的有效窗口。服务端生成新的 current，将原 current 变为带明确
+失效时间的 previous；窗口内新旧 Secret 都可用。更新调用方后，可以等待窗口到期，
+也可以明确撤销旧版本。
+
+轮换请求使用唯一 `operationId`。网络超时或 HTTP 5xx 后不要盲目再次发起轮换，应先
+查询该 operationId 的状态；幂等重放不会再次返回已交付过的明文。修改游戏范围、轮换
+和撤销都需要对应权限与最近重新认证。
+
+## 5. 启用并验收
+
+接入完整后，在游戏项目中将状态改为 `enabled`，并按需要开启 `clientVisible` 和设置
+排序。`disabled` 是不可逆终态；缺少 AppID 或 AppSecret 时，项目会回到
+`draft + maintenance` 并取消客户端可见性。
+
+基本检查：
 
 ```bash
 curl --fail http://127.0.0.1:2570/readyz
@@ -132,23 +147,22 @@ curl --fail http://127.0.0.1:2570/v1/games
 curl --fail http://127.0.0.1:2570/v1/games/example-game/areas
 ```
 
-`/readyz` 只有在数据库 schema 和 `GameRegistry` 都就绪时才返回 HTTP 200。发布时还应
-验证该游戏 token 不能在其他游戏使用，Service/Admin 凭证不能越权访问其他游戏，
-相同 `openid`、`operationId` 和 `serverId` 在两个游戏中互不影响。
+还应验证：
 
-Public `GET /v1/games` 只返回 `configured`、显式勾选下发且状态为 `enabled` 或
-`maintenance` 的项目，并按管理员设置的顺序排序。维护中的游戏保留在列表中供客户端
-显示维护提示；`draft`、未勾选下发和 `disabled` 项目不会返回。
+- 相同微信身份分别登录两个游戏时，账号与 token 相互隔离。
+- A 游戏 token 不能在 B 游戏验证。
+- Service 和机器 Admin 不能访问范围外游戏。
+- 不同游戏可以安全使用相同 `serverId`。
+- 新旧 Service Secret 在轮换窗口内都可用，到期或撤销后旧值被拒绝。
+- AppSecret GET 响应、机器身份 GET 响应、日志、审计和指标中没有明文或摘要。
+- 管理页面显示的保存 revision 与当前实例 loaded revision 符合预期；不要把单实例状态
+  解读为所有实例已经同步。
 
-Public `GET /v1/games/{gameId}/areas` 只返回 `isOpen=true` 的区服，并按
-`sortOrder, serverId` 排序。公开的 `AreaServer` 结构不包含 `isOpen`、`sortOrder`、
-`revision` 或审计时间；这些字段仅用于管理员接口。
-
-## 4. 账号管理语义
+## 6. 账号管理语义
 
 `POST .../revoke` 只撤销该游戏、该账号的全部现有会话，不删除账号，也不阻止账号随后
-重新登录。`POST .../ban` 会封禁该游戏内的账号并撤销其会话，不影响其他游戏中的同一
+重新登录。`POST .../ban` 会封禁当前游戏内账号并撤销其会话，不影响其他游戏中的同一
 微信身份。
 
-当前阶段明确不提供 `unban`、`deregister` 或账号恢复接口。需要这些能力时，应先定义
-审计、授权和恢复语义，再扩展 OpenAPI；不能通过直接修改业务表绕过管理接口。
+当前不提供 `unban`、`deregister` 或账号恢复接口。需要这些能力时，应先定义审计、
+授权和恢复语义，再扩展 OpenAPI，不能通过直接修改业务表绕过管理 API。

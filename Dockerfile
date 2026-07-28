@@ -24,7 +24,6 @@ COPY packages/contract/package.json packages/contract/package.json
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/packages/contract/dist ./packages/contract/dist
-COPY config ./config
 COPY migrations ./migrations
 COPY web ./web
 COPY scripts/docker-smoke.mjs ./scripts/docker-smoke.mjs
