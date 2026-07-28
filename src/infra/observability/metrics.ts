@@ -1,3 +1,5 @@
+import { GAME_ID_PATTERN } from "../../domain/game/resolver.js";
+
 export const LOGIN_OUTCOMES = [
   "success",
   "banned",
@@ -55,14 +57,26 @@ function label(value: string): string {
  * therefore never become metric labels.
  */
 export class MetricsRegistry {
-  private readonly gameIds: ReadonlySet<string>;
+  private readonly gameIds: Set<string>;
   private readonly loginCounters = new Map<string, number>();
   private readonly rateLimitCounters = new Map<string, number>();
   private readonly wechatCounters = new Map<string, number>();
   private readonly databaseDurations = new Map<string, DurationAggregate>();
 
-  constructor(gameIds: readonly string[]) {
+  constructor(gameIds: readonly string[] = []) {
     this.gameIds = new Set(gameIds);
+    for (const gameId of this.gameIds) {
+      if (!GAME_ID_PATTERN.test(gameId)) {
+        throw new Error(`指标拒绝非法 gameId: ${gameId}`);
+      }
+    }
+  }
+
+  registerGame(gameId: string): void {
+    if (!GAME_ID_PATTERN.test(gameId)) {
+      throw new Error(`指标拒绝非法 gameId: ${gameId}`);
+    }
+    this.gameIds.add(gameId);
   }
 
   recordLogin(gameId: string, outcome: LoginOutcome): void {

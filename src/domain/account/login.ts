@@ -4,7 +4,7 @@ import type {
   RowDataPacket,
 } from "mysql2/promise";
 import type { LoginResponse } from "@gono/game-manage-kit-contract";
-import type { GameContext } from "../game/registry.js";
+import type { GameContext } from "../game/resolver.js";
 import { Database } from "../../infra/mysql/database.js";
 import type { MetricsRegistry, WechatOutcome } from "../../infra/observability/metrics.js";
 import { insertAudit } from "./audit.js";

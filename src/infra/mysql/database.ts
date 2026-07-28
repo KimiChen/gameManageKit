@@ -8,9 +8,16 @@ const REQUIRED_SCHEMA_TABLES = Object.freeze([
   "games",
   "game_directory_settings",
   "game_servers",
+  "game_integrations",
+  "machine_identities",
+  "machine_identity_games",
+  "machine_secret_versions",
   "admin_operators",
   "admin_game_access",
   "admin_game_audit",
+  "admin_machine_identity_audit",
+  "admin_secret_operations",
+  "admin_secret_audit",
   "admin_sessions",
   "admin_auth_audit",
   "accounts",
@@ -54,10 +61,7 @@ export class Database {
     }
   }
 
-  async ready(
-    expectedSchemaVersion: number,
-    expectedGameIds: readonly string[] = [],
-  ): Promise<boolean> {
+  async ready(expectedSchemaVersion: number): Promise<boolean> {
     const [rows] = await this.pool.query<RowDataPacket[]>(
       "SELECT MAX(version) AS version FROM schema_migrations",
     );
@@ -77,14 +81,7 @@ export class Database {
     ) {
       return false;
     }
-    if (expectedGameIds.length === 0) {
-      return true;
-    }
-    const [games] = await this.pool.query<RowDataPacket[]>(
-      "SELECT game_id FROM games WHERE game_id IN (?)",
-      [[...expectedGameIds]],
-    );
-    return new Set(games.map((row) => String(row.game_id))).size === expectedGameIds.length;
+    return true;
   }
 
   async close(): Promise<void> {

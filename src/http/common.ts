@@ -8,9 +8,9 @@ import type { GameManageKitConfig } from "../config.js";
 import type {
   AdminIdentity,
   GameContext,
-  GameRegistry,
+  GameRuntimeRegistry,
   ServiceIdentity,
-} from "../domain/game/registry.js";
+} from "../domain/game/resolver.js";
 import type { GameProjectService } from "../domain/game/projects.js";
 import type { AdminSessionIdentity } from "../domain/admin/auth.js";
 import { GameManageKitError } from "../errors.js";
@@ -90,14 +90,14 @@ export function headerValue(request: FastifyRequest, name: string): string | nul
   return null;
 }
 
-export function authenticateService(
+export async function authenticateService(
   request: FastifyRequest,
-  registry: GameRegistry,
-): ServiceIdentity {
+  registry: GameRuntimeRegistry,
+): Promise<ServiceIdentity> {
   const serviceId = headerValue(request, "x-service-id")?.trim() ?? "";
   const secret = headerValue(request, "x-service-secret");
   const identity = serviceId.length <= 64
-    ? registry.authenticateService(serviceId, secret)
+    ? await registry.authenticateService(serviceId, secret)
     : null;
   if (!identity) {
     throw new GameManageKitError(401, "SERVICE_AUTH_REQUIRED");
@@ -107,14 +107,14 @@ export function authenticateService(
   return identity;
 }
 
-export function authenticateAdmin(
+export async function authenticateAdmin(
   request: FastifyRequest,
-  registry: GameRegistry,
-): AdminIdentity {
+  registry: GameRuntimeRegistry,
+): Promise<AdminIdentity> {
   const operatorId = headerValue(request, "x-operator-id")?.trim() ?? "";
   const secret = headerValue(request, "x-admin-secret");
   const identity = operatorId.length <= 64
-    ? registry.authenticateAdmin(operatorId, secret)
+    ? await registry.authenticateAdmin(operatorId, secret)
     : null;
   if (!identity) {
     throw new GameManageKitError(401, "SERVICE_AUTH_REQUIRED");
@@ -140,11 +140,11 @@ export async function resolveGameContext(
 
 export async function authorizeServiceGame(
   request: FastifyRequest,
-  registry: GameRegistry,
+  registry: GameRuntimeRegistry,
   projects: Pick<GameProjectService, "resolve">,
 ): Promise<void> {
   const game = await resolveGameContext(request, projects);
-  const identity = authenticateService(request, registry);
+  const identity = await authenticateService(request, registry);
   if (!registry.canAccess(identity, game.gameId)) {
     throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
   }
@@ -152,11 +152,11 @@ export async function authorizeServiceGame(
 
 export async function authorizeAdminGame(
   request: FastifyRequest,
-  registry: GameRegistry,
+  registry: GameRuntimeRegistry,
   projects: Pick<GameProjectService, "resolve">,
 ): Promise<void> {
   const game = await resolveGameContext(request, projects);
-  const identity = authenticateAdmin(request, registry);
+  const identity = await authenticateAdmin(request, registry);
   if (!registry.canAccess(identity, game.gameId)) {
     throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
   }
@@ -182,6 +182,32 @@ export function createHttpApp(
             "request.body.password",
             "req.body.accessToken",
             "request.body.accessToken",
+            "req.body.secret",
+            "request.body.secret",
+            "req.body.appSecret",
+            "request.body.appSecret",
+            "req.body.wechatAppSecret",
+            "request.body.wechatAppSecret",
+            "req.body.wechat_app_secret",
+            "request.body.wechat_app_secret",
+            "req.body.serviceSecret",
+            "request.body.serviceSecret",
+            "req.body.adminSecret",
+            "request.body.adminSecret",
+            "req.body.machineSecret",
+            "request.body.machineSecret",
+            "req.body.previousSecret",
+            "request.body.previousSecret",
+            "req.body.newSecret",
+            "request.body.newSecret",
+            "wechatAppSecret",
+            "wechat_app_secret",
+            "appSecret",
+            "serviceSecret",
+            "adminSecret",
+            "machineSecret",
+            "previousSecret",
+            "newSecret",
             "accessToken",
             "token",
             "secret",

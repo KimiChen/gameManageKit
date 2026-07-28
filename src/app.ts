@@ -8,7 +8,10 @@ import {
   DirectoryService,
 } from "./domain/directory/service.js";
 import { GameProjectService } from "./domain/game/projects.js";
-import { GameRegistry } from "./domain/game/registry.js";
+import {
+  GameConfigResolver,
+  type GameRuntimeRegistry,
+} from "./domain/game/resolver.js";
 import { GameServerService } from "./domain/game/servers.js";
 import { SessionService } from "./domain/session/service.js";
 import { Database } from "./infra/mysql/database.js";
@@ -64,7 +67,8 @@ export interface Runtime {
   readonly apps: GameManageKitApps;
   readonly adminAuth: AdminAuthService;
   readonly database: Database;
-  readonly games: GameRegistry;
+  readonly games: GameRuntimeRegistry;
+  readonly configResolver: GameConfigResolver;
   readonly gameProjects: GameProjectService;
   readonly gameServers: GameServerService;
   readonly metrics: MetricsRegistry;
@@ -91,18 +95,16 @@ export function buildApps(
 }
 
 export interface RuntimeOptions {
-  readonly env?: Readonly<Record<string, string | undefined>>;
-  readonly games?: GameRegistry;
+  readonly resolver?: GameConfigResolver;
+  readonly fetchImpl?: typeof fetch;
+  readonly now?: () => number;
+  readonly cacheTtlMs?: number;
 }
 
 export async function createRuntime(
   config: GameManageKitConfig,
   options: RuntimeOptions = {},
 ): Promise<Runtime> {
-  const games = options.games ?? await GameRegistry.load(config.gamesConfigPath, {
-    production: config.nodeEnv === "production",
-    ...(options.env ? { env: options.env } : {}),
-  });
   const database = new Database(config.mysqlUrl, config.mysqlPoolSize);
   try {
     if (!await database.ready(config.schemaVersion)) {
@@ -110,14 +112,27 @@ export async function createRuntime(
         "数据库 schema 未就绪；请先运行 migration，旧开发库需按文档重建",
       );
     }
-    await games.sync(database.pool);
+    const metrics = new MetricsRegistry();
+    const configResolver = options.resolver
+      ?? new GameConfigResolver(database.pool, {
+        production: config.nodeEnv === "production",
+        ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+        ...(options.now ? { now: options.now } : {}),
+        ...(options.cacheTtlMs
+          ? { cacheTtlMs: options.cacheTtlMs }
+          : {}),
+        onGameLoaded: (gameId) => metrics.registerGame(gameId),
+      });
+    const games: GameRuntimeRegistry = configResolver;
+    await configResolver.initialize();
+    for (const game of games.list()) {
+      metrics.registerGame(game.gameId);
+    }
     const gameProjects = new GameProjectService(database, games);
     const gameServers = new GameServerService(
       database,
       config.nodeEnv === "production",
     );
-    const gameIds = games.list().map((game) => game.gameId);
-    const metrics = new MetricsRegistry(gameIds);
     const sessions = new SessionService(database.pool, metrics);
     const characters = new CharacterService(database.pool, metrics);
     const login = new LoginService(
@@ -141,8 +156,8 @@ export async function createRuntime(
       adminAuth,
       readiness: {
         ready: async () => (
-          games.ready()
-          && await database.ready(config.schemaVersion, gameIds)
+          await games.ready()
+          && await database.ready(config.schemaVersion)
         ),
       },
     };
@@ -151,6 +166,7 @@ export async function createRuntime(
       adminAuth,
       database,
       games,
+      configResolver,
       gameProjects,
       gameServers,
       metrics,

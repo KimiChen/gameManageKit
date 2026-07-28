@@ -12,7 +12,7 @@ import { GameManageKitError } from "../../errors.js";
 import { normalizeIp } from "../../infra/security/security.js";
 import type { LoginResult, LoginService } from "../../domain/account/login.js";
 import type { DirectoryService } from "../../domain/directory/service.js";
-import type { GameRegistry } from "../../domain/game/registry.js";
+import type { GameRuntimeRegistry } from "../../domain/game/resolver.js";
 import type { GameProjectService } from "../../domain/game/projects.js";
 import {
   errorResponseSchemas,
@@ -24,7 +24,7 @@ import {
 } from "../common.js";
 
 export interface PublicRouteServices {
-  readonly games: GameRegistry;
+  readonly games: GameRuntimeRegistry;
   readonly gameProjects: Pick<
     GameProjectService,
     "listForClient" | "resolve"
@@ -156,7 +156,9 @@ export function registerPublicRoutes(
         },
       },
     },
-    async (request): Promise<AreaListResponse> => {
+    async (request, reply): Promise<AreaListResponse> => {
+      void reply.header("cache-control", "private, no-store");
+      void reply.header("vary", "Authorization");
       const token = bearerToken(headerValue(request, "authorization"));
       return services.directory.list(request.gameContext!, token);
     },

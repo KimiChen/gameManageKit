@@ -1,6 +1,6 @@
 import { isIP } from "node:net";
 
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 export const TOKEN_BYTES = 24;
 
 export interface GameManageKitConfig {
@@ -12,7 +12,6 @@ export interface GameManageKitConfig {
   readonly internalHost: string;
   readonly internalPort: number;
   readonly adminOrigin: string;
-  readonly gamesConfigPath: string;
   readonly trustedProxyCidrs: readonly string[];
   readonly authDevEnabled: boolean;
   readonly bodyLimitBytes: number;
@@ -157,7 +156,6 @@ export function loadConfig(env: Env = process.env): GameManageKitConfig {
     internalHost: env.GAME_MANAGE_KIT_INTERNAL_HOST?.trim() || "127.0.0.1",
     internalPort,
     adminOrigin: validateAdminOrigin(adminOriginRaw, nodeEnv === "production"),
-    gamesConfigPath: env.GAME_MANAGE_KIT_GAMES_CONFIG?.trim() || "config/games.json",
     trustedProxyCidrs,
     authDevEnabled,
     bodyLimitBytes: integer(env, "GAME_MANAGE_KIT_BODY_LIMIT_BYTES", 65_536, 1_024, 1_048_576),

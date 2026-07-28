@@ -7,7 +7,8 @@ import type {
 import type { Pool, RowDataPacket } from "mysql2/promise";
 import type { SessionService } from "../session/service.js";
 import type { CharacterService } from "../character/service.js";
-import type { GameContext } from "../game/registry.js";
+import type { GameContext } from "../game/resolver.js";
+import { GameManageKitError } from "../../errors.js";
 
 export interface AreaDirectory {
   readonly isOps: boolean;
@@ -19,6 +20,10 @@ export interface DirectoryProvider {
   listAreas(): Promise<AreaDirectory>;
   findServer(serverId: number): Promise<AreaServer | undefined>;
   isServerUsable(serverId: number): Promise<boolean>;
+  serverAdmission(serverId: number): Promise<{
+    readonly server: AreaServer | undefined;
+    readonly usable: boolean;
+  }>;
 }
 
 const TAGS = new Set(["normal", "new", "full", "maintenance"]);
@@ -146,7 +151,9 @@ export function validateAreaDirectory(value: unknown, production: boolean): Area
 }
 
 interface DatabaseDirectoryRow extends RowDataPacket {
-  readonly is_ops: number | boolean | string;
+  readonly configuration_state: string;
+  readonly game_status: string;
+  readonly is_ops: number | boolean | string | null;
   readonly server_id: number | string | null;
   readonly name: string | null;
   readonly tag: string | null;
@@ -154,6 +161,27 @@ interface DatabaseDirectoryRow extends RowDataPacket {
   readonly open_time: number | string | null;
   readonly game_http_url: string | null;
   readonly game_ws_url: string | null;
+  readonly usable?: number | boolean | string | null;
+}
+
+const PUBLIC_SERVER_ADMISSION_SQL = `
+  s.is_open = 1
+  AND s.status IN ('smooth', 'busy')
+  AND s.open_time <= UNIX_TIMESTAMP(NOW(3))`;
+
+function assertPublicGame(row: DatabaseDirectoryRow): void {
+  if (row.configuration_state !== "configured") {
+    throw new GameManageKitError(404, "GAME_NOT_FOUND");
+  }
+  if (row.game_status === "disabled") {
+    throw new GameManageKitError(403, "GAME_DISABLED");
+  }
+  if (row.game_status === "maintenance") {
+    throw new GameManageKitError(503, "GAME_DISABLED");
+  }
+  if (row.game_status !== "enabled") {
+    throw new Error("游戏运行状态数据无效");
+  }
 }
 
 function databaseAreaServer(
@@ -193,8 +221,20 @@ export class FileDirectoryProvider implements DirectoryProvider {
   }
 
   async isServerUsable(serverId: number): Promise<boolean> {
+    return (await this.serverAdmission(serverId)).usable;
+  }
+
+  async serverAdmission(serverId: number): Promise<{
+    readonly server: AreaServer | undefined;
+    readonly usable: boolean;
+  }> {
     const server = this.serversById.get(serverId);
-    return server !== undefined && server.status !== "maintenance";
+    return {
+      server: server ? { ...server } : undefined,
+      usable: server !== undefined
+        && (server.status === "smooth" || server.status === "busy")
+        && server.openTime <= Math.floor(Date.now() / 1_000),
+    };
   }
 }
 
@@ -207,17 +247,24 @@ export class MysqlDirectoryProvider implements DirectoryProvider {
 
   async listAreas(): Promise<AreaDirectory> {
     const [rows] = await this.pool.query<DatabaseDirectoryRow[]>(
-      `SELECT d.is_ops, s.server_id, s.name, s.tag, s.status, s.open_time,
+      `SELECT g.configuration_state, g.status AS game_status,
+              d.is_ops, s.server_id, s.name, s.tag, s.status, s.open_time,
               s.game_http_url, s.game_ws_url
-         FROM game_directory_settings d
+         FROM games g
+         LEFT JOIN game_directory_settings d ON d.game_id = g.game_id
          LEFT JOIN game_servers s
-           ON s.game_id = d.game_id AND s.is_open = 1
-        WHERE d.game_id = ?
+           ON s.game_id = g.game_id
+          AND ${PUBLIC_SERVER_ADMISSION_SQL}
+        WHERE g.game_id = ?
         ORDER BY s.sort_order, s.server_id`,
       [this.gameId],
     );
     const first = rows[0];
     if (!first) {
+      throw new GameManageKitError(404, "GAME_NOT_FOUND");
+    }
+    assertPublicGame(first);
+    if (first.is_ops === null || first.is_ops === undefined) {
       throw new Error(`游戏 ${this.gameId} 缺少目录设置`);
     }
     const isOpsValue = Number(first.is_ops);
@@ -236,32 +283,45 @@ export class MysqlDirectoryProvider implements DirectoryProvider {
   }
 
   async findServer(serverId: number): Promise<AreaServer | undefined> {
-    const [rows] = await this.pool.query<DatabaseDirectoryRow[]>(
-      `SELECT d.is_ops, s.server_id, s.name, s.tag, s.status, s.open_time,
-              s.game_http_url, s.game_ws_url
-         FROM game_servers s
-         JOIN game_directory_settings d ON d.game_id = s.game_id
-        WHERE s.game_id = ? AND s.server_id = ?
-        LIMIT 1`,
-      [this.gameId, serverId],
-    );
-    return rows[0]
-      ? databaseAreaServer(rows[0], this.production)
-      : undefined;
+    return (await this.serverAdmission(serverId)).server;
   }
 
   async isServerUsable(serverId: number): Promise<boolean> {
-    const [rows] = await this.pool.query<RowDataPacket[]>(
-      `SELECT 1
-         FROM game_servers
-        WHERE game_id = ?
-          AND server_id = ?
-          AND is_open = 1
-          AND status <> 'maintenance'
+    return (await this.serverAdmission(serverId)).usable;
+  }
+
+  async serverAdmission(serverId: number): Promise<{
+    readonly server: AreaServer | undefined;
+    readonly usable: boolean;
+  }> {
+    const [rows] = await this.pool.query<DatabaseDirectoryRow[]>(
+      `SELECT g.configuration_state, g.status AS game_status,
+              d.is_ops, s.server_id, s.name, s.tag, s.status, s.open_time,
+              s.game_http_url, s.game_ws_url,
+              (${PUBLIC_SERVER_ADMISSION_SQL}) AS usable
+         FROM games g
+         LEFT JOIN game_directory_settings d ON d.game_id = g.game_id
+         LEFT JOIN game_servers s
+           ON s.game_id = g.game_id AND s.server_id = ?
+        WHERE g.game_id = ?
         LIMIT 1`,
-      [this.gameId, serverId],
+      [serverId, this.gameId],
     );
-    return rows.length === 1;
+    const row = rows[0];
+    if (!row) {
+      throw new GameManageKitError(404, "GAME_NOT_FOUND");
+    }
+    assertPublicGame(row);
+    if (row.is_ops === null || row.is_ops === undefined) {
+      throw new Error(`游戏 ${this.gameId} 缺少目录设置`);
+    }
+    const server = row.server_id === null
+      ? undefined
+      : databaseAreaServer(row, this.production);
+    return {
+      server,
+      usable: server !== undefined && Number(row.usable) === 1,
+    };
   }
 }
 

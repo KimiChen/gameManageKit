@@ -10,42 +10,28 @@ import { GameManageKitError } from "../../errors.js";
 import { matchesAnySecret, TokenBucketLimiter } from "../../infra/security/security.js";
 import { WechatClient } from "../../infra/wechat/client.js";
 import {
+  GAME_ID_PATTERN,
+  type AdminIdentity,
+  type GameContext,
+  type GameStatus,
+  type RateLimitPolicy,
+  type ServiceIdentity,
+} from "./resolver.js";
+import {
   FileDirectoryProvider,
   MysqlDirectoryProvider,
-  type DirectoryProvider,
 } from "../directory/service.js";
 
-export const GAME_ID_PATTERN = /^[a-z][a-z0-9-]{1,31}$/;
-
-export type GameStatus = "enabled" | "maintenance" | "disabled";
-
-export interface RateLimitPolicy {
-  readonly capacity: number;
-  readonly refillPerSecond: number;
-}
-
-export interface GameContext {
-  readonly gameId: string;
-  readonly name: string;
-  readonly status: GameStatus;
-  readonly directory: DirectoryProvider;
-  readonly wechat: WechatClient;
-  readonly sessionTtlSeconds: number;
-  readonly loginRate: RateLimitPolicy;
-  readonly adminRate: RateLimitPolicy;
-  readonly loginLimiter: TokenBucketLimiter;
-  readonly adminLimiter: TokenBucketLimiter;
-}
-
-export interface ServiceIdentity {
-  readonly serviceId: string;
-  readonly gameIds: readonly string[];
-}
-
-export interface AdminIdentity {
-  readonly operatorId: string;
-  readonly gameIds: readonly string[];
-}
+export {
+  GAME_ID_PATTERN,
+};
+export type {
+  AdminIdentity,
+  GameContext,
+  GameStatus,
+  RateLimitPolicy,
+  ServiceIdentity,
+};
 
 export interface GameRegistryLoadOptions {
   readonly production: boolean;
@@ -487,6 +473,7 @@ export class GameRegistry {
         gameId: game.gameId,
         name: game.name,
         status: game.status,
+        configurationState: "configured",
         directory,
         wechat: new WechatClient({
           ...game.wechat,
@@ -506,6 +493,11 @@ export class GameRegistry {
           adminRate.refillPerSecond,
           options.now,
         ),
+        revision: Object.freeze({
+          game: 1,
+          integration: 1,
+          directory: 1,
+        }),
       });
     }));
 

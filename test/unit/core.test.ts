@@ -79,9 +79,9 @@ function assertGameError(
   return true;
 }
 
-test("全局配置只保留 GameRegistry 文件入口并拒绝危险启动配置", () => {
+test("全局配置不再包含游戏配置文件入口并拒绝危险启动配置", () => {
   const config = loadConfig(BASE_ENV);
-  assert.equal(config.gamesConfigPath, "config/games.json");
+  assert.equal("gamesConfigPath" in config, false);
   assert.equal(config.authDevEnabled, true);
   assert.equal(config.adminOrigin, "http://127.0.0.1:2571");
   assert.equal("serviceSecrets" in config, false);

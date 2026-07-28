@@ -7,7 +7,7 @@ import {
   type VerifySessionResponse,
 } from "@gono/game-manage-kit-contract";
 import type { CharacterService } from "../../domain/character/service.js";
-import type { GameRegistry } from "../../domain/game/registry.js";
+import type { GameRuntimeRegistry } from "../../domain/game/resolver.js";
 import type { GameProjectService } from "../../domain/game/projects.js";
 import type { SessionService } from "../../domain/session/service.js";
 import {
@@ -19,7 +19,7 @@ import {
 } from "../common.js";
 
 export interface InternalRouteServices {
-  readonly games: GameRegistry;
+  readonly games: GameRuntimeRegistry;
   readonly gameProjects: Pick<GameProjectService, "resolve">;
   readonly sessions: Pick<SessionService, "verify">;
   readonly characters: Pick<CharacterService, "register" | "has">;

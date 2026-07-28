@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { GameManageKitPath } from "@gono/game-manage-kit-contract";
-import type { GameRegistry } from "../../domain/game/registry.js";
+import type { GameRuntimeRegistry } from "../../domain/game/resolver.js";
 import type { MetricsRegistry } from "../../infra/observability/metrics.js";
 import {
   authenticateService,
@@ -8,7 +8,7 @@ import {
 } from "../common.js";
 
 export interface MetricsRouteServices {
-  readonly games: GameRegistry;
+  readonly games: GameRuntimeRegistry;
   readonly metrics: MetricsRegistry;
 }
 
@@ -20,7 +20,7 @@ export function registerMetricsRoutes(
     GameManageKitPath.Metrics,
     {
       preHandler: async (request) => {
-        authenticateService(request, services.games);
+        await authenticateService(request, services.games);
       },
       schema: {
         response: {

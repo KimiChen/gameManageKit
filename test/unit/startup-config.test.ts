@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
-import { parseEnv } from "node:util";
 import YAML from "yaml";
 import { loadConfig } from "../../src/config.js";
-import { GameRegistry } from "../../src/domain/game/registry.js";
 
 const rootFile = (path: string): URL => new URL(`../../${path}`, import.meta.url);
 
@@ -62,23 +59,15 @@ test("生产镜像以非 root 用户运行并提供 readiness 健康检查", asy
   assert.match(dockerfile, /\nUSER node\n/);
 });
 
-test("仓库默认多游戏配置可通过生产校验", async () => {
-  const env = {
-    ...parseEnv(await readFile(rootFile(".env.example"), "utf8")),
+test("生产启动配置不要求游戏文件或每游戏 Secret", () => {
+  const config = loadConfig({
     NODE_ENV: "production",
+    GAME_MANAGE_KIT_MYSQL_URL:
+      "mysql://gmk@mysql.example.invalid/game_manage_kit",
     AUTH_DEV_ENABLED: "0",
     GAME_MANAGE_KIT_ADMIN_ORIGIN: "https://admin.example.invalid",
-    GAME_MANAGE_KIT_GAMES_CONFIG: fileURLToPath(rootFile("config/games.json")),
-  };
-  const config = loadConfig(env);
-  const registry = await GameRegistry.load(config.gamesConfigPath, {
-    production: true,
-    env,
   });
 
-  assert.equal(registry.ready(), true);
-  assert.deepEqual(
-    registry.list().map(({ gameId }) => gameId),
-    ["game-a", "game-b"],
-  );
+  assert.equal("gamesConfigPath" in config, false);
+  assert.equal(config.mysqlUrl.includes("game_manage_kit"), true);
 });
