@@ -16,6 +16,9 @@ export interface AdminCreateOptions {
   readonly gameIds: readonly string[];
   readonly canOperateAccounts: boolean;
   readonly canManageGames?: boolean;
+  readonly canManageIntegrations?: boolean;
+  readonly canRotateSecrets?: boolean;
+  readonly canManageMachineIdentities?: boolean;
 }
 
 function optionValue(args: readonly string[], index: number, name: string): string {
@@ -32,6 +35,9 @@ export function parseAdminCreateArgs(args: readonly string[]): AdminCreateOption
   let gameList: string | null = null;
   let canOperateAccounts = true;
   let canManageGames = false;
+  let canManageIntegrations = false;
+  let canRotateSecrets = false;
+  let canManageMachineIdentities = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -48,6 +54,17 @@ export function parseAdminCreateArgs(args: readonly string[]): AdminCreateOption
       canOperateAccounts = false;
     } else if (argument === "--manage-games") {
       canManageGames = true;
+    } else if (argument === "--manage-integrations") {
+      canManageIntegrations = true;
+    } else if (argument === "--rotate-secrets") {
+      canRotateSecrets = true;
+    } else if (argument === "--manage-machine-identities") {
+      canManageMachineIdentities = true;
+    } else if (argument === "--full-config") {
+      canManageGames = true;
+      canManageIntegrations = true;
+      canRotateSecrets = true;
+      canManageMachineIdentities = true;
     } else {
       throw new Error(`不支持的参数 ${argument ?? ""}`);
     }
@@ -68,14 +85,18 @@ export function parseAdminCreateArgs(args: readonly string[]): AdminCreateOption
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+  const hasGlobalConfigurationCapability = canManageGames
+    || canManageIntegrations
+    || canRotateSecrets
+    || canManageMachineIdentities;
   if (
-    (gameIds.length === 0 && !canManageGames)
+    (gameIds.length === 0 && !hasGlobalConfigurationCapability)
     || new Set(gameIds).size !== gameIds.length
     || gameIds.some((gameId) => !GAME_ID_PATTERN.test(gameId))
   ) {
     throw new Error(
       "games 必须是无重复的合法 gameId 逗号列表；"
-      + "仅管理游戏项目时可配合 --manage-games 省略",
+      + "全局配置管理员可配合权限参数省略",
     );
   }
   return Object.freeze({
@@ -84,6 +105,9 @@ export function parseAdminCreateArgs(args: readonly string[]): AdminCreateOption
     gameIds: Object.freeze(gameIds),
     canOperateAccounts,
     canManageGames,
+    canManageIntegrations,
+    canRotateSecrets,
+    canManageMachineIdentities,
   });
 }
 
@@ -128,13 +152,17 @@ export async function createAdminOperator(
     await connection.execute(
       `INSERT INTO admin_operators
          (operator_id, display_name, password_hash, status, auth_version,
-          can_manage_games)
-       VALUES (?, ?, ?, 'enabled', 1, ?)`,
+          can_manage_games, can_manage_integrations, can_rotate_secrets,
+          can_manage_machine_identities)
+       VALUES (?, ?, ?, 'enabled', 1, ?, ?, ?, ?)`,
       [
         options.operatorId,
         options.displayName,
         passwordHash,
         options.canManageGames ? 1 : 0,
+        options.canManageIntegrations ? 1 : 0,
+        options.canRotateSecrets ? 1 : 0,
+        options.canManageMachineIdentities ? 1 : 0,
       ],
     );
     for (const gameId of options.gameIds) {

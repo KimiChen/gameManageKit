@@ -52,6 +52,9 @@ test("管理员创建参数支持账号、显示名、游戏及显式全局游�
       gameIds: ["game-a", "game-b"],
       canOperateAccounts: true,
       canManageGames: true,
+      canManageIntegrations: false,
+      canRotateSecrets: false,
+      canManageMachineIdentities: false,
     },
   );
   assert.equal(
@@ -73,9 +76,28 @@ test("管理员创建参数支持账号、显示名、游戏及显式全局游�
     ]).canManageGames,
     false,
   );
+  assert.deepEqual(
+    parseAdminCreateArgs([
+      "--operator-id",
+      "ops_bootstrap",
+      "--display-name",
+      "Bootstrap Admin",
+      "--full-config",
+    ]),
+    {
+      operatorId: "ops_bootstrap",
+      displayName: "Bootstrap Admin",
+      gameIds: [],
+      canOperateAccounts: true,
+      canManageGames: true,
+      canManageIntegrations: true,
+      canRotateSecrets: true,
+      canManageMachineIdentities: true,
+    },
+  );
 });
 
-test("管理员创建将全局游戏管理能力写入数据库", async () => {
+test("管理员创建将各项全局配置能力写入数据库", async () => {
   const statements: Array<{ sql: string; params: readonly unknown[] }> = [];
   const database = {
     async transaction<T>(
@@ -101,10 +123,58 @@ test("管理员创建将全局游戏管理能力写入数据库", async () => {
     gameIds: ["game-a"],
     canOperateAccounts: true,
     canManageGames: true,
+    canManageIntegrations: true,
+    canRotateSecrets: true,
+    canManageMachineIdentities: true,
   }, "valid-admin-password");
 
   assert.match(statements[0]?.sql ?? "", /\bcan_manage_games\b/u);
-  assert.deepEqual(statements[0]?.params.slice(-1), [1]);
+  assert.match(statements[0]?.sql ?? "", /\bcan_manage_integrations\b/u);
+  assert.match(statements[0]?.sql ?? "", /\bcan_rotate_secrets\b/u);
+  assert.match(
+    statements[0]?.sql ?? "",
+    /\bcan_manage_machine_identities\b/u,
+  );
+  assert.deepEqual(statements[0]?.params.slice(-4), [1, 1, 1, 1]);
+});
+
+test("全配置引导管理员可在零游戏环境直接创建", async () => {
+  const statements: Array<{ sql: string; params: readonly unknown[] }> = [];
+  let gameLookupCount = 0;
+  const database = {
+    async transaction<T>(
+      fn: (connection: {
+        query: () => Promise<readonly [never[], readonly []]>;
+        execute: (sql: string, params: readonly unknown[]) => Promise<void>;
+      }) => Promise<T>,
+    ): Promise<T> {
+      return fn({
+        async query() {
+          gameLookupCount += 1;
+          return [[], []] as const;
+        },
+        async execute(sql, params) {
+          statements.push({ sql: sql.replace(/\s+/gu, " ").trim(), params });
+        },
+      });
+    },
+  } as unknown as Database;
+
+  await createAdminOperator(database, {
+    operatorId: "ops_bootstrap",
+    displayName: "Bootstrap Admin",
+    gameIds: [],
+    canOperateAccounts: true,
+    canManageGames: true,
+    canManageIntegrations: true,
+    canRotateSecrets: true,
+    canManageMachineIdentities: true,
+  }, "valid-admin-password");
+
+  assert.equal(gameLookupCount, 0);
+  assert.match(statements[0]?.sql ?? "", /INSERT INTO admin_operators/u);
+  assert.deepEqual(statements[0]?.params.slice(-4), [1, 1, 1, 1]);
+  assert.match(statements[1]?.sql ?? "", /INSERT INTO admin_auth_audit/u);
 });
 
 test("管理员创建参数拒绝密码参数、重复游戏和非法账号", () => {

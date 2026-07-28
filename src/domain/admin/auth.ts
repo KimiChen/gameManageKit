@@ -18,6 +18,7 @@ import {
 export const ADMIN_SESSION_TOKEN_BYTES = 32;
 export const ADMIN_SESSION_ABSOLUTE_TTL_MS = 8 * 60 * 60 * 1_000;
 export const ADMIN_SESSION_IDLE_TTL_MS = 30 * 60 * 1_000;
+export const ADMIN_SESSION_ELEVATED_TTL_MS = 5 * 60 * 1_000;
 
 const ADMIN_SESSION_TOKEN_LENGTH = 43;
 const SESSION_INSERT_ATTEMPTS = 3;
@@ -36,6 +37,9 @@ interface OperatorRow extends RowDataPacket {
   status: string;
   auth_version: number | string;
   can_manage_games: number | boolean | string;
+  can_manage_integrations: number | boolean | string;
+  can_rotate_secrets: number | boolean | string;
+  can_manage_machine_identities: number | boolean | string;
 }
 
 interface SessionLookupRow extends RowDataPacket {
@@ -48,6 +52,7 @@ interface SessionRow extends RowDataPacket {
   created_at: Date | string;
   last_seen_at: Date | string;
   expires_at: Date | string;
+  elevated_until: Date | string | null;
 }
 
 interface AccessRow extends RowDataPacket {
@@ -85,9 +90,14 @@ export interface AdminSessionIdentity {
   readonly displayName: string;
   readonly authVersion: number;
   readonly canManageGames: boolean;
+  readonly canManageIntegrations: boolean;
+  readonly canRotateSecrets: boolean;
+  readonly canManageMachineIdentities: boolean;
   readonly games: readonly AdminGameAccess[];
   /** The non-rolling, absolute session expiry exposed to the browser. */
   readonly expiresAt: string;
+  /** Active recent-authentication window; null when reauthentication is needed. */
+  readonly elevatedUntil: string | null;
 }
 
 export interface IssuedAdminSession extends AdminSessionIdentity {
@@ -212,12 +222,15 @@ export interface AdminAuthServiceOptions {
   readonly loginProtection?: AdminLoginProtection;
   readonly absoluteTtlMs?: number;
   readonly idleTtlMs?: number;
+  readonly elevatedTtlMs?: number;
   readonly protectionAuditMaximumBuckets?: number;
 }
 
 type AuthAuditEvent =
   | "login_success"
   | "login_failure"
+  | "reauthentication_success"
+  | "reauthentication_failure"
   | "logout"
   | "session_expired"
   | "session_invalidated";
@@ -227,6 +240,7 @@ type AuthAuditReason =
   | AdminLoginLimitReason
   | "scrypt_capacity"
   | "operator_changed"
+  | "session_invalid"
   | "absolute_timeout"
   | "idle_timeout"
   | "operator_disabled"
@@ -284,7 +298,10 @@ export function hashAdminSessionToken(value: string): Buffer | null {
     : null;
 }
 
-function dateValue(value: Date | string): Date | null {
+function dateValue(value: Date | string | null | undefined): Date | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
   const parsed = value instanceof Date ? new Date(value.getTime()) : new Date(value);
   return Number.isFinite(parsed.getTime()) ? parsed : null;
 }
@@ -325,6 +342,7 @@ function identityFrom(
   operator: OperatorRow,
   accessRows: readonly AccessRow[],
   expiresAt: Date,
+  elevatedUntil: Date | null,
 ): AdminSessionIdentity {
   const version = authVersion(operator.auth_version);
   if (version === null) {
@@ -335,6 +353,10 @@ function identityFrom(
     displayName: operator.display_name,
     authVersion: version,
     canManageGames: Number(operator.can_manage_games) === 1,
+    canManageIntegrations: Number(operator.can_manage_integrations) === 1,
+    canRotateSecrets: Number(operator.can_rotate_secrets) === 1,
+    canManageMachineIdentities:
+      Number(operator.can_manage_machine_identities) === 1,
     games: accessRows.map((row) => ({
       gameId: row.game_id,
       name: row.name,
@@ -344,6 +366,7 @@ function identityFrom(
       canOperateAccounts: Number(row.can_operate_accounts) === 1,
     })),
     expiresAt: expiresAt.toISOString(),
+    elevatedUntil: elevatedUntil?.toISOString() ?? null,
   };
 }
 
@@ -385,6 +408,7 @@ export class AdminAuthService {
   private readonly loginProtection: AdminLoginProtection;
   private readonly absoluteTtlMs: number;
   private readonly idleTtlMs: number;
+  private readonly elevatedTtlMs: number;
   private readonly protectionAuditLimiter: TokenBucketLimiter;
 
   constructor(
@@ -406,8 +430,16 @@ export class AdminAuthService {
       ADMIN_SESSION_IDLE_TTL_MS,
       "管理员会话空闲 TTL",
     );
+    this.elevatedTtlMs = normalizedPositiveDuration(
+      options.elevatedTtlMs,
+      ADMIN_SESSION_ELEVATED_TTL_MS,
+      "管理员提升会话 TTL",
+    );
     if (this.idleTtlMs > this.absoluteTtlMs) {
       throw new TypeError("管理员会话空闲 TTL 不得超过绝对 TTL");
+    }
+    if (this.elevatedTtlMs > this.absoluteTtlMs) {
+      throw new TypeError("管理员提升会话 TTL 不得超过绝对 TTL");
     }
     this.protectionAuditLimiter = new TokenBucketLimiter(
       1,
@@ -516,7 +548,7 @@ export class AdminAuthService {
         ip,
       });
       return {
-        ...identityFrom(locked, access, expiresAt),
+        ...identityFrom(locked, access, expiresAt, null),
         sessionToken: token,
       };
     });
@@ -525,6 +557,173 @@ export class AdminAuthService {
       throw new GameManageKitError(401, "ADMIN_AUTH_REQUIRED");
     }
     return issued;
+  }
+
+  async reauthenticate(
+    sessionToken: string,
+    password: string,
+    ip: string | null = null,
+  ): Promise<AdminSessionIdentity> {
+    const tokenHash = hashAdminSessionToken(sessionToken);
+    const normalizedIp = normalizeIp(ip);
+    let operatorId: string | null = null;
+    if (tokenHash) {
+      const [lookupRows] = await this.database.pool.query<SessionLookupRow[]>(
+        "SELECT operator_id FROM admin_sessions WHERE token_hash = ?",
+        [tokenHash],
+      );
+      operatorId = lookupRows[0]?.operator_id ?? null;
+    }
+
+    const limited = this.loginProtection.checkRateLimit(
+      operatorId ?? "invalid",
+      normalizedIp,
+    );
+    if (limited) {
+      await this.auditProtectionFailure({
+        operatorId,
+        event: "reauthentication_failure",
+        reason: limited,
+        ip: normalizedIp,
+      });
+      throw new GameManageKitError(429, "RATE_LIMITED");
+    }
+    const permit = this.loginProtection.acquireScrypt();
+    if (!permit.ok) {
+      await this.auditProtectionFailure({
+        operatorId,
+        event: "reauthentication_failure",
+        reason: "scrypt_capacity",
+        ip: normalizedIp,
+      });
+      throw new GameManageKitError(429, "RATE_LIMITED");
+    }
+
+    let operator: OperatorRow | undefined;
+    let passwordWellFormed = true;
+    let passwordMatches = false;
+    try {
+      operator = operatorId
+        ? await this.findOperator(this.database.pool, operatorId, false)
+        : undefined;
+      try {
+        validateAdminPassword(password);
+      } catch {
+        passwordWellFormed = false;
+      }
+      passwordMatches = await this.verifyPassword(
+        passwordWellFormed ? password : DUMMY_PASSWORD,
+        enabled(operator) ? operator.password_hash : DUMMY_PASSWORD_HASH,
+      );
+    } finally {
+      permit.release();
+    }
+
+    if (
+      !tokenHash
+      || !operatorId
+      || !enabled(operator)
+      || !passwordWellFormed
+      || !passwordMatches
+    ) {
+      await insertAuthAudit(this.database.pool, {
+        operatorId,
+        event: "reauthentication_failure",
+        reason: "invalid_credentials",
+        ip: normalizedIp,
+      });
+      throw new GameManageKitError(401, "ADMIN_AUTH_REQUIRED");
+    }
+
+    const expectedAuthVersion = authVersion(operator.auth_version);
+    if (expectedAuthVersion === null) {
+      throw new GameManageKitError(401, "ADMIN_AUTH_REQUIRED");
+    }
+    const identity = await this.database.transaction(async (connection) => {
+      const locked = await this.findOperator(connection, operatorId, true);
+      if (
+        !enabled(locked)
+        || authVersion(locked.auth_version) !== expectedAuthVersion
+        || locked.password_hash !== operator.password_hash
+      ) {
+        await insertAuthAudit(connection, {
+          operatorId,
+          event: "reauthentication_failure",
+          reason: "operator_changed",
+          ip: normalizedIp,
+        });
+        return null;
+      }
+
+      const [sessionRows] = await connection.query<SessionRow[]>(
+        `SELECT operator_id, auth_version, created_at, last_seen_at, expires_at,
+                elevated_until
+           FROM admin_sessions
+          WHERE token_hash = ?
+          FOR UPDATE`,
+        [tokenHash],
+      );
+      const session = sessionRows[0];
+      const now = this.currentTime();
+      const absoluteExpiry = dateValue(session?.expires_at);
+      const lastSeenAt = dateValue(session?.last_seen_at);
+      const sessionAuthVersion = authVersion(session?.auth_version ?? 0);
+      const absoluteExpired = absoluteExpiry
+        ? now.getTime() >= absoluteExpiry.getTime()
+        : true;
+      const idleExpired = lastSeenAt
+        ? now.getTime() - lastSeenAt.getTime() >= this.idleTtlMs
+        : true;
+      const sessionInvalid = !session
+        || session.operator_id !== operatorId
+        || sessionAuthVersion !== expectedAuthVersion
+        || !absoluteExpiry
+        || !lastSeenAt;
+      if (
+        sessionInvalid
+        || absoluteExpired
+        || idleExpired
+      ) {
+        if (session?.operator_id === operatorId) {
+          await this.deleteSession(connection, tokenHash);
+        }
+        await insertAuthAudit(connection, {
+          operatorId,
+          event: "reauthentication_failure",
+          reason: sessionInvalid
+            ? "session_invalid"
+            : absoluteExpired
+              ? "absolute_timeout"
+              : "idle_timeout",
+          ip: normalizedIp,
+        });
+        return null;
+      }
+
+      const elevatedUntil = new Date(Math.min(
+        now.getTime() + this.elevatedTtlMs,
+        absoluteExpiry.getTime(),
+      ));
+      await connection.execute<ResultSetHeader>(
+        `UPDATE admin_sessions
+            SET last_seen_at = ?, elevated_until = ?
+          WHERE token_hash = ?`,
+        [now, elevatedUntil, tokenHash],
+      );
+      const access = await this.findAccess(connection, operatorId);
+      await insertAuthAudit(connection, {
+        operatorId,
+        event: "reauthentication_success",
+        reason: null,
+        ip: normalizedIp,
+      });
+      return identityFrom(locked, access, absoluteExpiry, elevatedUntil);
+    });
+
+    if (!identity) {
+      throw new GameManageKitError(401, "ADMIN_AUTH_REQUIRED");
+    }
+    return identity;
   }
 
   private async auditProtectionFailure(input: AuthAuditInput): Promise<void> {
@@ -565,7 +764,8 @@ export class AdminAuthService {
     const result = await this.database.transaction(async (connection) => {
       const operator = await this.findOperator(connection, operatorId, true);
       const [sessionRows] = await connection.query<SessionRow[]>(
-        `SELECT operator_id, auth_version, created_at, last_seen_at, expires_at
+        `SELECT operator_id, auth_version, created_at, last_seen_at, expires_at,
+                elevated_until
            FROM admin_sessions
           WHERE token_hash = ?
           FOR UPDATE`,
@@ -579,8 +779,14 @@ export class AdminAuthService {
       const now = this.currentTime();
       const absoluteExpiry = dateValue(session.expires_at);
       const lastSeenAt = dateValue(session.last_seen_at);
+      const elevatedUntil = dateValue(session.elevated_until);
       const sessionAuthVersion = authVersion(session.auth_version);
-      if (!absoluteExpiry || !lastSeenAt || sessionAuthVersion === null) {
+      if (
+        !absoluteExpiry
+        || !lastSeenAt
+        || sessionAuthVersion === null
+        || (session.elevated_until !== null && !elevatedUntil)
+      ) {
         await this.deleteSession(connection, tokenHash);
         await insertAuthAudit(connection, {
           operatorId,
@@ -633,7 +839,14 @@ export class AdminAuthService {
       // Access rows are deliberately fetched on every request. The session
       // contains no cached authorization grants.
       const access = await this.findAccess(connection, operator.operator_id);
-      return identityFrom(operator, access, absoluteExpiry);
+      return identityFrom(
+        operator,
+        access,
+        absoluteExpiry,
+        elevatedUntil && now.getTime() < elevatedUntil.getTime()
+          ? elevatedUntil
+          : null,
+      );
     });
 
     if (!result) {
@@ -781,20 +994,59 @@ export class AdminAuthService {
     connection: PoolConnection,
     identity: Pick<AdminSessionIdentity, "operatorId" | "authVersion">,
   ): Promise<void> {
-    const operator = await this.findOperator(
-      connection,
-      identity.operatorId,
-      true,
-    );
-    if (
-      !enabled(operator)
-      || authVersion(operator.auth_version) !== identity.authVersion
-    ) {
-      throw new GameManageKitError(401, "ADMIN_AUTH_REQUIRED");
-    }
+    const operator = await this.lockCurrentOperator(connection, identity);
     if (Number(operator.can_manage_games) !== 1) {
       throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
     }
+  }
+
+  async requireIntegrationManagement(
+    connection: PoolConnection,
+    identity: Pick<AdminSessionIdentity, "operatorId" | "authVersion">,
+  ): Promise<void> {
+    const operator = await this.lockCurrentOperator(connection, identity);
+    if (Number(operator.can_manage_integrations) !== 1) {
+      throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
+    }
+  }
+
+  async requireMachineIdentityManagement(
+    connection: PoolConnection,
+    identity: Pick<AdminSessionIdentity, "operatorId" | "authVersion">,
+  ): Promise<void> {
+    const operator = await this.lockCurrentOperator(connection, identity);
+    if (Number(operator.can_manage_machine_identities) !== 1) {
+      throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
+    }
+  }
+
+  async requireSecretRotation(
+    connection: PoolConnection,
+    identity: Pick<AdminSessionIdentity, "operatorId" | "authVersion">,
+    sessionToken: string,
+  ): Promise<void> {
+    const operator = await this.lockCurrentOperator(connection, identity);
+    if (Number(operator.can_rotate_secrets) !== 1) {
+      throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
+    }
+    await this.requireElevatedSessionLocked(
+      connection,
+      identity,
+      sessionToken,
+    );
+  }
+
+  async requireElevatedSession(
+    connection: PoolConnection,
+    identity: Pick<AdminSessionIdentity, "operatorId" | "authVersion">,
+    sessionToken: string,
+  ): Promise<void> {
+    await this.lockCurrentOperator(connection, identity);
+    await this.requireElevatedSessionLocked(
+      connection,
+      identity,
+      sessionToken,
+    );
   }
 
   private async lockGameAccess(
@@ -802,17 +1054,7 @@ export class AdminAuthService {
     identity: Pick<AdminSessionIdentity, "operatorId" | "authVersion">,
     gameId: string,
   ): Promise<AccessRow> {
-    const operator = await this.findOperator(
-      connection,
-      identity.operatorId,
-      true,
-    );
-    if (
-      !enabled(operator)
-      || authVersion(operator.auth_version) !== identity.authVersion
-    ) {
-      throw new GameManageKitError(401, "ADMIN_AUTH_REQUIRED");
-    }
+    await this.lockCurrentOperator(connection, identity);
     const [rows] = await connection.query<AccessRow[]>(
       `SELECT game_id, can_operate_accounts
          FROM admin_game_access
@@ -825,6 +1067,62 @@ export class AdminAuthService {
       throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
     }
     return access;
+  }
+
+  private async lockCurrentOperator(
+    connection: PoolConnection,
+    identity: Pick<AdminSessionIdentity, "operatorId" | "authVersion">,
+  ): Promise<OperatorRow> {
+    const operator = await this.findOperator(
+      connection,
+      identity.operatorId,
+      true,
+    );
+    if (
+      !enabled(operator)
+      || authVersion(operator.auth_version) !== identity.authVersion
+    ) {
+      throw new GameManageKitError(401, "ADMIN_AUTH_REQUIRED");
+    }
+    return operator;
+  }
+
+  private async requireElevatedSessionLocked(
+    connection: PoolConnection,
+    identity: Pick<AdminSessionIdentity, "operatorId" | "authVersion">,
+    sessionToken: string,
+  ): Promise<void> {
+    const tokenHash = hashAdminSessionToken(sessionToken);
+    if (!tokenHash) {
+      throw new GameManageKitError(401, "ADMIN_AUTH_REQUIRED");
+    }
+    const [rows] = await connection.query<SessionRow[]>(
+      `SELECT operator_id, auth_version, created_at, last_seen_at, expires_at,
+              elevated_until
+         FROM admin_sessions
+        WHERE token_hash = ?
+        FOR UPDATE`,
+      [tokenHash],
+    );
+    const session = rows[0];
+    const now = this.currentTime();
+    const absoluteExpiry = dateValue(session?.expires_at);
+    const lastSeenAt = dateValue(session?.last_seen_at);
+    if (
+      !session
+      || session.operator_id !== identity.operatorId
+      || authVersion(session.auth_version) !== identity.authVersion
+      || !absoluteExpiry
+      || !lastSeenAt
+      || now.getTime() >= absoluteExpiry.getTime()
+      || now.getTime() - lastSeenAt.getTime() >= this.idleTtlMs
+    ) {
+      throw new GameManageKitError(401, "ADMIN_AUTH_REQUIRED");
+    }
+    const elevatedUntil = dateValue(session.elevated_until);
+    if (!elevatedUntil || now.getTime() >= elevatedUntil.getTime()) {
+      throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
+    }
   }
 
   private currentTime(): Date {
@@ -842,7 +1140,8 @@ export class AdminAuthService {
   ): Promise<OperatorRow | undefined> {
     const [rows] = await executor.query<OperatorRow[]>(
       `SELECT operator_id, display_name, password_hash, status, auth_version,
-              can_manage_games
+              can_manage_games, can_manage_integrations, can_rotate_secrets,
+              can_manage_machine_identities
          FROM admin_operators
         WHERE operator_id = ?${lock ? " FOR UPDATE" : ""}`,
       [operatorId],

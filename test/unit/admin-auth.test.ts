@@ -7,6 +7,7 @@ import type {
 } from "mysql2/promise";
 import {
   ADMIN_SESSION_ABSOLUTE_TTL_MS,
+  ADMIN_SESSION_ELEVATED_TTL_MS,
   ADMIN_SESSION_IDLE_TTL_MS,
   AdminAuthService,
   DefaultAdminLoginProtection,
@@ -28,6 +29,9 @@ interface FakeOperator {
   status: "enabled" | "disabled";
   auth_version: number;
   can_manage_games: number;
+  can_manage_integrations: number;
+  can_rotate_secrets: number;
+  can_manage_machine_identities: number;
 }
 
 interface FakeSession {
@@ -37,6 +41,7 @@ interface FakeSession {
   created_at: Date;
   last_seen_at: Date;
   expires_at: Date;
+  elevated_until: Date | null;
 }
 
 interface FakeAudit {
@@ -103,6 +108,9 @@ class FakeDatabase implements AdminAuthDatabase {
       status: "enabled",
       auth_version: 1,
       can_manage_games: 0,
+      can_manage_integrations: 0,
+      can_rotate_secrets: 0,
+      can_manage_machine_identities: 0,
       ...overrides,
     };
     this.operators.set(operator.operator_id, operator);
@@ -123,7 +131,7 @@ class FakeDatabase implements AdminAuthDatabase {
     if (
       sql.startsWith("SELECT operator_id FROM admin_sessions")
       || sql.startsWith(
-        "SELECT operator_id, auth_version, created_at, last_seen_at, expires_at FROM admin_sessions",
+        "SELECT operator_id, auth_version, created_at, last_seen_at, expires_at, elevated_until FROM admin_sessions",
       )
     ) {
       const hash = values[0];
@@ -173,14 +181,19 @@ class FakeDatabase implements AdminAuthDatabase {
         created_at: new Date(values[3] as Date),
         last_seen_at: new Date(values[4] as Date),
         expires_at: new Date(values[5] as Date),
+        elevated_until: null,
       });
       return [{ affectedRows: 1 }, []];
     }
     if (sql.startsWith("UPDATE admin_sessions SET last_seen_at")) {
-      const hash = values[1] as Buffer;
+      const updatingElevation = sql.includes("elevated_until");
+      const hash = values[updatingElevation ? 2 : 1] as Buffer;
       const session = this.sessions.get(hash.toString("hex"));
       if (session) {
         session.last_seen_at = new Date(values[0] as Date);
+        if (updatingElevation) {
+          session.elevated_until = new Date(values[1] as Date);
+        }
       }
       return [{ affectedRows: session ? 1 : 0 }, []];
     }
@@ -235,7 +248,12 @@ test("会话令牌使用 32 字节随机值并以 BINARY(32) SHA-256 表示", ()
 
 test("登录锁定 operator 后签发会话并返回实时游戏权限", async () => {
   const database = new FakeDatabase();
-  database.addOperator({ can_manage_games: 1 });
+  database.addOperator({
+    can_manage_games: 1,
+    can_manage_integrations: 1,
+    can_rotate_secrets: 1,
+    can_manage_machine_identities: 1,
+  });
   database.access.set("ops_kimi", [
     { game_id: "game-a", can_operate_accounts: 1 },
     { game_id: "game-b", can_operate_accounts: 0 },
@@ -267,6 +285,10 @@ test("登录锁定 operator 后签发会话并返回实时游戏权限", async (
   assert.equal(issued.displayName, "Kimi");
   assert.equal(issued.authVersion, 1);
   assert.equal(issued.canManageGames, true);
+  assert.equal(issued.canManageIntegrations, true);
+  assert.equal(issued.canRotateSecrets, true);
+  assert.equal(issued.canManageMachineIdentities, true);
+  assert.equal(issued.elevatedUntil, null);
   assert.deepEqual(issued.games, [
     {
       gameId: "game-a",
@@ -565,6 +587,92 @@ test("每次认证按 operator→session 锁序并实时读取权限、刷新空
   assert.match(locked[2]?.sql ?? "", /admin_game_access/u);
 });
 
+test("重新认证以等成本密码校验提升当前服务端会话五分钟", async () => {
+  const fixture = await issueFixture();
+  const now = new Date("2026-07-28T10:05:00.000Z");
+  fixture.setNow(now);
+
+  const identity = await fixture.service.reauthenticate(
+    fixture.token,
+    "correct horse battery",
+    "203.0.113.5:8443",
+  );
+
+  const expectedElevatedUntil = new Date(
+    now.getTime() + ADMIN_SESSION_ELEVATED_TTL_MS,
+  ).toISOString();
+  assert.equal(identity.elevatedUntil, expectedElevatedUntil);
+  assert.equal(
+    [...fixture.database.sessions.values()][0]?.elevated_until?.toISOString(),
+    expectedElevatedUntil,
+  );
+  assert.deepEqual(fixture.database.audits, [{
+    operatorId: "ops_kimi",
+    event: "reauthentication_success",
+    reason: null,
+    ip: "203.0.113.5",
+  }]);
+  const locked = fixture.database.logs.filter(
+    (entry) => entry.source === "transaction" && entry.method === "query",
+  );
+  assert.match(locked[0]?.sql ?? "", /admin_operators.*FOR UPDATE$/u);
+  assert.match(locked[1]?.sql ?? "", /admin_sessions.*FOR UPDATE$/u);
+
+  fixture.database.logs.length = 0;
+  const authenticated = await fixture.service.authenticate(fixture.token);
+  assert.equal(authenticated.elevatedUntil, expectedElevatedUntil);
+});
+
+test("重新认证对非法密码和未知会话执行一次 scrypt 且不提升会话", async () => {
+  const database = new FakeDatabase();
+  database.addOperator();
+  let acceptPassword = true;
+  const verifications: Array<[string, string]> = [];
+  const service = new AdminAuthService(database, {
+    randomBytes: () => Buffer.alloc(32, 0x55),
+    verifyPassword: async (password, hash) => {
+      verifications.push([password, hash]);
+      return acceptPassword;
+    },
+    loginProtection: ALLOW_LOGIN,
+  });
+  const issued = await service.login({
+    operatorId: "ops_kimi",
+    password: "correct horse battery",
+    ip: null,
+  });
+  verifications.length = 0;
+  database.audits.length = 0;
+  acceptPassword = false;
+
+  await assert.rejects(
+    service.reauthenticate(issued.sessionToken, "short", "192.0.2.90"),
+    (error) => isGameError(error, 401, "ADMIN_AUTH_REQUIRED"),
+  );
+  assert.equal(verifications.length, 1);
+  assert.notEqual(verifications[0]?.[0], "short");
+  assert.equal(
+    [...database.sessions.values()][0]?.elevated_until,
+    null,
+  );
+
+  verifications.length = 0;
+  await assert.rejects(
+    service.reauthenticate(
+      Buffer.alloc(32, 0x77).toString("base64url"),
+      "correct horse battery",
+      "192.0.2.91",
+    ),
+    (error) => isGameError(error, 401, "ADMIN_AUTH_REQUIRED"),
+  );
+  assert.equal(verifications.length, 1);
+  assert.match(verifications[0]?.[1] ?? "", /^gmk-scrypt\$/u);
+  assert.deepEqual(
+    database.audits.map((audit) => audit.event),
+    ["reauthentication_failure", "reauthentication_failure"],
+  );
+});
+
 test("空闲和绝对过期均删除会话、写审计并立即返回 401", async () => {
   for (const mode of ["idle", "absolute"] as const) {
     const fixture = await issueFixture();
@@ -643,7 +751,11 @@ test("游戏与账号操作能力由当前会话权限严格判定", () => {
     displayName: "Kimi",
     authVersion: 1,
     canManageGames: true,
+    canManageIntegrations: true,
+    canRotateSecrets: true,
+    canManageMachineIdentities: true,
     expiresAt: "2026-07-28T10:30:00.000Z",
+    elevatedUntil: null,
     games: [
       {
         gameId: "game-a",
@@ -723,5 +835,83 @@ test("账号写操作在同一事务重新锁定管理员并读取实时能力",
   await assert.rejects(
     fixture.service.requireAccountOperation(connection, identity, "game-a"),
     (error) => isGameError(error, 401, "ADMIN_AUTH_REQUIRED"),
+  );
+});
+
+test("配置权限实时复核，Secret 写入还要求当前会话处于提升窗口", async () => {
+  const fixture = await issueFixture();
+  const identity = await fixture.service.authenticate(fixture.token);
+  const operator = fixture.database.operators.get("ops_kimi");
+  assert.ok(operator);
+  operator.can_manage_integrations = 1;
+  operator.can_manage_machine_identities = 1;
+  operator.can_rotate_secrets = 1;
+  const connection = {
+    query: async (sql: string, values: readonly unknown[] = []) => (
+      (fixture.database as unknown as {
+        query(
+          source: "transaction",
+          sql: string,
+          values: readonly unknown[],
+        ): Promise<[RowDataPacket[], unknown]>;
+      }).query("transaction", sql, values)
+    ),
+  } as unknown as PoolConnection;
+
+  await assert.doesNotReject(
+    fixture.service.requireIntegrationManagement(connection, identity),
+  );
+  await assert.doesNotReject(
+    fixture.service.requireMachineIdentityManagement(connection, identity),
+  );
+  await assert.rejects(
+    fixture.service.requireSecretRotation(
+      connection,
+      identity,
+      fixture.token,
+    ),
+    (error) => isGameError(error, 403, "GAME_ACCESS_DENIED"),
+  );
+
+  const elevatedAt = new Date("2026-07-28T10:05:00.000Z");
+  fixture.setNow(elevatedAt);
+  await fixture.service.reauthenticate(
+    fixture.token,
+    "correct horse battery",
+  );
+  fixture.database.logs.length = 0;
+  await assert.doesNotReject(
+    fixture.service.requireSecretRotation(
+      connection,
+      identity,
+      fixture.token,
+    ),
+  );
+  const locked = fixture.database.logs.filter(
+    (entry) => entry.source === "transaction" && entry.method === "query",
+  );
+  assert.match(locked[0]?.sql ?? "", /admin_operators.*FOR UPDATE$/u);
+  assert.match(locked[1]?.sql ?? "", /admin_sessions.*FOR UPDATE$/u);
+
+  operator.can_rotate_secrets = 0;
+  await assert.rejects(
+    fixture.service.requireSecretRotation(
+      connection,
+      identity,
+      fixture.token,
+    ),
+    (error) => isGameError(error, 403, "GAME_ACCESS_DENIED"),
+  );
+  operator.can_rotate_secrets = 1;
+  fixture.setNow(new Date(
+    elevatedAt.getTime() + ADMIN_SESSION_ELEVATED_TTL_MS,
+  ));
+  await assert.rejects(
+    fixture.service.requireSecretRotation(
+      connection,
+      identity,
+      fixture.token,
+    ),
+    (error) => isGameError(error, 403, "GAME_ACCESS_DENIED"),
   );
 });
