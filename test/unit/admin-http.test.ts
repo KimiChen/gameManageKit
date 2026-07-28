@@ -6,19 +6,11 @@ import {
   type GameManageKitServices,
 } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
-import { GameRegistry } from "../../src/domain/game/registry.js";
 import { MetricsRegistry } from "../../src/infra/observability/metrics.js";
-
-const GAME_ENV = {
-  GAME_A_WX_APPID: "game-a-app",
-  GAME_A_WX_SECRET: "game-a-wx-secret",
-  GAME_B_WX_APPID: "game-b-app",
-  GAME_B_WX_SECRET: "game-b-wx-secret",
-  GAME_A_SERVICE_SECRET: "game-a-service-secret",
-  GAME_B_SERVICE_SECRET: "game-b-service-secret",
-  GAME_A_ADMIN_SECRET: "game-a-admin-secret",
-  GAME_B_ADMIN_SECRET: "game-b-admin-secret",
-} as const;
+import {
+  createTestRuntimeRegistry,
+  TEST_ADMIN_SECRET,
+} from "../runtime-registry.js";
 
 const ORIGIN = "http://127.0.0.1:2571";
 const TOKEN = Buffer.alloc(32, 0x41).toString("base64url");
@@ -26,6 +18,7 @@ const COOKIE = `gmk_admin_session=${TOKEN}`;
 
 interface Calls {
   login: number;
+  reauthenticate: number;
   authenticate: number;
   logout: number;
   operationAuthorization: number;
@@ -39,16 +32,13 @@ async function fixture() {
     NODE_ENV: "development",
     GAME_MANAGE_KIT_MYSQL_URL:
       "mysql://root@127.0.0.1:3316/game_manage_kit_admin_http",
-    GAME_MANAGE_KIT_GAMES_CONFIG: "config/games.json",
     GAME_MANAGE_KIT_ADMIN_ORIGIN: ORIGIN,
     GAME_MANAGE_KIT_LOG_ENABLED: "0",
   });
-  const games = await GameRegistry.load(config.gamesConfigPath, {
-    production: false,
-    env: GAME_ENV,
-  });
+  const games = createTestRuntimeRegistry();
   const calls: Calls = {
     login: 0,
+    reauthenticate: 0,
     authenticate: 0,
     logout: 0,
     operationAuthorization: 0,
@@ -61,6 +51,9 @@ async function fixture() {
     displayName: "Kimi",
     authVersion: 1,
     canManageGames: true,
+    canManageIntegrations: true,
+    canRotateSecrets: true,
+    canManageMachineIdentities: true,
     games: [{
       gameId: "game-a",
       name: "示例游戏 A",
@@ -69,6 +62,7 @@ async function fixture() {
       canOperateAccounts: true,
     }],
     expiresAt: "2026-07-28T18:00:00.000Z",
+    elevatedUntil: null,
   } as const;
   const gameProject = {
     gameId: "game-a",
@@ -93,6 +87,13 @@ async function fixture() {
     gameWsUrl: "wss://game-a.example.invalid",
     isOpen: true,
     sortOrder: 0,
+    revision: 1,
+    createdAt: "2026-07-28T00:00:00.000Z",
+    updatedAt: "2026-07-28T00:00:00.000Z",
+  };
+  const directorySettings = {
+    gameId: "game-a",
+    isOps: false,
     revision: 1,
     createdAt: "2026-07-28T00:00:00.000Z",
     updatedAt: "2026-07-28T00:00:00.000Z",
@@ -143,28 +144,81 @@ async function fixture() {
       },
     },
     gameServers: {
+      async getDirectorySettings(_gameId, authorization) {
+        await authorization.authorize({} as PoolConnection);
+        return directorySettings;
+      },
+      async updateDirectorySettings(gameId, input, authorization) {
+        await authorization.authorize({} as PoolConnection);
+        return {
+          ...directorySettings,
+          gameId,
+          isOps: input.isOps,
+          revision: input.revision + 1,
+        };
+      },
       async list(_gameId, authorization) {
         await authorization.authorize({} as PoolConnection);
-        return [gameServer];
+        return { directoryRevision: 1, servers: [gameServer] };
       },
       async create(gameId, input, authorization) {
         await authorization.authorize({} as PoolConnection);
         return {
-          ...gameServer,
-          ...input,
-          gameId,
-          revision: 1,
+          directoryRevision: input.directoryRevision + 1,
+          server: {
+            ...gameServer,
+            ...input,
+            gameId,
+            revision: 1,
+          },
         };
       },
       async update(gameId, serverId, input, authorization) {
         await authorization.authorize({} as PoolConnection);
         return {
-          ...gameServer,
-          ...input,
-          gameId,
-          serverId,
-          revision: input.revision + 1,
+          directoryRevision: input.directoryRevision + 1,
+          server: {
+            ...gameServer,
+            ...input,
+            gameId,
+            serverId,
+            revision: input.revision + 1,
+          },
         };
+      },
+    },
+    integrations: {
+      async get() {
+        throw new Error("测试未调用");
+      },
+      async update() {
+        throw new Error("测试未调用");
+      },
+      async replaceWechatSecret() {
+        throw new Error("测试未调用");
+      },
+    },
+    machineIdentities: {
+      async list() {
+        throw new Error("测试未调用");
+      },
+      async create() {
+        throw new Error("测试未调用");
+      },
+      async update() {
+        throw new Error("测试未调用");
+      },
+      async rotate() {
+        throw new Error("测试未调用");
+      },
+      async revoke() {
+        throw new Error("测试未调用");
+      },
+      async rotationStatus() {
+        throw new Error("测试未调用");
+      },
+      async listAudit() {
+        throw new Error("测试未调用");
       },
     },
     metrics: new MetricsRegistry(games.list().map((game) => game.gameId)),
@@ -208,6 +262,15 @@ async function fixture() {
         calls.authenticate += 1;
         return identity;
       },
+      async reauthenticate(token, password) {
+        assert.equal(token, TOKEN);
+        assert.equal(password, "correct horse battery");
+        calls.reauthenticate += 1;
+        return {
+          ...identity,
+          elevatedUntil: "2026-07-28T17:15:00.000Z",
+        };
+      },
       async logout(token) {
         assert.equal(token, TOKEN);
         calls.logout += 1;
@@ -225,6 +288,10 @@ async function fixture() {
       async requireGameManagement(_connection, current) {
         assert.equal(current, identity);
       },
+      async requireIntegrationManagement() {},
+      async requireMachineIdentityManagement() {},
+      async requireSecretRotation() {},
+      async requireElevatedSession() {},
     },
     admin: {
       async find(input) {
@@ -314,9 +381,23 @@ test("管理员认证端点设置严格 Cookie、实时会话并完成退出", a
       canOperateAccounts: true,
     }],
     canManageGames: true,
+    canManageIntegrations: true,
+    canRotateSecrets: true,
+    canManageMachineIdentities: true,
     expiresAt: "2026-07-28T18:00:00.000Z",
+    elevatedUntil: null,
   });
   assert.equal(session.headers["cache-control"], "no-store");
+
+  const reauthenticated = await apps.internalApp.inject({
+    method: "POST",
+    url: "/v1/admin/auth/reauthenticate",
+    headers: { cookie: COOKIE, origin: ORIGIN },
+    payload: { password: "correct horse battery" },
+  });
+  assert.equal(reauthenticated.statusCode, 204, reauthenticated.body);
+  assert.equal(reauthenticated.headers["cache-control"], "no-store");
+  assert.equal(calls.reauthenticate, 1);
 
   const invalidSession = await apps.internalApp.inject({
     method: "GET",
@@ -430,9 +511,11 @@ test("区服列表、新增和编辑复用游戏管理权限并校验写请求 O
     headers: { cookie: COOKIE },
   });
   assert.equal(listed.statusCode, 200, listed.body);
+  assert.equal(listed.json().directoryRevision, 1);
   assert.equal(listed.json().servers[0].serverId, 1);
 
   const payload = {
+    directoryRevision: 1,
     serverId: 2,
     name: "A 二区",
     tag: "normal",
@@ -459,8 +542,9 @@ test("区服列表、新增和编辑复用游戏管理权限并校验写请求 O
     payload,
   });
   assert.equal(created.statusCode, 201, created.body);
-  assert.equal(created.json().serverId, 2);
-  assert.equal(created.json().revision, 1);
+  assert.equal(created.json().directoryRevision, 2);
+  assert.equal(created.json().server.serverId, 2);
+  assert.equal(created.json().server.revision, 1);
 
   const updated = await apps.internalApp.inject({
     method: "PATCH",
@@ -471,12 +555,14 @@ test("区服列表、新增和编辑复用游戏管理权限并校验写请求 O
       serverId: undefined,
       name: "A 二区维护",
       status: "maintenance",
+      directoryRevision: 1,
       revision: 1,
     },
   });
   assert.equal(updated.statusCode, 200, updated.body);
-  assert.equal(updated.json().status, "maintenance");
-  assert.equal(updated.json().revision, 2);
+  assert.equal(updated.json().directoryRevision, 2);
+  assert.equal(updated.json().server.status, "maintenance");
+  assert.equal(updated.json().server.revision, 2);
 });
 
 test("Cookie 管理员查询与写操作隔离身份、Origin 和游戏权限", async (t) => {
@@ -510,7 +596,7 @@ test("Cookie 管理员查询与写操作隔离身份、Origin 和游戏权限", 
       cookie: COOKIE,
       origin: ORIGIN,
       "x-operator-id": "game-a-admin",
-      "x-admin-secret": GAME_ENV.GAME_A_ADMIN_SECRET,
+      "x-admin-secret": TEST_ADMIN_SECRET,
     },
     payload: { operationId: "admin-http-2", reason: "测试处置" },
   });
@@ -553,7 +639,7 @@ test("机器 Admin Secret 保持可用且 Public 面完全不暴露管理员资�
     url: "/v1/games/game-a/admin/accounts/u_42/revoke",
     headers: {
       "x-operator-id": "game-a-admin",
-      "x-admin-secret": GAME_ENV.GAME_A_ADMIN_SECRET,
+      "x-admin-secret": TEST_ADMIN_SECRET,
     },
     payload: { operationId: "admin-http-4", reason: "机器处置" },
   });

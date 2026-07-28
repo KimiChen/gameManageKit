@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: gameManageKit API
-  version: 1.2.0
+  version: 2.0.0
   description: 多游戏、HTTP-only、MySQL-only 的账号门户服务。
 servers:
   - url: https://portal.example.com
@@ -71,6 +71,34 @@ paths:
           $ref: '#/components/responses/AdminUnauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/auth/reauthenticate:
+    post:
+      operationId: adminReauthenticate
+      description: 验证当前管理员密码并提升现有 HttpOnly Cookie 会话；必须校验请求 Origin，且不签发独立高权限令牌。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminReauthenticateRequest'
+      responses:
+        '204':
+          description: 当前管理员会话已短期提升
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '500':
           $ref: '#/components/responses/Internal'
         '503':
@@ -167,6 +195,69 @@ paths:
           $ref: '#/components/responses/Internal'
         '503':
           $ref: '#/components/responses/Unavailable'
+  /v1/admin/games/{gameId}/directory-settings:
+    parameters:
+      - $ref: '#/components/parameters/GameId'
+    get:
+      operationId: getAdminGameDirectorySettings
+      description: 返回游戏目录设置及用于目录级乐观锁的 revision。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      responses:
+        '200':
+          description: 游戏目录设置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameDirectorySettings'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    patch:
+      operationId: updateAdminGameDirectorySettings
+      description: 按目录 revision 修改 isOps；必须校验请求 Origin。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGameDirectorySettingsRequest'
+      responses:
+        '200':
+          description: 游戏目录设置已更新
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameDirectorySettings'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
   /v1/admin/games/{gameId}/servers:
     parameters:
       - $ref: '#/components/parameters/GameId'
@@ -213,7 +304,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ManagedGameServer'
+                $ref: '#/components/schemas/ManagedGameServerMutationResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -252,7 +343,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ManagedGameServer'
+                $ref: '#/components/schemas/ManagedGameServerMutationResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -265,6 +356,350 @@ paths:
           $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/games/{gameId}/integration:
+    parameters:
+      - $ref: '#/components/parameters/GameId'
+    get:
+      operationId: getAdminGameIntegration
+      description: 返回游戏接入参数、运行时加载 revision 和微信 Secret 元数据；永不返回 Secret 或摘要。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      responses:
+        '200':
+          description: 游戏接入配置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameIntegration'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    patch:
+      operationId: updateAdminGameIntegration
+      description: 按 revision 修改不含 Secret 的接入参数；必须校验请求 Origin。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGameIntegrationRequest'
+      responses:
+        '200':
+          description: 游戏接入配置已保存
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameIntegration'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/games/{gameId}/secrets/wechat-app-secret:
+    parameters:
+      - $ref: '#/components/parameters/GameId'
+    put:
+      operationId: replaceAdminWechatAppSecret
+      description: 替换微信 AppSecret；要求 Secret 权限、最近重新认证、Origin、revision 和幂等 operationId。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceWechatAppSecretRequest'
+      responses:
+        '200':
+          description: 微信 AppSecret 已保存；响应不回显明文
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WechatSecretWriteResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/machine-identities:
+    get:
+      operationId: listAdminMachineIdentities
+      description: 返回 Service 与机器 Admin 身份、游戏范围和 Secret 版本元数据；永不返回摘要。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      responses:
+        '200':
+          description: 机器身份列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineIdentityListResponse'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    post:
+      operationId: createAdminMachineIdentity
+      description: 创建机器身份并生成一次性 Secret；要求机器身份和 Secret 权限、最近重新认证与 Origin。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMachineIdentityRequest'
+      responses:
+        '201':
+          description: 身份已创建；首次响应含一次性 Secret，幂等重放不再返回 Secret
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineSecretIssuedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/machine-identities/{identityId}:
+    parameters:
+      - $ref: '#/components/parameters/IdentityId'
+    patch:
+      operationId: updateAdminMachineIdentity
+      description: 按 revision 修改机器身份；游戏范围变化要求最近重新认证，且必须校验 Origin。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMachineIdentityRequest'
+      responses:
+        '200':
+          description: 机器身份已更新
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineIdentity'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/machine-identities/{identityId}/secret-rotations:
+    parameters:
+      - $ref: '#/components/parameters/IdentityId'
+    post:
+      operationId: rotateAdminMachineSecret
+      description: 生成新 current Secret，并让旧 current 在明确窗口内成为 previous；必须校验 Origin。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateMachineSecretRequest'
+      responses:
+        '200':
+          description: Secret 已轮换；首次响应含一次性 Secret，幂等重放不再返回 Secret
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineSecretIssuedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/machine-identities/{identityId}/secret-versions/{version}/revoke:
+    parameters:
+      - $ref: '#/components/parameters/IdentityId'
+      - $ref: '#/components/parameters/SecretVersion'
+    post:
+      operationId: revokeAdminMachineSecret
+      description: 撤销 current 或 previous Secret；要求 Secret 权限、最近重新认证与 Origin。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeMachineSecretRequest'
+      responses:
+        '200':
+          description: Secret 版本已撤销
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineSecretRevokedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/machine-identities/{identityId}/secret-rotations/{operationId}:
+    parameters:
+      - $ref: '#/components/parameters/IdentityId'
+      - $ref: '#/components/parameters/OperationId'
+    get:
+      operationId: getAdminMachineSecretRotationStatus
+      description: 查询未知结果的 Secret 操作状态；只返回元数据，永不恢复一次性 Secret。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      responses:
+        '200':
+          description: Secret 操作状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineSecretOperationStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/config-audit:
+    get:
+      operationId: listAdminConfigAudit
+      description: 返回最近的配置与 Secret 审计白名单元数据，不返回 Secret、摘要或通用 before/after JSON。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      parameters:
+        - $ref: '#/components/parameters/AuditGameId'
+        - $ref: '#/components/parameters/AuditLimit'
+      responses:
+        '200':
+          description: 最近配置审计
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationAuditPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/Internal'
         '503':
@@ -356,7 +791,7 @@ paths:
       - $ref: '#/components/parameters/GameId'
     get:
       operationId: listAreas
-      description: 仅下发 isOpen=true 的区服；维护区服仍返回供客户端展示，但不可登录。
+      description: 仅下发已经开服、isOpen=true 且状态为 smooth 或 busy 的区服；与登录共用同一准入规则。
       tags: [Public]
       security:
         - {}
@@ -687,6 +1122,40 @@ components:
         type: integer
         minimum: 0
         maximum: 65535
+    IdentityId:
+      name: identityId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/MachineIdentityId'
+    SecretVersion:
+      name: version
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+    OperationId:
+      name: operationId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/OperationId'
+    AuditGameId:
+      name: gameId
+      in: query
+      required: false
+      schema:
+        $ref: '#/components/schemas/GameId'
+    AuditLimit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
   responses:
     BadRequest:
       description: 入参不合法
@@ -732,6 +1201,12 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     RateLimited:
       description: 请求过频
+      headers:
+        Retry-After:
+          description: 建议等待的秒数
+          schema:
+            type: integer
+            minimum: 1
       content:
         application/json:
           schema:
@@ -754,6 +1229,16 @@ components:
       minLength: 2
       maxLength: 32
       pattern: '^[a-z][a-z0-9-]{1,31}$'
+    OperationId:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: '^[a-zA-Z0-9_.:-]+$'
+    MachineIdentityId:
+      type: string
+      minLength: 3
+      maxLength: 64
+      pattern: '^[a-z][a-z0-9_.-]{2,63}$'
     GameStatus:
       type: string
       enum: [enabled, maintenance, disabled]
@@ -958,6 +1443,16 @@ components:
         password:
           type: string
           maxLength: 1024
+          writeOnly: true
+    AdminReauthenticateRequest:
+      type: object
+      additionalProperties: false
+      required: [password]
+      properties:
+        password:
+          type: string
+          maxLength: 1024
+          writeOnly: true
     AdminOperator:
       type: object
       additionalProperties: false
@@ -990,7 +1485,15 @@ components:
     AdminSessionResponse:
       type: object
       additionalProperties: false
-      required: [operator, games, canManageGames, expiresAt]
+      required:
+        - operator
+        - games
+        - canManageGames
+        - canManageIntegrations
+        - canRotateSecrets
+        - canManageMachineIdentities
+        - expiresAt
+        - elevatedUntil
       properties:
         operator:
           $ref: '#/components/schemas/AdminOperator'
@@ -1000,8 +1503,19 @@ components:
             $ref: '#/components/schemas/AdminGameAccess'
         canManageGames:
           type: boolean
+        canManageIntegrations:
+          type: boolean
+        canRotateSecrets:
+          type: boolean
+        canManageMachineIdentities:
+          type: boolean
         expiresAt:
           type: string
+          format: date-time
+        elevatedUntil:
+          type:
+            - string
+            - 'null'
           format: date-time
     GameProject:
       type: object
@@ -1092,6 +1606,34 @@ components:
         revision:
           type: integer
           minimum: 1
+    GameDirectorySettings:
+      type: object
+      additionalProperties: false
+      required: [gameId, isOps, revision, createdAt, updatedAt]
+      properties:
+        gameId:
+          $ref: '#/components/schemas/GameId'
+        isOps:
+          type: boolean
+        revision:
+          type: integer
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    UpdateGameDirectorySettingsRequest:
+      type: object
+      additionalProperties: false
+      required: [isOps, revision]
+      properties:
+        isOps:
+          type: boolean
+        revision:
+          type: integer
+          minimum: 1
     ManagedGameServer:
       type: object
       additionalProperties: false
@@ -1155,17 +1697,31 @@ components:
     ManagedGameServerListResponse:
       type: object
       additionalProperties: false
-      required: [servers]
+      required: [directoryRevision, servers]
       properties:
+        directoryRevision:
+          type: integer
+          minimum: 1
         servers:
           type: array
           maxItems: 65536
           items:
             $ref: '#/components/schemas/ManagedGameServer'
+    ManagedGameServerMutationResponse:
+      type: object
+      additionalProperties: false
+      required: [directoryRevision, server]
+      properties:
+        directoryRevision:
+          type: integer
+          minimum: 1
+        server:
+          $ref: '#/components/schemas/ManagedGameServer'
     CreateGameServerRequest:
       type: object
       additionalProperties: false
       required:
+        - directoryRevision
         - serverId
         - name
         - tag
@@ -1176,6 +1732,9 @@ components:
         - isOpen
         - sortOrder
       properties:
+        directoryRevision:
+          type: integer
+          minimum: 1
         serverId:
           type: integer
           minimum: 0
@@ -1211,6 +1770,7 @@ components:
       type: object
       additionalProperties: false
       required:
+        - directoryRevision
         - name
         - tag
         - status
@@ -1221,6 +1781,9 @@ components:
         - sortOrder
         - revision
       properties:
+        directoryRevision:
+          type: integer
+          minimum: 1
         name:
           type: string
           minLength: 1
@@ -1251,6 +1814,514 @@ components:
         revision:
           type: integer
           minimum: 1
+    WechatSecretMetadata:
+      type: object
+      additionalProperties: false
+      required: [configured, version, state, updatedAt]
+      properties:
+        configured:
+          type: boolean
+        version:
+          type: integer
+          minimum: 0
+        state:
+          type: string
+          enum: [active, missing]
+        updatedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+    GameIntegration:
+      type: object
+      additionalProperties: false
+      required:
+        - gameId
+        - configurationState
+        - wechatAppId
+        - wechatSecret
+        - wechatEndpoint
+        - wechatTimeoutMs
+        - wechatBreakerThreshold
+        - wechatBreakerOpenMs
+        - sessionTtlSeconds
+        - loginRateCapacity
+        - loginRateRefillPerSecond
+        - adminRateCapacity
+        - adminRateRefillPerSecond
+        - revision
+        - loadedRevision
+        - createdAt
+        - updatedAt
+      properties:
+        gameId:
+          $ref: '#/components/schemas/GameId'
+        configurationState:
+          $ref: '#/components/schemas/GameConfigurationState'
+        wechatAppId:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 128
+        wechatSecret:
+          $ref: '#/components/schemas/WechatSecretMetadata'
+        wechatEndpoint:
+          type: string
+          format: uri
+          maxLength: 2048
+        wechatTimeoutMs:
+          type: integer
+          minimum: 100
+          maximum: 30000
+        wechatBreakerThreshold:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        wechatBreakerOpenMs:
+          type: integer
+          minimum: 100
+          maximum: 600000
+        sessionTtlSeconds:
+          type: integer
+          minimum: 60
+          maximum: 31536000
+        loginRateCapacity:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 1000000
+        loginRateRefillPerSecond:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 1000000
+        adminRateCapacity:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 1000000
+        adminRateRefillPerSecond:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 1000000
+        revision:
+          type: integer
+          minimum: 1
+        loadedRevision:
+          type:
+            - integer
+            - 'null'
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    UpdateGameIntegrationRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - wechatAppId
+        - wechatEndpoint
+        - wechatTimeoutMs
+        - wechatBreakerThreshold
+        - wechatBreakerOpenMs
+        - sessionTtlSeconds
+        - loginRateCapacity
+        - loginRateRefillPerSecond
+        - adminRateCapacity
+        - adminRateRefillPerSecond
+        - revision
+      properties:
+        wechatAppId:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 128
+        wechatEndpoint:
+          type: string
+          format: uri
+          maxLength: 2048
+        wechatTimeoutMs:
+          type: integer
+          minimum: 100
+          maximum: 30000
+        wechatBreakerThreshold:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        wechatBreakerOpenMs:
+          type: integer
+          minimum: 100
+          maximum: 600000
+        sessionTtlSeconds:
+          type: integer
+          minimum: 60
+          maximum: 31536000
+        loginRateCapacity:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 1000000
+        loginRateRefillPerSecond:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 1000000
+        adminRateCapacity:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 1000000
+        adminRateRefillPerSecond:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 1000000
+        revision:
+          type: integer
+          minimum: 1
+    ReplaceWechatAppSecretRequest:
+      type: object
+      additionalProperties: false
+      required: [wechatAppSecret, revision, operationId]
+      properties:
+        wechatAppSecret:
+          type: string
+          minLength: 1
+          maxLength: 512
+          writeOnly: true
+        revision:
+          type: integer
+          minimum: 1
+        operationId:
+          $ref: '#/components/schemas/OperationId'
+    WechatSecretWriteResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - gameId
+        - configurationState
+        - wechatSecret
+        - revision
+        - loadedRevision
+        - replayed
+      properties:
+        gameId:
+          $ref: '#/components/schemas/GameId'
+        configurationState:
+          $ref: '#/components/schemas/GameConfigurationState'
+        wechatSecret:
+          $ref: '#/components/schemas/WechatSecretMetadata'
+        revision:
+          type: integer
+          minimum: 1
+        loadedRevision:
+          type:
+            - integer
+            - 'null'
+          minimum: 1
+        replayed:
+          type: boolean
+    MachineIdentityType:
+      type: string
+      enum: [service, machine_admin]
+    MachineIdentityStatus:
+      type: string
+      enum: [enabled, disabled]
+    MachineSecretState:
+      type: string
+      enum: [current, previous, revoked]
+    MachineSecretVersion:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - state
+        - expiresAt
+        - createdAt
+        - activatedAt
+        - lastUsedAt
+        - revokedAt
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        state:
+          $ref: '#/components/schemas/MachineSecretState'
+        expiresAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        activatedAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        revokedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+    MachineIdentity:
+      type: object
+      additionalProperties: false
+      required:
+        - identityId
+        - identityType
+        - displayName
+        - status
+        - gameIds
+        - revision
+        - secretVersions
+        - createdAt
+        - updatedAt
+      properties:
+        identityId:
+          $ref: '#/components/schemas/MachineIdentityId'
+        identityType:
+          $ref: '#/components/schemas/MachineIdentityType'
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 128
+        status:
+          $ref: '#/components/schemas/MachineIdentityStatus'
+        gameIds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/GameId'
+        revision:
+          type: integer
+          minimum: 1
+        secretVersions:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineSecretVersion'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    MachineIdentityListResponse:
+      type: object
+      additionalProperties: false
+      required: [identities]
+      properties:
+        identities:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineIdentity'
+    CreateMachineIdentityRequest:
+      type: object
+      additionalProperties: false
+      required: [identityId, identityType, displayName, gameIds, operationId]
+      properties:
+        identityId:
+          $ref: '#/components/schemas/MachineIdentityId'
+        identityType:
+          $ref: '#/components/schemas/MachineIdentityType'
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 128
+        gameIds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/GameId'
+        operationId:
+          $ref: '#/components/schemas/OperationId'
+    UpdateMachineIdentityRequest:
+      type: object
+      additionalProperties: false
+      required: [displayName, status, gameIds, revision]
+      properties:
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 128
+        status:
+          $ref: '#/components/schemas/MachineIdentityStatus'
+        gameIds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/GameId'
+        revision:
+          type: integer
+          minimum: 1
+    RotateMachineSecretRequest:
+      type: object
+      additionalProperties: false
+      required: [operationId, revision, previousValiditySeconds]
+      properties:
+        operationId:
+          $ref: '#/components/schemas/OperationId'
+        revision:
+          type: integer
+          minimum: 1
+        previousValiditySeconds:
+          type: integer
+          minimum: 60
+          maximum: 604800
+    RevokeMachineSecretRequest:
+      type: object
+      additionalProperties: false
+      required: [operationId, revision, reason]
+      properties:
+        operationId:
+          $ref: '#/components/schemas/OperationId'
+        revision:
+          type: integer
+          minimum: 1
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 255
+    MachineSecretIssuedResponse:
+      type: object
+      additionalProperties: false
+      required: [identity, version, previousExpiresAt, replayed]
+      properties:
+        identity:
+          $ref: '#/components/schemas/MachineIdentity'
+        version:
+          type: integer
+          minimum: 1
+        secret:
+          type: string
+          minLength: 43
+          maxLength: 43
+          pattern: '^[A-Za-z0-9_-]+$'
+          readOnly: true
+          description: 仅首次成功响应返回；幂等重放时缺省且无法恢复。
+        previousExpiresAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        replayed:
+          type: boolean
+    MachineSecretRevokedResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - identityId
+        - version
+        - state
+        - identityRevision
+        - replayed
+      properties:
+        identityId:
+          $ref: '#/components/schemas/MachineIdentityId'
+        version:
+          type: integer
+          minimum: 1
+        state:
+          const: revoked
+        identityRevision:
+          type: integer
+          minimum: 1
+        replayed:
+          type: boolean
+    MachineSecretOperationStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - operationId
+        - identityId
+        - action
+        - status
+        - version
+        - deliveryLost
+        - createdAt
+      properties:
+        operationId:
+          $ref: '#/components/schemas/OperationId'
+        identityId:
+          $ref: '#/components/schemas/MachineIdentityId'
+        action:
+          type: string
+          enum: [set, rotate, revoke]
+        status:
+          const: succeeded
+        version:
+          type:
+            - integer
+            - 'null'
+          minimum: 1
+        deliveryLost:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+    ConfigurationAuditRecord:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - auditType
+        - operatorId
+        - gameId
+        - identityId
+        - action
+        - result
+        - oldVersion
+        - newVersion
+        - createdAt
+      properties:
+        id:
+          type: string
+        auditType:
+          type: string
+          enum: [machine_identity, secret]
+        operatorId:
+          type: string
+          minLength: 3
+          maxLength: 64
+        gameId:
+          oneOf:
+            - $ref: '#/components/schemas/GameId'
+            - type: 'null'
+        identityId:
+          oneOf:
+            - $ref: '#/components/schemas/MachineIdentityId'
+            - type: 'null'
+        action:
+          type: string
+          maxLength: 64
+        result:
+          type: string
+          maxLength: 64
+        oldVersion:
+          type:
+            - integer
+            - 'null'
+          minimum: 0
+        newVersion:
+          type:
+            - integer
+            - 'null'
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+    ConfigurationAuditPage:
+      type: object
+      additionalProperties: false
+      required: [records]
+      properties:
+        records:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ConfigurationAuditRecord'
     ClientGameSummary:
       type: object
       additionalProperties: false

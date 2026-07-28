@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   GameManageKitPath,
   type AdminLoginRequest,
+  type AdminReauthenticateRequest,
   type AdminSessionResponse,
 } from "@gono/game-manage-kit-contract";
 import type { GameManageKitConfig } from "../../config.js";
@@ -10,7 +11,7 @@ import {
   type AdminAuthService,
   type AdminSessionIdentity,
 } from "../../domain/admin/auth.js";
-import type { GameRegistry } from "../../domain/game/registry.js";
+import type { GameRuntimeRegistry } from "../../domain/game/resolver.js";
 import { GameManageKitError } from "../../errors.js";
 import {
   clearAdminSessionCookies,
@@ -26,10 +27,11 @@ import {
 } from "../common.js";
 
 export interface AdminAuthRouteServices {
-  readonly games: GameRegistry;
+  readonly games: GameRuntimeRegistry;
   readonly adminAuth: Pick<
     AdminAuthService,
-    "login" | "authenticate" | "logout" | "requireAccountOperation"
+    "login" | "reauthenticate" | "authenticate" | "logout"
+    | "requireAccountOperation"
     | "requireGameAccess" | "requireGameManagement"
   >;
 }
@@ -47,7 +49,6 @@ const noStoreHook = async (
 
 function sessionResponse(
   identity: AdminSessionIdentity,
-  games: GameRegistry,
 ): AdminSessionResponse {
   return {
     operator: {
@@ -55,8 +56,7 @@ function sessionResponse(
       displayName: identity.displayName,
     },
     games: identity.games.flatMap((access) => {
-      const game = games.get(access.gameId);
-      return game && access.configurationState === "configured"
+      return access.configurationState === "configured"
         ? [{
             gameId: access.gameId,
             name: access.name,
@@ -67,7 +67,11 @@ function sessionResponse(
         : [];
     }),
     canManageGames: identity.canManageGames,
+    canManageIntegrations: identity.canManageIntegrations,
+    canRotateSecrets: identity.canRotateSecrets,
+    canManageMachineIdentities: identity.canManageMachineIdentities,
     expiresAt: identity.expiresAt,
+    elevatedUntil: identity.elevatedUntil,
   };
 }
 
@@ -140,7 +144,50 @@ export function registerAdminAuthRoutes(
           cookieReadOptions,
         );
         const identity = await services.adminAuth.authenticate(token, request.ip);
-        return sessionResponse(identity, services.games);
+        return sessionResponse(identity);
+      } catch (error) {
+        if (
+          error instanceof GameManageKitError
+          && error.statusCode === 401
+        ) {
+          void reply.header("set-cookie", clearAdminSessionCookies());
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post<{ Body: AdminReauthenticateRequest }>(
+    fastifyPath(GameManageKitPath.AdminReauthenticate),
+    {
+      onRequest: noStoreHook,
+      schema: {
+        body: schemaRef("AdminReauthenticateRequest"),
+        response: {
+          204: { type: "null" },
+          ...errorResponseSchemas,
+        },
+      },
+    },
+    async (request, reply) => {
+      noStore(reply);
+      requireAllowedAdminOrigin(
+        headerValue(request, "origin"),
+        allowedOrigins,
+      );
+      try {
+        const token = requireAdminSessionCookie(
+          headerValue(request, "cookie"),
+          cookieReadOptions,
+        );
+        const identity = await services.adminAuth.reauthenticate(
+          token,
+          request.body.password,
+          request.ip,
+        );
+        request.adminSessionIdentity = identity;
+        request.log = request.log.child({ operatorId: identity.operatorId });
+        return reply.code(204).send();
       } catch (error) {
         if (
           error instanceof GameManageKitError

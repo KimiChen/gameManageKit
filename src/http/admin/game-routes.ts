@@ -5,12 +5,14 @@ import type {
 } from "fastify";
 import {
   type CreateGameServerRequest,
+  type GameDirectorySettings,
   GameManageKitPath,
   type CreateGameProjectRequest,
   type GameProject,
   type GameProjectListResponse,
-  type ManagedGameServer,
   type ManagedGameServerListResponse,
+  type ManagedGameServerMutationResponse,
+  type UpdateGameDirectorySettingsRequest,
   type UpdateGameServerRequest,
   type UpdateGameProjectRequest,
 } from "@gono/game-manage-kit-contract";
@@ -51,7 +53,8 @@ export interface AdminGameRouteServices {
   >;
   readonly gameServers: Pick<
     GameServerService,
-    "list" | "create" | "update"
+    "getDirectorySettings" | "updateDirectorySettings"
+    | "list" | "create" | "update"
   >;
 }
 
@@ -242,6 +245,66 @@ export function registerAdminGameRoutes(
   );
 
   app.get<{ Params: GameParams }>(
+    fastifyPath(GameManageKitPath.GetAdminGameDirectorySettings),
+    {
+      onRequest: noStoreHook,
+      schema: {
+        params: gameParamsSchema,
+        response: {
+          200: schemaRef("GameDirectorySettings"),
+          ...errorResponseSchemas,
+        },
+      },
+    },
+    async (request, reply): Promise<GameDirectorySettings> => {
+      const identity = await authorize(
+        request,
+        reply,
+        config,
+        services,
+        false,
+      );
+      return services.gameServers.getDirectorySettings(
+        request.params.gameId,
+        projectAuthorization(request, identity, services),
+      );
+    },
+  );
+
+  app.patch<{
+    Params: GameParams;
+    Body: UpdateGameDirectorySettingsRequest;
+  }>(
+    fastifyPath(GameManageKitPath.UpdateAdminGameDirectorySettings),
+    {
+      onRequest: noStoreHook,
+      schema: {
+        params: gameParamsSchema,
+        body: schemaRef("UpdateGameDirectorySettingsRequest"),
+        response: {
+          200: schemaRef("GameDirectorySettings"),
+          ...errorResponseSchemas,
+        },
+      },
+    },
+    async (request, reply): Promise<GameDirectorySettings> => {
+      const identity = await authorize(
+        request,
+        reply,
+        config,
+        services,
+        true,
+      );
+      requireMutationCapacity(request, identity);
+      return services.gameServers.updateDirectorySettings(
+        request.params.gameId,
+        request.body,
+        projectAuthorization(request, identity, services),
+      );
+    },
+  );
+
+  app.get<{ Params: GameParams }>(
     fastifyPath(GameManageKitPath.ListAdminGameServers),
     {
       onRequest: noStoreHook,
@@ -261,13 +324,13 @@ export function registerAdminGameRoutes(
         services,
         false,
       );
+      const result = await services.gameServers.list(
+        request.params.gameId,
+        projectAuthorization(request, identity, services),
+      );
       return {
-        servers: [
-          ...await services.gameServers.list(
-            request.params.gameId,
-            projectAuthorization(request, identity, services),
-          ),
-        ],
+        directoryRevision: result.directoryRevision,
+        servers: [...result.servers],
       };
     },
   );
@@ -280,12 +343,12 @@ export function registerAdminGameRoutes(
         params: gameParamsSchema,
         body: schemaRef("CreateGameServerRequest"),
         response: {
-          201: schemaRef("ManagedGameServer"),
+          201: schemaRef("ManagedGameServerMutationResponse"),
           ...errorResponseSchemas,
         },
       },
     },
-    async (request, reply): Promise<ManagedGameServer> => {
+    async (request, reply): Promise<ManagedGameServerMutationResponse> => {
       const identity = await authorize(
         request,
         reply,
@@ -314,12 +377,12 @@ export function registerAdminGameRoutes(
         params: gameServerParamsSchema,
         body: schemaRef("UpdateGameServerRequest"),
         response: {
-          200: schemaRef("ManagedGameServer"),
+          200: schemaRef("ManagedGameServerMutationResponse"),
           ...errorResponseSchemas,
         },
       },
     },
-    async (request, reply): Promise<ManagedGameServer> => {
+    async (request, reply): Promise<ManagedGameServerMutationResponse> => {
       const identity = await authorize(
         request,
         reply,

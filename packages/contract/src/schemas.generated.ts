@@ -7,6 +7,20 @@ export const GameManageKitSchemas = {
     "pattern": "^[a-z][a-z0-9-]{1,31}$",
     "$id": "GameId"
   },
+  "OperationId": {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 64,
+    "pattern": "^[a-zA-Z0-9_.:-]+$",
+    "$id": "OperationId"
+  },
+  "MachineIdentityId": {
+    "type": "string",
+    "minLength": 3,
+    "maxLength": 64,
+    "pattern": "^[a-z][a-z0-9_.-]{2,63}$",
+    "$id": "MachineIdentityId"
+  },
   "GameStatus": {
     "type": "string",
     "enum": [
@@ -362,10 +376,26 @@ export const GameManageKitSchemas = {
       },
       "password": {
         "type": "string",
-        "maxLength": 1024
+        "maxLength": 1024,
+        "writeOnly": true
       }
     },
     "$id": "AdminLoginRequest"
+  },
+  "AdminReauthenticateRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "password"
+    ],
+    "properties": {
+      "password": {
+        "type": "string",
+        "maxLength": 1024,
+        "writeOnly": true
+      }
+    },
+    "$id": "AdminReauthenticateRequest"
   },
   "AdminOperator": {
     "type": "object",
@@ -423,7 +453,11 @@ export const GameManageKitSchemas = {
       "operator",
       "games",
       "canManageGames",
-      "expiresAt"
+      "canManageIntegrations",
+      "canRotateSecrets",
+      "canManageMachineIdentities",
+      "expiresAt",
+      "elevatedUntil"
     ],
     "properties": {
       "operator": {
@@ -438,8 +472,24 @@ export const GameManageKitSchemas = {
       "canManageGames": {
         "type": "boolean"
       },
+      "canManageIntegrations": {
+        "type": "boolean"
+      },
+      "canRotateSecrets": {
+        "type": "boolean"
+      },
+      "canManageMachineIdentities": {
+        "type": "boolean"
+      },
       "expiresAt": {
         "type": "string",
+        "format": "date-time"
+      },
+      "elevatedUntil": {
+        "type": [
+          "string",
+          "null"
+        ],
         "format": "date-time"
       }
     },
@@ -581,6 +631,56 @@ export const GameManageKitSchemas = {
     },
     "$id": "UpdateGameProjectRequest"
   },
+  "GameDirectorySettings": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "gameId",
+      "isOps",
+      "revision",
+      "createdAt",
+      "updatedAt"
+    ],
+    "properties": {
+      "gameId": {
+        "$ref": "GameId#"
+      },
+      "isOps": {
+        "type": "boolean"
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "createdAt": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "updatedAt": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "$id": "GameDirectorySettings"
+  },
+  "UpdateGameDirectorySettingsRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "isOps",
+      "revision"
+    ],
+    "properties": {
+      "isOps": {
+        "type": "boolean"
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "$id": "UpdateGameDirectorySettingsRequest"
+  },
   "ManagedGameServer": {
     "type": "object",
     "additionalProperties": false,
@@ -671,9 +771,14 @@ export const GameManageKitSchemas = {
     "type": "object",
     "additionalProperties": false,
     "required": [
+      "directoryRevision",
       "servers"
     ],
     "properties": {
+      "directoryRevision": {
+        "type": "integer",
+        "minimum": 1
+      },
       "servers": {
         "type": "array",
         "maxItems": 65536,
@@ -684,10 +789,29 @@ export const GameManageKitSchemas = {
     },
     "$id": "ManagedGameServerListResponse"
   },
+  "ManagedGameServerMutationResponse": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "directoryRevision",
+      "server"
+    ],
+    "properties": {
+      "directoryRevision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "server": {
+        "$ref": "ManagedGameServer#"
+      }
+    },
+    "$id": "ManagedGameServerMutationResponse"
+  },
   "CreateGameServerRequest": {
     "type": "object",
     "additionalProperties": false,
     "required": [
+      "directoryRevision",
       "serverId",
       "name",
       "tag",
@@ -699,6 +823,10 @@ export const GameManageKitSchemas = {
       "sortOrder"
     ],
     "properties": {
+      "directoryRevision": {
+        "type": "integer",
+        "minimum": 1
+      },
       "serverId": {
         "type": "integer",
         "minimum": 0,
@@ -755,6 +883,7 @@ export const GameManageKitSchemas = {
     "type": "object",
     "additionalProperties": false,
     "required": [
+      "directoryRevision",
       "name",
       "tag",
       "status",
@@ -766,6 +895,10 @@ export const GameManageKitSchemas = {
       "revision"
     ],
     "properties": {
+      "directoryRevision": {
+        "type": "integer",
+        "minimum": 1
+      },
       "name": {
         "type": "string",
         "minLength": 1,
@@ -816,6 +949,765 @@ export const GameManageKitSchemas = {
       }
     },
     "$id": "UpdateGameServerRequest"
+  },
+  "WechatSecretMetadata": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "configured",
+      "version",
+      "state",
+      "updatedAt"
+    ],
+    "properties": {
+      "configured": {
+        "type": "boolean"
+      },
+      "version": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "state": {
+        "type": "string",
+        "enum": [
+          "active",
+          "missing"
+        ]
+      },
+      "updatedAt": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "format": "date-time"
+      }
+    },
+    "$id": "WechatSecretMetadata"
+  },
+  "GameIntegration": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "gameId",
+      "configurationState",
+      "wechatAppId",
+      "wechatSecret",
+      "wechatEndpoint",
+      "wechatTimeoutMs",
+      "wechatBreakerThreshold",
+      "wechatBreakerOpenMs",
+      "sessionTtlSeconds",
+      "loginRateCapacity",
+      "loginRateRefillPerSecond",
+      "adminRateCapacity",
+      "adminRateRefillPerSecond",
+      "revision",
+      "loadedRevision",
+      "createdAt",
+      "updatedAt"
+    ],
+    "properties": {
+      "gameId": {
+        "$ref": "GameId#"
+      },
+      "configurationState": {
+        "$ref": "GameConfigurationState#"
+      },
+      "wechatAppId": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "wechatSecret": {
+        "$ref": "WechatSecretMetadata#"
+      },
+      "wechatEndpoint": {
+        "type": "string",
+        "format": "uri",
+        "maxLength": 2048
+      },
+      "wechatTimeoutMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 30000
+      },
+      "wechatBreakerThreshold": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      },
+      "wechatBreakerOpenMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 600000
+      },
+      "sessionTtlSeconds": {
+        "type": "integer",
+        "minimum": 60,
+        "maximum": 31536000
+      },
+      "loginRateCapacity": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 1000000
+      },
+      "loginRateRefillPerSecond": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 1000000
+      },
+      "adminRateCapacity": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 1000000
+      },
+      "adminRateRefillPerSecond": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 1000000
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "loadedRevision": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 1
+      },
+      "createdAt": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "updatedAt": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "$id": "GameIntegration"
+  },
+  "UpdateGameIntegrationRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "wechatAppId",
+      "wechatEndpoint",
+      "wechatTimeoutMs",
+      "wechatBreakerThreshold",
+      "wechatBreakerOpenMs",
+      "sessionTtlSeconds",
+      "loginRateCapacity",
+      "loginRateRefillPerSecond",
+      "adminRateCapacity",
+      "adminRateRefillPerSecond",
+      "revision"
+    ],
+    "properties": {
+      "wechatAppId": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "wechatEndpoint": {
+        "type": "string",
+        "format": "uri",
+        "maxLength": 2048
+      },
+      "wechatTimeoutMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 30000
+      },
+      "wechatBreakerThreshold": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      },
+      "wechatBreakerOpenMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 600000
+      },
+      "sessionTtlSeconds": {
+        "type": "integer",
+        "minimum": 60,
+        "maximum": 31536000
+      },
+      "loginRateCapacity": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 1000000
+      },
+      "loginRateRefillPerSecond": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 1000000
+      },
+      "adminRateCapacity": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 1000000
+      },
+      "adminRateRefillPerSecond": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 1000000
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "$id": "UpdateGameIntegrationRequest"
+  },
+  "ReplaceWechatAppSecretRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "wechatAppSecret",
+      "revision",
+      "operationId"
+    ],
+    "properties": {
+      "wechatAppSecret": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "writeOnly": true
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "operationId": {
+        "$ref": "OperationId#"
+      }
+    },
+    "$id": "ReplaceWechatAppSecretRequest"
+  },
+  "WechatSecretWriteResponse": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "gameId",
+      "configurationState",
+      "wechatSecret",
+      "revision",
+      "loadedRevision",
+      "replayed"
+    ],
+    "properties": {
+      "gameId": {
+        "$ref": "GameId#"
+      },
+      "configurationState": {
+        "$ref": "GameConfigurationState#"
+      },
+      "wechatSecret": {
+        "$ref": "WechatSecretMetadata#"
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "loadedRevision": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 1
+      },
+      "replayed": {
+        "type": "boolean"
+      }
+    },
+    "$id": "WechatSecretWriteResponse"
+  },
+  "MachineIdentityType": {
+    "type": "string",
+    "enum": [
+      "service",
+      "machine_admin"
+    ],
+    "$id": "MachineIdentityType"
+  },
+  "MachineIdentityStatus": {
+    "type": "string",
+    "enum": [
+      "enabled",
+      "disabled"
+    ],
+    "$id": "MachineIdentityStatus"
+  },
+  "MachineSecretState": {
+    "type": "string",
+    "enum": [
+      "current",
+      "previous",
+      "revoked"
+    ],
+    "$id": "MachineSecretState"
+  },
+  "MachineSecretVersion": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "version",
+      "state",
+      "expiresAt",
+      "createdAt",
+      "activatedAt",
+      "lastUsedAt",
+      "revokedAt"
+    ],
+    "properties": {
+      "version": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "state": {
+        "$ref": "MachineSecretState#"
+      },
+      "expiresAt": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "format": "date-time"
+      },
+      "createdAt": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "activatedAt": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "lastUsedAt": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "format": "date-time"
+      },
+      "revokedAt": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "format": "date-time"
+      }
+    },
+    "$id": "MachineSecretVersion"
+  },
+  "MachineIdentity": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "identityId",
+      "identityType",
+      "displayName",
+      "status",
+      "gameIds",
+      "revision",
+      "secretVersions",
+      "createdAt",
+      "updatedAt"
+    ],
+    "properties": {
+      "identityId": {
+        "$ref": "MachineIdentityId#"
+      },
+      "identityType": {
+        "$ref": "MachineIdentityType#"
+      },
+      "displayName": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "status": {
+        "$ref": "MachineIdentityStatus#"
+      },
+      "gameIds": {
+        "type": "array",
+        "uniqueItems": true,
+        "items": {
+          "$ref": "GameId#"
+        }
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "secretVersions": {
+        "type": "array",
+        "items": {
+          "$ref": "MachineSecretVersion#"
+        }
+      },
+      "createdAt": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "updatedAt": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "$id": "MachineIdentity"
+  },
+  "MachineIdentityListResponse": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "identities"
+    ],
+    "properties": {
+      "identities": {
+        "type": "array",
+        "items": {
+          "$ref": "MachineIdentity#"
+        }
+      }
+    },
+    "$id": "MachineIdentityListResponse"
+  },
+  "CreateMachineIdentityRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "identityId",
+      "identityType",
+      "displayName",
+      "gameIds",
+      "operationId"
+    ],
+    "properties": {
+      "identityId": {
+        "$ref": "MachineIdentityId#"
+      },
+      "identityType": {
+        "$ref": "MachineIdentityType#"
+      },
+      "displayName": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "gameIds": {
+        "type": "array",
+        "uniqueItems": true,
+        "items": {
+          "$ref": "GameId#"
+        }
+      },
+      "operationId": {
+        "$ref": "OperationId#"
+      }
+    },
+    "$id": "CreateMachineIdentityRequest"
+  },
+  "UpdateMachineIdentityRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "displayName",
+      "status",
+      "gameIds",
+      "revision"
+    ],
+    "properties": {
+      "displayName": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "status": {
+        "$ref": "MachineIdentityStatus#"
+      },
+      "gameIds": {
+        "type": "array",
+        "uniqueItems": true,
+        "items": {
+          "$ref": "GameId#"
+        }
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "$id": "UpdateMachineIdentityRequest"
+  },
+  "RotateMachineSecretRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "operationId",
+      "revision",
+      "previousValiditySeconds"
+    ],
+    "properties": {
+      "operationId": {
+        "$ref": "OperationId#"
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "previousValiditySeconds": {
+        "type": "integer",
+        "minimum": 60,
+        "maximum": 604800
+      }
+    },
+    "$id": "RotateMachineSecretRequest"
+  },
+  "RevokeMachineSecretRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "operationId",
+      "revision",
+      "reason"
+    ],
+    "properties": {
+      "operationId": {
+        "$ref": "OperationId#"
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "reason": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 255
+      }
+    },
+    "$id": "RevokeMachineSecretRequest"
+  },
+  "MachineSecretIssuedResponse": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "identity",
+      "version",
+      "previousExpiresAt",
+      "replayed"
+    ],
+    "properties": {
+      "identity": {
+        "$ref": "MachineIdentity#"
+      },
+      "version": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "secret": {
+        "type": "string",
+        "minLength": 43,
+        "maxLength": 43,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "readOnly": true,
+        "description": "仅首次成功响应返回；幂等重放时缺省且无法恢复。"
+      },
+      "previousExpiresAt": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "format": "date-time"
+      },
+      "replayed": {
+        "type": "boolean"
+      }
+    },
+    "$id": "MachineSecretIssuedResponse"
+  },
+  "MachineSecretRevokedResponse": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "identityId",
+      "version",
+      "state",
+      "identityRevision",
+      "replayed"
+    ],
+    "properties": {
+      "identityId": {
+        "$ref": "MachineIdentityId#"
+      },
+      "version": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "state": {
+        "const": "revoked"
+      },
+      "identityRevision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "replayed": {
+        "type": "boolean"
+      }
+    },
+    "$id": "MachineSecretRevokedResponse"
+  },
+  "MachineSecretOperationStatus": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "operationId",
+      "identityId",
+      "action",
+      "status",
+      "version",
+      "deliveryLost",
+      "createdAt"
+    ],
+    "properties": {
+      "operationId": {
+        "$ref": "OperationId#"
+      },
+      "identityId": {
+        "$ref": "MachineIdentityId#"
+      },
+      "action": {
+        "type": "string",
+        "enum": [
+          "set",
+          "rotate",
+          "revoke"
+        ]
+      },
+      "status": {
+        "const": "succeeded"
+      },
+      "version": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 1
+      },
+      "deliveryLost": {
+        "type": "boolean"
+      },
+      "createdAt": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "$id": "MachineSecretOperationStatus"
+  },
+  "ConfigurationAuditRecord": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "id",
+      "auditType",
+      "operatorId",
+      "gameId",
+      "identityId",
+      "action",
+      "result",
+      "oldVersion",
+      "newVersion",
+      "createdAt"
+    ],
+    "properties": {
+      "id": {
+        "type": "string"
+      },
+      "auditType": {
+        "type": "string",
+        "enum": [
+          "machine_identity",
+          "secret"
+        ]
+      },
+      "operatorId": {
+        "type": "string",
+        "minLength": 3,
+        "maxLength": 64
+      },
+      "gameId": {
+        "oneOf": [
+          {
+            "$ref": "GameId#"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "identityId": {
+        "oneOf": [
+          {
+            "$ref": "MachineIdentityId#"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "action": {
+        "type": "string",
+        "maxLength": 64
+      },
+      "result": {
+        "type": "string",
+        "maxLength": 64
+      },
+      "oldVersion": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 0
+      },
+      "newVersion": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 0
+      },
+      "createdAt": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "$id": "ConfigurationAuditRecord"
+  },
+  "ConfigurationAuditPage": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "records"
+    ],
+    "properties": {
+      "records": {
+        "type": "array",
+        "maxItems": 100,
+        "items": {
+          "$ref": "ConfigurationAuditRecord#"
+        }
+      }
+    },
+    "$id": "ConfigurationAuditPage"
   },
   "ClientGameSummary": {
     "type": "object",

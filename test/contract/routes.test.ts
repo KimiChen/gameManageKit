@@ -6,26 +6,16 @@ import test from "node:test";
 import YAML from "yaml";
 import { buildApps, type GameManageKitServices } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
-import { GameRegistry } from "../../src/domain/game/registry.js";
+import type { GameRuntimeRegistry } from "../../src/domain/game/resolver.js";
 import {
   listRegisteredRoutes,
   type RegisteredHttpRoute,
 } from "../../src/http/common.js";
 import { MetricsRegistry } from "../../src/infra/observability/metrics.js";
 import { checkContractBreaking } from "../../scripts/check-contract-breaking.js";
+import { createTestRuntimeRegistry } from "../runtime-registry.js";
 
 type JsonRecord = Record<string, unknown>;
-
-const GAME_ENV = {
-  GAME_A_WX_APPID: "game-a-app",
-  GAME_A_WX_SECRET: "game-a-wx-secret",
-  GAME_B_WX_APPID: "game-b-app",
-  GAME_B_WX_SECRET: "game-b-wx-secret",
-  GAME_A_SERVICE_SECRET: "game-a-service-secret",
-  GAME_B_SERVICE_SECRET: "game-b-service-secret",
-  GAME_A_ADMIN_SECRET: "game-a-admin-secret",
-  GAME_B_ADMIN_SECRET: "game-b-admin-secret",
-} as const;
 
 const OLD_SINGLE_GAME_OPERATIONS = [
   "POST /v1/sessions/wechat",
@@ -38,7 +28,7 @@ const OLD_SINGLE_GAME_OPERATIONS = [
   "POST /v1/admin/accounts/{userId}/revoke",
 ] as const;
 
-function serviceStubs(games: GameRegistry): GameManageKitServices {
+function serviceStubs(games: GameRuntimeRegistry): GameManageKitServices {
   const project = {
     gameId: "game-a",
     name: "示例游戏 A",
@@ -76,13 +66,59 @@ function serviceStubs(games: GameRegistry): GameManageKitServices {
       },
     },
     gameServers: {
+      async getDirectorySettings() {
+        return {
+          gameId: "game-a",
+          isOps: false,
+          revision: 1,
+          createdAt: "2026-07-28T00:00:00.000Z",
+          updatedAt: "2026-07-28T00:00:00.000Z",
+        };
+      },
+      async updateDirectorySettings() {
+        throw new Error("测试未调用");
+      },
       async list() {
-        return [];
+        return { directoryRevision: 1, servers: [] };
       },
       async create() {
         throw new Error("测试未调用");
       },
       async update() {
+        throw new Error("测试未调用");
+      },
+    },
+    integrations: {
+      async get() {
+        throw new Error("测试未调用");
+      },
+      async update() {
+        throw new Error("测试未调用");
+      },
+      async replaceWechatSecret() {
+        throw new Error("测试未调用");
+      },
+    },
+    machineIdentities: {
+      async list() {
+        throw new Error("测试未调用");
+      },
+      async create() {
+        throw new Error("测试未调用");
+      },
+      async update() {
+        throw new Error("测试未调用");
+      },
+      async rotate() {
+        throw new Error("测试未调用");
+      },
+      async revoke() {
+        throw new Error("测试未调用");
+      },
+      async rotationStatus() {
+        throw new Error("测试未调用");
+      },
+      async listAudit() {
         throw new Error("测试未调用");
       },
     },
@@ -134,8 +170,26 @@ function serviceStubs(games: GameRegistry): GameManageKitServices {
           displayName: "Contract",
           authVersion: 1,
           canManageGames: true,
+          canManageIntegrations: true,
+          canRotateSecrets: true,
+          canManageMachineIdentities: true,
           games: [],
           expiresAt: "2026-07-28T18:00:00.000Z",
+          elevatedUntil: null,
+        };
+      },
+      async reauthenticate() {
+        return {
+          operatorId: "ops_contract",
+          displayName: "Contract",
+          authVersion: 1,
+          canManageGames: true,
+          canManageIntegrations: true,
+          canRotateSecrets: true,
+          canManageMachineIdentities: true,
+          games: [],
+          expiresAt: "2026-07-28T18:00:00.000Z",
+          elevatedUntil: "2026-07-28T17:15:00.000Z",
         };
       },
       async authenticate() {
@@ -144,14 +198,22 @@ function serviceStubs(games: GameRegistry): GameManageKitServices {
           displayName: "Contract",
           authVersion: 1,
           canManageGames: true,
+          canManageIntegrations: true,
+          canRotateSecrets: true,
+          canManageMachineIdentities: true,
           games: [],
           expiresAt: "2026-07-28T18:00:00.000Z",
+          elevatedUntil: null,
         };
       },
       async logout() {},
       async requireAccountOperation() {},
       async requireGameAccess() {},
       async requireGameManagement() {},
+      async requireIntegrationManagement() {},
+      async requireMachineIdentityManagement() {},
+      async requireSecretRotation() {},
+      async requireElevatedSession() {},
     },
     readiness: {
       async ready() {
@@ -192,14 +254,10 @@ test("实际双监听路由全集与 OpenAPI method/path/tag 完全一致", asyn
   const config = loadConfig({
     NODE_ENV: "development",
     GAME_MANAGE_KIT_MYSQL_URL: "mysql://root@127.0.0.1:3316/game_manage_kit_contract_test",
-    GAME_MANAGE_KIT_GAMES_CONFIG: "config/games.json",
     AUTH_DEV_ENABLED: "1",
     GAME_MANAGE_KIT_LOG_ENABLED: "0",
   });
-  const games = await GameRegistry.load(config.gamesConfigPath, {
-    production: false,
-    env: GAME_ENV,
-  });
+  const games = createTestRuntimeRegistry();
   const apps = buildApps(config, serviceStubs(games));
   t.after(async () => {
     await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);

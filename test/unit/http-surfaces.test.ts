@@ -1,12 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import test, { type TestContext } from "node:test";
+import test from "node:test";
 import type { AreaListResponse, LoginResponse } from "@gono/game-manage-kit-contract";
 import { buildApps, type GameManageKitServices } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
-import { GameRegistry } from "../../src/domain/game/registry.js";
+import type { GameRuntimeRegistry } from "../../src/domain/game/resolver.js";
 import {
   authorizeAdminGame,
   authorizeServiceGame,
@@ -15,17 +12,11 @@ import {
   resolveGameContext,
 } from "../../src/http/common.js";
 import { MetricsRegistry } from "../../src/infra/observability/metrics.js";
-
-const TENANT_ENV = {
-  GAME_A_WX_APPID: "game-a-app",
-  GAME_A_WX_SECRET: "game-a-wx-secret",
-  GAME_B_WX_APPID: "game-b-app",
-  GAME_B_WX_SECRET: "game-b-wx-secret",
-  GAME_A_SERVICE_SECRET: "game-a-service-secret",
-  GAME_B_SERVICE_SECRET: "game-b-service-secret",
-  GAME_A_ADMIN_SECRET: "game-a-admin-secret",
-  GAME_B_ADMIN_SECRET: "game-b-admin-secret",
-} as const;
+import {
+  createTestRuntimeRegistry,
+  TEST_ADMIN_SECRET,
+  TEST_SERVICE_SECRET,
+} from "../runtime-registry.js";
 
 const LOGIN: LoginResponse = {
   userId: "u_1",
@@ -62,36 +53,19 @@ function config(nodeEnv: "development" | "production" = "development") {
   });
 }
 
-async function gameRegistry(production = false): Promise<GameRegistry> {
-  return GameRegistry.load("config/games.json", {
-    production,
-    env: TENANT_ENV,
-  });
+function gameRegistry(_production = false): GameRuntimeRegistry {
+  return createTestRuntimeRegistry();
 }
 
-async function registryWithStatuses(t: TestContext): Promise<GameRegistry> {
-  const document = JSON.parse(await readFile("config/games.json", "utf8")) as {
-    games: Array<{ status: string; directoryPath: string }>;
-  };
-  document.games[0]!.status = "maintenance";
-  document.games[1]!.status = "disabled";
-  for (const game of document.games) {
-    game.directoryPath = resolve("config", game.directoryPath);
-  }
-  const directory = await mkdtemp(join(tmpdir(), "game-http-status-"));
-  t.after(async () => {
-    await rm(directory, { recursive: true, force: true });
-  });
-  const path = join(directory, "games.json");
-  await writeFile(path, JSON.stringify(document), "utf8");
-  return GameRegistry.load(path, {
-    production: true,
-    env: TENANT_ENV,
-  });
+function registryWithStatuses(): GameRuntimeRegistry {
+  return createTestRuntimeRegistry([
+    { gameId: "game-a", status: "maintenance" },
+    { gameId: "game-b", status: "disabled" },
+  ]);
 }
 
 function services(
-  games: GameRegistry,
+  games: GameRuntimeRegistry,
   overrides: Partial<GameManageKitServices> = {},
 ): GameManageKitServices {
   const metrics = new MetricsRegistry(games.list().map((game) => game.gameId));
@@ -132,13 +106,59 @@ function services(
       },
     },
     gameServers: {
+      async getDirectorySettings() {
+        return {
+          gameId: "game-a",
+          isOps: false,
+          revision: 1,
+          createdAt: "2026-07-28T00:00:00.000Z",
+          updatedAt: "2026-07-28T00:00:00.000Z",
+        };
+      },
+      async updateDirectorySettings() {
+        throw new Error("测试未调用");
+      },
       async list() {
-        return [];
+        return { directoryRevision: 1, servers: [] };
       },
       async create() {
         throw new Error("测试未调用");
       },
       async update() {
+        throw new Error("测试未调用");
+      },
+    },
+    integrations: {
+      async get() {
+        throw new Error("测试未调用");
+      },
+      async update() {
+        throw new Error("测试未调用");
+      },
+      async replaceWechatSecret() {
+        throw new Error("测试未调用");
+      },
+    },
+    machineIdentities: {
+      async list() {
+        throw new Error("测试未调用");
+      },
+      async create() {
+        throw new Error("测试未调用");
+      },
+      async update() {
+        throw new Error("测试未调用");
+      },
+      async rotate() {
+        throw new Error("测试未调用");
+      },
+      async revoke() {
+        throw new Error("测试未调用");
+      },
+      async rotationStatus() {
+        throw new Error("测试未调用");
+      },
+      async listAudit() {
         throw new Error("测试未调用");
       },
     },
@@ -192,6 +212,9 @@ function services(
           displayName: "Kimi",
           authVersion: 1,
           canManageGames: true,
+          canManageIntegrations: true,
+          canRotateSecrets: true,
+          canManageMachineIdentities: true,
           games: [{
             gameId: "game-a",
             name: "示例游戏 A",
@@ -200,6 +223,27 @@ function services(
             canOperateAccounts: true,
           }],
           expiresAt: "2026-07-28T18:00:00.000Z",
+          elevatedUntil: null,
+        };
+      },
+      async reauthenticate() {
+        return {
+          operatorId: "ops_kimi",
+          displayName: "Kimi",
+          authVersion: 1,
+          canManageGames: true,
+          canManageIntegrations: true,
+          canRotateSecrets: true,
+          canManageMachineIdentities: true,
+          games: [{
+            gameId: "game-a",
+            name: "示例游戏 A",
+            status: "enabled",
+            configurationState: "configured",
+            canOperateAccounts: true,
+          }],
+          expiresAt: "2026-07-28T18:00:00.000Z",
+          elevatedUntil: "2026-07-28T17:15:00.000Z",
         };
       },
       async authenticate() {
@@ -208,6 +252,9 @@ function services(
           displayName: "Kimi",
           authVersion: 1,
           canManageGames: true,
+          canManageIntegrations: true,
+          canRotateSecrets: true,
+          canManageMachineIdentities: true,
           games: [{
             gameId: "game-a",
             name: "示例游戏 A",
@@ -216,12 +263,17 @@ function services(
             canOperateAccounts: true,
           }],
           expiresAt: "2026-07-28T18:00:00.000Z",
+          elevatedUntil: null,
         };
       },
       async logout() {},
       async requireAccountOperation() {},
       async requireGameAccess() {},
       async requireGameManagement() {},
+      async requireIntegrationManagement() {},
+      async requireMachineIdentityManagement() {},
+      async requireSecretRotation() {},
+      async requireElevatedSession() {},
     },
     readiness: {
       async ready() {
@@ -261,6 +313,15 @@ test("public/internal 双监听只暴露各自多游戏业务路由", async (t) 
     }],
   });
   assert.equal(clientGames.headers["cache-control"], "no-store");
+
+  const areas = await apps.publicApp.inject({
+    method: "GET",
+    url: "/v1/games/game-a/areas",
+    headers: { authorization: `Bearer ${LOGIN.accessToken}` },
+  });
+  assert.equal(areas.statusCode, 200);
+  assert.equal(areas.headers["cache-control"], "private, no-store");
+  assert.equal(areas.headers.vary, "Authorization");
 
   for (const oldPath of [
     "/v1/sessions/dev",
@@ -303,7 +364,7 @@ test("public/internal 双监听只暴露各自多游戏业务路由", async (t) 
 
   const serviceHeaders = {
     "x-service-id": "game-a-service",
-    "x-service-secret": TENANT_ENV.GAME_A_SERVICE_SECRET,
+    "x-service-secret": TEST_SERVICE_SECRET,
   };
   const authenticated = await apps.internalApp.inject({
     method: "POST",
@@ -328,7 +389,7 @@ test("public/internal 双监听只暴露各自多游戏业务路由", async (t) 
     url: "/v1/games/game-a/admin/accounts/u_1/revoke",
     headers: {
       "x-operator-id": "game-a-admin",
-      "x-admin-secret": TENANT_ENV.GAME_A_ADMIN_SECRET,
+      "x-admin-secret": TEST_ADMIN_SECRET,
     },
     payload: { operationId: "op-2", reason: "test" },
   });
@@ -340,7 +401,7 @@ test("public/internal 双监听只暴露各自多游戏业务路由", async (t) 
     url: "/v1/games/game-b/admin/accounts/u_1/revoke",
     headers: {
       "x-operator-id": "game-a-admin",
-      "x-admin-secret": TENANT_ENV.GAME_A_ADMIN_SECRET,
+      "x-admin-secret": TEST_ADMIN_SECRET,
     },
     payload: { operationId: "op-3", reason: "test" },
   });
@@ -368,7 +429,7 @@ test("public/internal 双监听只暴露各自多游戏业务路由", async (t) 
   }
 });
 
-test("生产环境加载默认双游戏目录且 dev-login 固定返回 404", async (t) => {
+test("生产环境保留双游戏运行时目录且 dev-login 固定返回 404", async (t) => {
   const games = await gameRegistry(true);
   const apps = buildApps(config("production"), services(games));
   t.after(async () => {
@@ -411,7 +472,7 @@ test("生产环境加载默认双游戏目录且 dev-login 固定返回 404", as
 });
 
 test("HTTP 映射非法、未知、维护和停用游戏状态", async (t) => {
-  const games = await registryWithStatuses(t);
+  const games = registryWithStatuses();
   const apps = buildApps(config(), services(games));
   t.after(async () => {
     await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);
@@ -521,7 +582,7 @@ test("Admin 按游戏使用独立令牌桶且不影响 Public 登录", async (t)
 
   const headers = {
     "x-operator-id": "game-a-admin",
-    "x-admin-secret": TENANT_ENV.GAME_A_ADMIN_SECRET,
+    "x-admin-secret": TEST_ADMIN_SECRET,
   };
   for (let index = 0; index < 10; index += 1) {
     const response = await apps.internalApp.inject({
@@ -612,7 +673,7 @@ test("结构化完成日志包含可信身份字段且异常文本、token 和 s
     url: "/service/game-a",
     headers: {
       "x-service-id": "game-a-service",
-      "x-service-secret": TENANT_ENV.GAME_A_SERVICE_SECRET,
+      "x-service-secret": TEST_SERVICE_SECRET,
     },
   });
   assert.equal(service.statusCode, 200);
@@ -621,7 +682,7 @@ test("结构化完成日志包含可信身份字段且异常文本、token 和 s
     url: "/admin/game-a",
     headers: {
       "x-operator-id": "game-a-admin",
-      "x-admin-secret": TENANT_ENV.GAME_A_ADMIN_SECRET,
+      "x-admin-secret": TEST_ADMIN_SECRET,
     },
   });
   assert.equal(admin.statusCode, 200);
@@ -630,8 +691,8 @@ test("结构化完成日志包含可信身份字段且异常文本、token 和 s
   for (const secret of [
     "database-password",
     "secret-token",
-    TENANT_ENV.GAME_A_SERVICE_SECRET,
-    TENANT_ENV.GAME_A_ADMIN_SECRET,
+    TEST_SERVICE_SECRET,
+    TEST_ADMIN_SECRET,
   ]) {
     assert.equal(serialized.includes(secret), false, secret);
   }

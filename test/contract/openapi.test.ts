@@ -11,14 +11,33 @@ type JsonRecord = Record<string, unknown>;
 
 const EXPECTED_OPERATIONS = new Map([
   ["POST /v1/admin/auth/login", "Admin"],
+  ["POST /v1/admin/auth/reauthenticate", "Admin"],
   ["GET /v1/admin/auth/session", "Admin"],
   ["DELETE /v1/admin/auth/session", "Admin"],
   ["GET /v1/admin/games", "Admin"],
   ["POST /v1/admin/games", "Admin"],
   ["PATCH /v1/admin/games/{gameId}", "Admin"],
+  ["GET /v1/admin/games/{gameId}/directory-settings", "Admin"],
+  ["PATCH /v1/admin/games/{gameId}/directory-settings", "Admin"],
   ["GET /v1/admin/games/{gameId}/servers", "Admin"],
   ["POST /v1/admin/games/{gameId}/servers", "Admin"],
   ["PATCH /v1/admin/games/{gameId}/servers/{serverId}", "Admin"],
+  ["GET /v1/admin/games/{gameId}/integration", "Admin"],
+  ["PATCH /v1/admin/games/{gameId}/integration", "Admin"],
+  ["PUT /v1/admin/games/{gameId}/secrets/wechat-app-secret", "Admin"],
+  ["GET /v1/admin/machine-identities", "Admin"],
+  ["POST /v1/admin/machine-identities", "Admin"],
+  ["PATCH /v1/admin/machine-identities/{identityId}", "Admin"],
+  ["POST /v1/admin/machine-identities/{identityId}/secret-rotations", "Admin"],
+  [
+    "GET /v1/admin/machine-identities/{identityId}/secret-rotations/{operationId}",
+    "Admin",
+  ],
+  [
+    "POST /v1/admin/machine-identities/{identityId}/secret-versions/{version}/revoke",
+    "Admin",
+  ],
+  ["GET /v1/admin/config-audit", "Admin"],
   ["GET /v1/games", "Public"],
   ["POST /v1/games/{gameId}/sessions/wechat", "Public"],
   ["POST /v1/games/{gameId}/sessions/dev", "Public"],
@@ -81,10 +100,12 @@ test("OpenAPI 仅保留多游戏业务路径，并为每个业务 operation 声�
         assert.deepEqual(responses["503"], { $ref: "#/components/responses/Unavailable" });
       } else if (path.startsWith("/v1/admin/")) {
         assert.deepEqual(operation.tags, ["Admin"]);
+        const parameters = pathItem.parameters as
+          | Array<{ $ref?: string }>
+          | undefined;
         if (path.includes("{gameId}")) {
-          const parameters = pathItem.parameters as Array<{ $ref?: string }>;
           assert.equal(
-            parameters.some((parameter) => (
+            parameters?.some((parameter) => (
               parameter.$ref === "#/components/parameters/GameId"
             )),
             true,
@@ -92,14 +113,42 @@ test("OpenAPI 仅保留多游戏业务路径，并为每个业务 operation 声�
           );
           if (path.includes("{serverId}")) {
             assert.equal(
-              parameters.some((parameter) => (
+              parameters?.some((parameter) => (
                 parameter.$ref === "#/components/parameters/ServerId"
               )),
               true,
               `${method.toUpperCase()} ${path} 缺少统一 ServerId path parameter`,
             );
           }
-        } else {
+        }
+        if (path.includes("{identityId}")) {
+          assert.equal(
+            parameters?.some((parameter) => (
+              parameter.$ref === "#/components/parameters/IdentityId"
+            )),
+            true,
+            `${method.toUpperCase()} ${path} 缺少统一 IdentityId path parameter`,
+          );
+        }
+        if (path.includes("{version}")) {
+          assert.equal(
+            parameters?.some((parameter) => (
+              parameter.$ref === "#/components/parameters/SecretVersion"
+            )),
+            true,
+            `${method.toUpperCase()} ${path} 缺少统一 SecretVersion path parameter`,
+          );
+        }
+        if (path.includes("{operationId}")) {
+          assert.equal(
+            parameters?.some((parameter) => (
+              parameter.$ref === "#/components/parameters/OperationId"
+            )),
+            true,
+            `${method.toUpperCase()} ${path} 缺少统一 OperationId path parameter`,
+          );
+        }
+        if (!path.includes("{")) {
           assert.equal(pathItem.parameters, undefined);
         }
       } else if (path === "/v1/games") {
@@ -128,6 +177,11 @@ test("管理员网页契约使用 Cookie 会话且保留机器管理员身份", 
   const paths = record(document.paths);
   const login = record(record(paths["/v1/admin/auth/login"]).post);
   assert.deepEqual(login.security, []);
+  const reauthenticate = record(
+    record(paths["/v1/admin/auth/reauthenticate"]).post,
+  );
+  assert.deepEqual(reauthenticate.security, [{ AdminSession: [] }]);
+  assert.match(String(reauthenticate.description), /Origin/u);
   const session = record(record(paths["/v1/admin/auth/session"]).get);
   assert.deepEqual(session.security, [{ AdminSession: [] }]);
 
@@ -135,9 +189,30 @@ test("管理员网页契约使用 Cookie 会话且保留机器管理员身份", 
     ["/v1/admin/games", "get"],
     ["/v1/admin/games", "post"],
     ["/v1/admin/games/{gameId}", "patch"],
+    ["/v1/admin/games/{gameId}/directory-settings", "get"],
+    ["/v1/admin/games/{gameId}/directory-settings", "patch"],
     ["/v1/admin/games/{gameId}/servers", "get"],
     ["/v1/admin/games/{gameId}/servers", "post"],
     ["/v1/admin/games/{gameId}/servers/{serverId}", "patch"],
+    ["/v1/admin/games/{gameId}/integration", "get"],
+    ["/v1/admin/games/{gameId}/integration", "patch"],
+    ["/v1/admin/games/{gameId}/secrets/wechat-app-secret", "put"],
+    ["/v1/admin/machine-identities", "get"],
+    ["/v1/admin/machine-identities", "post"],
+    ["/v1/admin/machine-identities/{identityId}", "patch"],
+    [
+      "/v1/admin/machine-identities/{identityId}/secret-rotations",
+      "post",
+    ],
+    [
+      "/v1/admin/machine-identities/{identityId}/secret-versions/{version}/revoke",
+      "post",
+    ],
+    [
+      "/v1/admin/machine-identities/{identityId}/secret-rotations/{operationId}",
+      "get",
+    ],
+    ["/v1/admin/config-audit", "get"],
   ] as const) {
     const operation = record(record(paths[path])[method]);
     assert.deepEqual(operation.security, [{ AdminSession: [] }]);
@@ -162,7 +237,7 @@ test("管理员网页契约使用 Cookie 会话且保留机器管理员身份", 
 
 test("游戏项目管理契约固定权限、生命周期、乐观锁与客户端展示字段", async () => {
   const document = record(YAML.parse(await readFile("openapi/openapi.yaml", "utf8")));
-  assert.equal(record(document.info).version, "1.2.0");
+  assert.equal(record(document.info).version, "2.0.0");
   const schemas = record(record(document.components).schemas);
 
   assert.deepEqual(schemas.GameConfigurationState, {
@@ -175,9 +250,25 @@ test("游戏项目管理契约固定权限、生命周期、乐观锁与客户�
     "operator",
     "games",
     "canManageGames",
+    "canManageIntegrations",
+    "canRotateSecrets",
+    "canManageMachineIdentities",
     "expiresAt",
+    "elevatedUntil",
   ]);
-  assert.deepEqual(record(session.properties).canManageGames, { type: "boolean" });
+  const sessionProperties = record(session.properties);
+  for (const property of [
+    "canManageGames",
+    "canManageIntegrations",
+    "canRotateSecrets",
+    "canManageMachineIdentities",
+  ]) {
+    assert.deepEqual(sessionProperties[property], { type: "boolean" });
+  }
+  assert.deepEqual(sessionProperties.elevatedUntil, {
+    type: ["string", "null"],
+    format: "date-time",
+  });
   for (const schemaName of [
     "AdminSessionResponse",
     "GameProjectListResponse",
@@ -365,7 +456,11 @@ test("游戏区服管理契约固定字段、开放开关、乐观锁与公开�
 
   const list = record(schemas.ManagedGameServerListResponse);
   assert.equal(list.additionalProperties, false);
-  assert.deepEqual(list.required, ["servers"]);
+  assert.deepEqual(list.required, ["directoryRevision", "servers"]);
+  assert.deepEqual(record(list.properties).directoryRevision, {
+    type: "integer",
+    minimum: 1,
+  });
   assert.deepEqual(record(list.properties).servers, {
     type: "array",
     maxItems: 65536,
@@ -374,16 +469,26 @@ test("游戏区服管理契约固定字段、开放开关、乐观锁与公开�
 
   const create = record(schemas.CreateGameServerRequest);
   assert.equal(create.additionalProperties, false);
-  assert.deepEqual(create.required, ["serverId", ...serverFields]);
+  assert.deepEqual(create.required, [
+    "directoryRevision",
+    "serverId",
+    ...serverFields,
+  ]);
   assert.deepEqual(Object.keys(record(create.properties)), [
+    "directoryRevision",
     "serverId",
     ...serverFields,
   ]);
 
   const update = record(schemas.UpdateGameServerRequest);
   assert.equal(update.additionalProperties, false);
-  assert.deepEqual(update.required, [...serverFields, "revision"]);
+  assert.deepEqual(update.required, [
+    "directoryRevision",
+    ...serverFields,
+    "revision",
+  ]);
   assert.deepEqual(Object.keys(record(update.properties)), [
+    "directoryRevision",
     ...serverFields,
     "revision",
   ]);
@@ -412,7 +517,9 @@ test("游戏区服管理契约固定字段、开放开关、乐观锁与公开�
       description: "游戏区服已创建",
       content: {
         "application/json": {
-          schema: { $ref: "#/components/schemas/ManagedGameServer" },
+          schema: {
+            $ref: "#/components/schemas/ManagedGameServerMutationResponse",
+          },
         },
       },
     },
@@ -434,7 +541,9 @@ test("游戏区服管理契约固定字段、开放开关、乐观锁与公开�
       description: "游戏区服已更新",
       content: {
         "application/json": {
-          schema: { $ref: "#/components/schemas/ManagedGameServer" },
+          schema: {
+            $ref: "#/components/schemas/ManagedGameServerMutationResponse",
+          },
         },
       },
     },
@@ -482,6 +591,162 @@ test("游戏区服管理契约固定字段、开放开关、乐观锁与公开�
 
   const errorCodes = record(schemas.ErrorCode).enum as string[];
   assert.equal(errorCodes.includes("GAME_SERVER_CONFLICT"), true);
+});
+
+test("目录、接入和 Secret 契约固定乐观锁、幂等与不回显边界", async () => {
+  const document = record(YAML.parse(await readFile("openapi/openapi.yaml", "utf8")));
+  const schemas = record(record(document.components).schemas);
+  const paths = record(document.paths);
+
+  const directory = record(schemas.GameDirectorySettings);
+  assert.deepEqual(directory.required, [
+    "gameId",
+    "isOps",
+    "revision",
+    "createdAt",
+    "updatedAt",
+  ]);
+  const directoryUpdate = record(schemas.UpdateGameDirectorySettingsRequest);
+  assert.deepEqual(directoryUpdate.required, ["isOps", "revision"]);
+  const directoryPath = record(
+    paths["/v1/admin/games/{gameId}/directory-settings"],
+  );
+  assert.deepEqual(
+    record(record(record(directoryPath.get).responses)["200"]).content,
+    {
+      "application/json": {
+        schema: { $ref: "#/components/schemas/GameDirectorySettings" },
+      },
+    },
+  );
+  assert.deepEqual(
+    record(record(record(directoryPath.patch).requestBody).content)[
+      "application/json"
+    ],
+    {
+      schema: {
+        $ref: "#/components/schemas/UpdateGameDirectorySettingsRequest",
+      },
+    },
+  );
+
+  const loginPassword = record(
+    record(record(schemas.AdminLoginRequest).properties).password,
+  );
+  const reauthenticatePassword = record(
+    record(record(schemas.AdminReauthenticateRequest).properties).password,
+  );
+  assert.equal(loginPassword.writeOnly, true);
+  assert.equal(reauthenticatePassword.writeOnly, true);
+
+  const integration = record(schemas.GameIntegration);
+  const integrationProperties = record(integration.properties);
+  assert.deepEqual(Object.keys(integrationProperties), [
+    "gameId",
+    "configurationState",
+    "wechatAppId",
+    "wechatSecret",
+    "wechatEndpoint",
+    "wechatTimeoutMs",
+    "wechatBreakerThreshold",
+    "wechatBreakerOpenMs",
+    "sessionTtlSeconds",
+    "loginRateCapacity",
+    "loginRateRefillPerSecond",
+    "adminRateCapacity",
+    "adminRateRefillPerSecond",
+    "revision",
+    "loadedRevision",
+    "createdAt",
+    "updatedAt",
+  ]);
+  assert.equal(JSON.stringify(integration).includes("digest"), false);
+  assert.equal(JSON.stringify(integration).includes("wechatAppSecret"), false);
+
+  const secretRequest = record(schemas.ReplaceWechatAppSecretRequest);
+  assert.deepEqual(secretRequest.required, [
+    "wechatAppSecret",
+    "revision",
+    "operationId",
+  ]);
+  assert.equal(
+    record(record(secretRequest.properties).wechatAppSecret).writeOnly,
+    true,
+  );
+  const secretResponse = record(schemas.WechatSecretWriteResponse);
+  assert.equal(JSON.stringify(secretResponse).includes("wechatAppSecret"), false);
+  assert.equal(JSON.stringify(secretResponse).includes("digest"), false);
+
+  const secretWrite = record(
+    record(paths["/v1/admin/games/{gameId}/secrets/wechat-app-secret"]).put,
+  );
+  assert.deepEqual(
+    record(record(secretWrite.responses)["200"]).headers,
+    {
+      "Cache-Control": {
+        schema: { type: "string", const: "no-store" },
+      },
+    },
+  );
+});
+
+test("机器身份契约只公开版本元数据，一次性 Secret 不可重放恢复", async () => {
+  const document = record(YAML.parse(await readFile("openapi/openapi.yaml", "utf8")));
+  const schemas = record(record(document.components).schemas);
+  const paths = record(document.paths);
+
+  const identity = record(schemas.MachineIdentity);
+  assert.deepEqual(identity.required, [
+    "identityId",
+    "identityType",
+    "displayName",
+    "status",
+    "gameIds",
+    "revision",
+    "secretVersions",
+    "createdAt",
+    "updatedAt",
+  ]);
+  assert.equal(JSON.stringify(identity).includes("digest"), false);
+  assert.equal(record(record(identity.properties).gameIds).uniqueItems, true);
+
+  const issued = record(schemas.MachineSecretIssuedResponse);
+  assert.equal((issued.required as string[]).includes("secret"), false);
+  assert.equal(record(record(issued.properties).secret).readOnly, true);
+  const operationStatus = record(schemas.MachineSecretOperationStatus);
+  assert.equal(JSON.stringify(operationStatus).includes("\"secret\""), false);
+  assert.equal(JSON.stringify(operationStatus).includes("digest"), false);
+
+  for (const [path, method, status] of [
+    ["/v1/admin/machine-identities", "post", "201"],
+    [
+      "/v1/admin/machine-identities/{identityId}/secret-rotations",
+      "post",
+      "200",
+    ],
+  ] as const) {
+    const operation = record(record(paths[path])[method]);
+    assert.deepEqual(record(record(operation.responses)[status]).headers, {
+      "Cache-Control": {
+        schema: { type: "string", const: "no-store" },
+      },
+    });
+  }
+
+  const audit = record(schemas.ConfigurationAuditRecord);
+  assert.deepEqual(Object.keys(record(audit.properties)), [
+    "id",
+    "auditType",
+    "operatorId",
+    "gameId",
+    "identityId",
+    "action",
+    "result",
+    "oldVersion",
+    "newVersion",
+    "createdAt",
+  ]);
+  assert.equal(JSON.stringify(audit).includes("digest"), false);
 });
 
 test("OpenAPI 固定 gameId、游戏状态和租户错误码", async () => {
