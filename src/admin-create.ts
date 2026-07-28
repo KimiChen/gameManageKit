@@ -186,8 +186,15 @@ async function main(): Promise<void> {
   const options = parseAdminCreateArgs(process.argv.slice(2));
   const password = generateAdminPassword();
   const config = loadConfig();
-  const database = new Database(config.mysqlUrl, Math.min(config.mysqlPoolSize, 2));
+  const database = new Database(
+    config.mysqlUrl,
+    Math.min(config.mysqlPoolSize, 2),
+    config.nodeEnv === "production",
+  );
   try {
+    if (!await database.secureTransportReady()) {
+      throw new Error("生产 MySQL TLS 未协商成功");
+    }
     await createAdminOperator(database, options, password);
     process.stdout.write(
       `管理员 ${options.operatorId} 已创建，`

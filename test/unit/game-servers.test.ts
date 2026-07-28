@@ -35,6 +35,22 @@ function compact(sql: string): string {
 
 class FakeServerDatabase implements GameServerDatabase {
   readonly games = new Set(["game-a", "draft-game"]);
+  readonly directories = new Map([
+    ["game-a", {
+      game_id: "game-a",
+      is_ops: 0,
+      revision: 1,
+      created_at: new Date("2026-07-28T00:00:00.000Z"),
+      updated_at: new Date("2026-07-28T00:00:00.000Z"),
+    }],
+    ["draft-game", {
+      game_id: "draft-game",
+      is_ops: 0,
+      revision: 1,
+      created_at: new Date("2026-07-28T00:00:00.000Z"),
+      updated_at: new Date("2026-07-28T00:00:00.000Z"),
+    }],
+  ]);
   readonly servers = new Map<string, StoredServer>();
   readonly audits: Array<readonly unknown[]> = [];
   authorizationCount = 0;
@@ -76,6 +92,10 @@ class FakeServerDatabase implements GameServerDatabase {
         : [];
       return [rows, []];
     }
+    if (sql.includes("FROM game_directory_settings")) {
+      const directory = this.directories.get(String(values[0]));
+      return [[...(directory ? [directory] : [])] as RowDataPacket[], []];
+    }
     if (!sql.includes("FROM game_servers")) {
       throw new Error(`未实现 query: ${sql}`);
     }
@@ -98,7 +118,22 @@ class FakeServerDatabase implements GameServerDatabase {
     values: readonly unknown[],
   ): Promise<[Record<string, number>, unknown]> {
     const sql = compact(rawSql);
-    if (sql.startsWith("INSERT IGNORE INTO game_directory_settings")) {
+    if (sql.startsWith("UPDATE game_directory_settings")) {
+      const settingsUpdate = sql.includes("SET is_ops = ?");
+      const gameId = String(values[settingsUpdate ? 1 : 0]);
+      const revision = Number(values[settingsUpdate ? 2 : 1]);
+      const directory = this.directories.get(gameId);
+      if (!directory || directory.revision !== revision) {
+        return [{ affectedRows: 0 }, []];
+      }
+      if (settingsUpdate) {
+        directory.is_ops = Number(values[0]);
+      }
+      directory.revision += 1;
+      this.tick += 1;
+      directory.updated_at = new Date(
+        Date.parse("2026-07-28T00:00:00.000Z") + this.tick,
+      );
       return [{ affectedRows: 1 }, []];
     }
     if (sql.startsWith("INSERT INTO game_servers")) {
@@ -171,6 +206,7 @@ function authorization(
 
 function serverPayload(overrides: Record<string, unknown> = {}) {
   return {
+    directoryRevision: 1,
     serverId: 1,
     name: "  新一区  ",
     tag: "new" as const,
@@ -206,12 +242,13 @@ test("草稿游戏可预配置区服，重复 serverId 冲突并记录审计", a
     auth,
   );
   assert.deepEqual({
-    gameId: created.gameId,
-    serverId: created.serverId,
-    name: created.name,
-    isOpen: created.isOpen,
-    sortOrder: created.sortOrder,
-    revision: created.revision,
+    gameId: created.server.gameId,
+    serverId: created.server.serverId,
+    name: created.server.name,
+    isOpen: created.server.isOpen,
+    sortOrder: created.server.sortOrder,
+    revision: created.server.revision,
+    directoryRevision: created.directoryRevision,
   }, {
     gameId: "draft-game",
     serverId: 1,
@@ -219,6 +256,7 @@ test("草稿游戏可预配置区服，重复 serverId 冲突并记录审计", a
     isOpen: true,
     sortOrder: 10,
     revision: 1,
+    directoryRevision: 2,
   });
   assert.equal(database.authorizationCount, 1);
   assert.equal(database.audits[0]?.[0], "draft-game");
@@ -234,6 +272,37 @@ test("草稿游戏可预配置区服，重复 serverId 冲突并记录审计", a
   );
 });
 
+test("目录设置与区服写入共享目录 revision 乐观锁", async () => {
+  const database = new FakeServerDatabase();
+  const service = new GameServerService(database, true);
+  const auth = authorization(database);
+
+  const initial = await service.getDirectorySettings("game-a", auth);
+  assert.equal(initial.isOps, false);
+  assert.equal(initial.revision, 1);
+
+  const settings = await service.updateDirectorySettings("game-a", {
+    isOps: true,
+    revision: initial.revision,
+  }, auth);
+  assert.equal(settings.isOps, true);
+  assert.equal(settings.revision, 2);
+
+  await assert.rejects(
+    service.create("game-a", serverPayload(), auth),
+    gameError(409, "GAME_SERVER_CONFLICT"),
+  );
+  const created = await service.create(
+    "game-a",
+    serverPayload({ directoryRevision: settings.revision }),
+    auth,
+  );
+  assert.equal(created.directoryRevision, 3);
+  const list = await service.list("game-a", auth);
+  assert.equal(list.directoryRevision, 3);
+  assert.equal(list.servers.length, 1);
+});
+
 test("编辑区服使用 revision 乐观锁并允许关闭或维护", async () => {
   const database = new FakeServerDatabase();
   const service = new GameServerService(database, true);
@@ -241,38 +310,42 @@ test("编辑区服使用 revision 乐观锁并允许关闭或维护", async () =
   const created = await service.create("game-a", serverPayload(), auth);
 
   const updated = await service.update("game-a", 1, {
+    directoryRevision: created.directoryRevision,
     name: "维护一区",
     tag: "maintenance",
     status: "maintenance",
-    openTime: created.openTime,
-    gameHttpUrl: created.gameHttpUrl,
-    gameWsUrl: created.gameWsUrl,
+    openTime: created.server.openTime,
+    gameHttpUrl: created.server.gameHttpUrl,
+    gameWsUrl: created.server.gameWsUrl,
     isOpen: false,
     sortOrder: 2,
-    revision: created.revision,
+    revision: created.server.revision,
   }, auth);
-  assert.equal(updated.status, "maintenance");
-  assert.equal(updated.isOpen, false);
-  assert.equal(updated.revision, 2);
+  assert.equal(updated.server.status, "maintenance");
+  assert.equal(updated.server.isOpen, false);
+  assert.equal(updated.server.revision, 2);
+  assert.equal(updated.directoryRevision, 3);
   assert.equal(database.audits[1]?.[2], "server_update");
   assert.notEqual(database.audits[1]?.[3], null);
 
   await assert.rejects(
     service.update("game-a", 1, {
-      name: updated.name,
-      tag: updated.tag,
-      status: updated.status,
-      openTime: updated.openTime,
-      gameHttpUrl: updated.gameHttpUrl,
-      gameWsUrl: updated.gameWsUrl,
-      isOpen: updated.isOpen,
-      sortOrder: updated.sortOrder,
+      directoryRevision: updated.directoryRevision,
+      name: updated.server.name,
+      tag: updated.server.tag,
+      status: updated.server.status,
+      openTime: updated.server.openTime,
+      gameHttpUrl: updated.server.gameHttpUrl,
+      gameWsUrl: updated.server.gameWsUrl,
+      isOpen: updated.server.isOpen,
+      sortOrder: updated.server.sortOrder,
       revision: 1,
     }, auth),
     gameError(409, "GAME_SERVER_CONFLICT"),
   );
   await assert.rejects(
     service.update("game-a", 2, {
+      directoryRevision: updated.directoryRevision,
       name: "不存在",
       tag: "normal",
       status: "smooth",
@@ -326,11 +399,11 @@ test("区服字段校验 Unicode、整数边界和安全 URL", async () => {
     }),
     auth,
   );
-  assert.equal(local.serverId, 65_535);
-  assert.equal([...local.name].length, 64);
+  assert.equal(local.server.serverId, 65_535);
+  assert.equal([...local.server.name].length, 64);
 });
 
-test("MySQL 目录提供者只下发开放区服，关闭和维护区服均不可登录", async () => {
+test("MySQL 目录以同一准入规则过滤维护、关闭和未来区服", async () => {
   const rows = [
     {
       game_id: "game-a",
@@ -368,29 +441,62 @@ test("MySQL 目录提供者只下发开放区服，关闭和维护区服均不�
       is_open: 0,
       sort_order: 3,
     },
+    {
+      game_id: "game-a",
+      server_id: 4,
+      name: "未来四区",
+      tag: "new",
+      status: "busy",
+      open_time: 4_000_000_000,
+      game_http_url: "https://game.example.invalid",
+      game_ws_url: "wss://game.example.invalid",
+      is_open: 1,
+      sort_order: 4,
+    },
   ];
   const pool = {
     async query(rawSql: string, values: readonly unknown[]) {
       const sql = compact(rawSql);
+      if (sql.includes("AS usable")) {
+        const row = rows.find((item) => (
+          item.server_id === Number(values[0])
+        ));
+        const usable = row
+          && row.is_open === 1
+          && (row.status === "smooth" || row.status === "busy")
+          && row.open_time < 2_000_000_000;
+        return [[{
+          configuration_state: "configured",
+          game_status: "enabled",
+          is_ops: 0,
+          ...(row ?? {
+            server_id: null,
+            name: null,
+            tag: null,
+            status: null,
+            open_time: null,
+            game_http_url: null,
+            game_ws_url: null,
+          }),
+          usable: usable ? 1 : 0,
+        }], []];
+      }
       if (sql.includes("LEFT JOIN game_servers")) {
         assert.match(sql, /s\.is_open = 1/u);
+        assert.match(sql, /s\.status IN \('smooth', 'busy'\)/u);
+        assert.match(sql, /s\.open_time <= UNIX_TIMESTAMP\(NOW\(3\)\)/u);
         return [rows
-          .filter((row) => row.is_open === 1)
-          .map((row) => ({ ...row, is_ops: 0 })), []];
-      }
-      if (sql.includes("JOIN game_directory_settings")) {
-        const row = rows.find((item) => (
-          item.server_id === Number(values[1])
-        ));
-        return [[...(row ? [{ ...row, is_ops: 0 }] : [])], []];
-      }
-      if (sql.includes("status <> 'maintenance'")) {
-        const row = rows.find((item) => (
-          item.server_id === Number(values[1])
-          && item.is_open === 1
-          && item.status !== "maintenance"
-        ));
-        return [[...(row ? [{ usable: 1 }] : [])], []];
+          .filter((row) => (
+            row.is_open === 1
+            && (row.status === "smooth" || row.status === "busy")
+            && row.open_time < 2_000_000_000
+          ))
+          .map((row) => ({
+            ...row,
+            configuration_state: "configured",
+            game_status: "enabled",
+            is_ops: 0,
+          })), []];
       }
       throw new Error(`未实现 query: ${sql}`);
     },
@@ -400,11 +506,12 @@ test("MySQL 目录提供者只下发开放区服，关闭和维护区服均不�
   const directory = await provider.listAreas();
   assert.deepEqual(
     directory.servers.map((server) => server.serverId),
-    [1, 2],
+    [1],
   );
   assert.match(directory.hash, /^[0-9a-f]{64}$/u);
   assert.equal((await provider.findServer(3))?.name, "关闭三区");
   assert.equal(await provider.isServerUsable(1), true);
   assert.equal(await provider.isServerUsable(2), false);
   assert.equal(await provider.isServerUsable(3), false);
+  assert.equal(await provider.isServerUsable(4), false);
 });

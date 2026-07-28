@@ -1,11 +1,12 @@
 import type {
   Pool,
   PoolConnection,
+  ResultSetHeader,
   RowDataPacket,
 } from "mysql2/promise";
 import { GameManageKitError } from "../../errors.js";
 import { normalizeIp } from "../../infra/security/security.js";
-import { GAME_ID_PATTERN } from "./registry.js";
+import { GAME_ID_PATTERN } from "./resolver.js";
 
 export type GameServerTag = "normal" | "new" | "full" | "maintenance";
 export type GameServerStatus = "smooth" | "busy" | "maintenance";
@@ -26,7 +27,31 @@ export interface ManagedGameServer {
   readonly updatedAt: string;
 }
 
+export interface GameDirectorySettings {
+  readonly gameId: string;
+  readonly isOps: boolean;
+  readonly revision: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ManagedGameServerList {
+  readonly directoryRevision: number;
+  readonly servers: readonly ManagedGameServer[];
+}
+
+export interface ManagedGameServerMutation {
+  readonly directoryRevision: number;
+  readonly server: ManagedGameServer;
+}
+
+export interface UpdateGameDirectorySettingsInput {
+  readonly isOps: boolean;
+  readonly revision: number;
+}
+
 export interface CreateGameServerInput {
+  readonly directoryRevision: number;
   readonly serverId: number;
   readonly name: string;
   readonly tag: GameServerTag;
@@ -39,6 +64,7 @@ export interface CreateGameServerInput {
 }
 
 export interface UpdateGameServerInput {
+  readonly directoryRevision: number;
   readonly name: string;
   readonly tag: GameServerTag;
   readonly status: GameServerStatus;
@@ -74,6 +100,14 @@ interface GameServerRow extends RowDataPacket {
   readonly game_ws_url: string;
   readonly is_open: number | boolean | string;
   readonly sort_order: number | string;
+  readonly revision: number | string;
+  readonly created_at: Date | string;
+  readonly updated_at: Date | string;
+}
+
+interface GameDirectorySettingsRow extends RowDataPacket {
+  readonly game_id: string;
+  readonly is_ops: number | boolean | string;
   readonly revision: number | string;
   readonly created_at: Date | string;
   readonly updated_at: Date | string;
@@ -248,6 +282,27 @@ function serverFromRow(row: GameServerRow): ManagedGameServer {
   });
 }
 
+function directorySettingsFromRow(
+  row: GameDirectorySettingsRow,
+): GameDirectorySettings {
+  const isOps = Number(row.is_ops);
+  const revision = Number(row.revision);
+  if (
+    (isOps !== 0 && isOps !== 1)
+    || !Number.isSafeInteger(revision)
+    || revision < 1
+  ) {
+    throw new Error("游戏目录设置数据无效");
+  }
+  return Object.freeze({
+    gameId: String(row.game_id),
+    isOps: isOps === 1,
+    revision,
+    createdAt: isoDate(row.created_at),
+    updatedAt: isoDate(row.updated_at),
+  });
+}
+
 function auditSnapshot(server: ManagedGameServer): string {
   return JSON.stringify({
     gameId: server.gameId,
@@ -270,27 +325,103 @@ const SELECT_SERVER = `
          created_at, updated_at
     FROM game_servers`;
 
+const SELECT_DIRECTORY_SETTINGS = `
+  SELECT game_id, is_ops, revision, created_at, updated_at
+    FROM game_directory_settings`;
+
 export class GameServerService {
   constructor(
     private readonly database: GameServerDatabase,
     private readonly production: boolean,
   ) {}
 
-  async list(
+  async getDirectorySettings(
     gameId: string,
     authorization: GameServerAuthorization,
-  ): Promise<readonly ManagedGameServer[]> {
+  ): Promise<GameDirectorySettings> {
     this.validateGameId(gameId);
     return this.database.transaction(async (connection) => {
       await authorization.authorize(connection);
       await this.requireGame(connection, gameId, false);
+      return this.requireDirectorySettings(connection, gameId, false);
+    });
+  }
+
+  async updateDirectorySettings(
+    gameId: string,
+    input: UpdateGameDirectorySettingsInput,
+    authorization: GameServerAuthorization,
+  ): Promise<GameDirectorySettings> {
+    this.validateGameId(gameId);
+    if (!input || typeof input.isOps !== "boolean") {
+      return invalidPayload();
+    }
+    const revision = normalizedRevision(input.revision);
+    return this.database.transaction(async (connection) => {
+      await authorization.authorize(connection);
+      await this.requireGame(connection, gameId, true);
+      const current = await this.requireDirectorySettings(
+        connection,
+        gameId,
+        true,
+      );
+      if (current.revision !== revision) {
+        throw new GameManageKitError(409, "GAME_SERVER_CONFLICT");
+      }
+      await connection.execute(
+        `UPDATE game_directory_settings
+            SET is_ops = ?,
+                revision = revision + 1
+          WHERE game_id = ? AND revision = ?`,
+        [input.isOps ? 1 : 0, gameId, revision],
+      );
+      const updated = await this.requireDirectorySettings(
+        connection,
+        gameId,
+        true,
+      );
+      if (updated.revision !== revision + 1) {
+        throw new GameManageKitError(409, "GAME_SERVER_CONFLICT");
+      }
+      await connection.execute(
+        `INSERT INTO admin_game_audit
+           (game_id, operator_id, action, before_data, after_data, ip)
+         VALUES (?, ?, 'directory_update', ?, ?, INET6_ATON(?))`,
+        [
+          gameId,
+          authorization.operatorId,
+          JSON.stringify(current),
+          JSON.stringify(updated),
+          normalizeIp(authorization.ip),
+        ],
+      );
+      return updated;
+    });
+  }
+
+  async list(
+    gameId: string,
+    authorization: GameServerAuthorization,
+  ): Promise<ManagedGameServerList> {
+    this.validateGameId(gameId);
+    return this.database.transaction(async (connection) => {
+      await authorization.authorize(connection);
+      await this.requireGame(connection, gameId, false);
+      const settings = await this.requireDirectorySettings(
+        connection,
+        gameId,
+        false,
+      );
       const [rows] = await connection.query<GameServerRow[]>(
         `${SELECT_SERVER}
           WHERE game_id = ?
           ORDER BY sort_order, server_id`,
         [gameId],
       );
-      return Object.freeze(rows.map(serverFromRow));
+      return Object.freeze({
+        directoryRevision: settings.revision,
+        servers: Object.freeze(rows.map(serverFromRow)),
+      });
     });
   }
 
@@ -298,18 +429,21 @@ export class GameServerService {
     gameId: string,
     input: CreateGameServerInput,
     authorization: GameServerAuthorization,
-  ): Promise<ManagedGameServer> {
+  ): Promise<ManagedGameServerMutation> {
     this.validateGameId(gameId);
     const normalized = this.normalizeCreate(input);
     try {
       return await this.database.transaction(async (connection) => {
         await authorization.authorize(connection);
         await this.requireGame(connection, gameId, true);
-        await connection.execute(
-          `INSERT IGNORE INTO game_directory_settings (game_id, is_ops)
-           VALUES (?, 0)`,
-          [gameId],
+        const directory = await this.requireDirectorySettings(
+          connection,
+          gameId,
+          true,
         );
+        if (directory.revision !== normalized.directoryRevision) {
+          throw new GameManageKitError(409, "GAME_SERVER_CONFLICT");
+        }
         await connection.execute(
           `INSERT INTO game_servers
              (game_id, server_id, name, tag, status, open_time,
@@ -336,6 +470,11 @@ export class GameServerService {
         if (!server) {
           throw new Error("新建区服后无法读取");
         }
+        const directoryRevision = await this.bumpDirectoryRevision(
+          connection,
+          gameId,
+          directory.revision,
+        );
         await this.insertAudit(
           connection,
           authorization,
@@ -343,7 +482,7 @@ export class GameServerService {
           null,
           server,
         );
-        return server;
+        return Object.freeze({ directoryRevision, server });
       });
     } catch (error) {
       if (isDuplicate(error)) {
@@ -358,13 +497,21 @@ export class GameServerService {
     serverId: number,
     input: UpdateGameServerInput,
     authorization: GameServerAuthorization,
-  ): Promise<ManagedGameServer> {
+  ): Promise<ManagedGameServerMutation> {
     this.validateGameId(gameId);
     const normalizedServerId = normalizedSmallint(serverId);
     const normalized = this.normalizeUpdate(input);
     return this.database.transaction(async (connection) => {
       await authorization.authorize(connection);
       await this.requireGame(connection, gameId, true);
+      const directory = await this.requireDirectorySettings(
+        connection,
+        gameId,
+        true,
+      );
+      if (directory.revision !== normalized.directoryRevision) {
+        throw new GameManageKitError(409, "GAME_SERVER_CONFLICT");
+      }
       const current = await this.findLocked(
         connection,
         gameId,
@@ -410,6 +557,11 @@ export class GameServerService {
       if (!server || server.revision !== normalized.revision + 1) {
         throw new GameManageKitError(409, "GAME_SERVER_CONFLICT");
       }
+      const directoryRevision = await this.bumpDirectoryRevision(
+        connection,
+        gameId,
+        directory.revision,
+      );
       await this.insertAudit(
         connection,
         authorization,
@@ -417,7 +569,7 @@ export class GameServerService {
         current,
         server,
       );
-      return server;
+      return Object.freeze({ directoryRevision, server });
     });
   }
 
@@ -440,6 +592,7 @@ export class GameServerService {
       return invalidPayload();
     }
     return Object.freeze({
+      directoryRevision: normalizedRevision(input.directoryRevision),
       serverId: normalizedSmallint(input.serverId),
       name: normalizedName(input.name),
       tag: input.tag,
@@ -473,6 +626,7 @@ export class GameServerService {
       return invalidPayload();
     }
     return Object.freeze({
+      directoryRevision: normalizedRevision(input.directoryRevision),
       name: normalizedName(input.name),
       tag: input.tag,
       status: input.status,
@@ -508,6 +662,40 @@ export class GameServerService {
     if (!rows[0]) {
       throw new GameManageKitError(404, "GAME_NOT_FOUND");
     }
+  }
+
+  private async requireDirectorySettings(
+    connection: PoolConnection,
+    gameId: string,
+    lock: boolean,
+  ): Promise<GameDirectorySettings> {
+    const [rows] = await connection.query<GameDirectorySettingsRow[]>(
+      `${SELECT_DIRECTORY_SETTINGS}
+        WHERE game_id = ?${lock ? " FOR UPDATE" : ""}`,
+      [gameId],
+    );
+    const row = rows[0];
+    if (!row) {
+      throw new Error(`游戏 ${gameId} 缺少目录设置`);
+    }
+    return directorySettingsFromRow(row);
+  }
+
+  private async bumpDirectoryRevision(
+    connection: PoolConnection,
+    gameId: string,
+    revision: number,
+  ): Promise<number> {
+    const [result] = await connection.execute<ResultSetHeader>(
+      `UPDATE game_directory_settings
+          SET revision = revision + 1
+        WHERE game_id = ? AND revision = ?`,
+      [gameId, revision],
+    );
+    if (Number(result.affectedRows) !== 1) {
+      throw new GameManageKitError(409, "GAME_SERVER_CONFLICT");
+    }
+    return revision + 1;
   }
 
   private async findLocked(

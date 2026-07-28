@@ -2,7 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { TOKEN_BYTES } from "../../config.js";
 import type { MetricsRegistry } from "../../infra/observability/metrics.js";
-import { GAME_ID_PATTERN } from "../game/registry.js";
+import { GAME_ID_PATTERN } from "../game/resolver.js";
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 const USER_ID_PATTERN = /^u_[0-9]+$/;

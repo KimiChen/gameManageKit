@@ -2280,7 +2280,7 @@ components:
           type: string
         auditType:
           type: string
-          enum: [machine_identity, secret]
+          enum: [game_configuration, machine_identity, secret]
         operatorId:
           type: string
           minLength: 3

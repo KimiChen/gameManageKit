@@ -70,7 +70,7 @@
     "schemas/ClientGameListResponse": "586a6aa01d135f684c413bae1843927de7211cf08fecb3ead7a45443c11c2ecd",
     "schemas/ClientGameSummary": "dbe4f9c528aea24bbe1b3509a3610e098e7ddc8592759f6a29f8fd48395ed907",
     "schemas/ConfigurationAuditPage": "3c48d0d9310e559306a25bb92455229cc36efa5901cc13846dbe7b46f8873d48",
-    "schemas/ConfigurationAuditRecord": "80f576e3bf4861340308154e312768ae66138150a6e36c1175b88f83b1b380a7",
+    "schemas/ConfigurationAuditRecord": "0fa51c1319071b55fe64874dbc540c166cff8d3442e3ae5acd67401a14fe0a56",
     "schemas/CreateGameProjectRequest": "9135c8b22a6c29a119702b67f8eb38d59c87a4e6249b6483f623e97d27775ade",
     "schemas/CreateGameServerRequest": "5e164ba9ab4749c731d91f77bf1bd1cef1711ae20f297421e381943c23cec9d8",
     "schemas/CreateMachineIdentityRequest": "70071a4fd7682622889e22f0155ae423fe21f62f25af85e450d7d859d0bd5532",

@@ -10,19 +10,11 @@ import {
   type GameProjectAuthorization,
   type GameProjectDatabase,
 } from "../../src/domain/game/projects.js";
-import { GameRegistry } from "../../src/domain/game/registry.js";
+import type {
+  GameContext,
+  GameRuntimeRegistry,
+} from "../../src/domain/game/resolver.js";
 import { GameManageKitError } from "../../src/errors.js";
-
-const REGISTRY_ENV = {
-  GAME_A_WX_APPID: "game-a-app",
-  GAME_A_WX_SECRET: "game-a-wx-secret",
-  GAME_B_WX_APPID: "game-b-app",
-  GAME_B_WX_SECRET: "game-b-wx-secret",
-  GAME_A_SERVICE_SECRET: "game-a-service-secret",
-  GAME_B_SERVICE_SECRET: "game-b-service-secret",
-  GAME_A_ADMIN_SECRET: "game-a-admin-secret",
-  GAME_B_ADMIN_SECRET: "game-b-admin-secret",
-} as const;
 
 interface StoredProject {
   game_id: string;
@@ -44,6 +36,7 @@ function compact(sql: string): string {
 class FakeProjectDatabase implements GameProjectDatabase {
   readonly projects = new Map<string, StoredProject>();
   readonly audits: Array<readonly unknown[]> = [];
+  readonly companionInserts: string[] = [];
   private tick = 0;
 
   readonly pool = {
@@ -157,6 +150,14 @@ class FakeProjectDatabase implements GameProjectDatabase {
       );
       return [{ affectedRows: 1 }, []];
     }
+    if (
+      sql.startsWith("INSERT INTO game_directory_settings")
+      || sql.startsWith("INSERT INTO game_integrations")
+      || sql.startsWith("INSERT INTO seq")
+    ) {
+      this.companionInserts.push(sql);
+      return [{ affectedRows: 1 }, []];
+    }
     if (sql.startsWith("INSERT INTO admin_game_audit")) {
       this.audits.push([...values]);
       return [{ affectedRows: 1 }, []];
@@ -182,16 +183,29 @@ function gameError(
   );
 }
 
-async function registry(): Promise<GameRegistry> {
-  return GameRegistry.load("config/games.json", {
-    production: true,
-    env: REGISTRY_ENV,
-  });
+function runtime(
+  resolve: (gameId: string) => Promise<GameContext> = async () => {
+    throw new GameManageKitError(404, "GAME_NOT_FOUND");
+  },
+): GameRuntimeRegistry {
+  return {
+    ready: () => true,
+    list: () => [],
+    get: () => undefined,
+    resolve,
+    requireServer: async () => {
+      throw new GameManageKitError(404, "SERVER_NOT_FOUND");
+    },
+    authenticateService: async () => null,
+    authenticateAdmin: async () => null,
+    canAccess: () => false,
+    invalidate() {},
+  };
 }
 
 test("创建游戏项目固定为不下发的维护中草稿并记录审计", async () => {
   const database = new FakeProjectDatabase();
-  const service = new GameProjectService(database, await registry());
+  const service = new GameProjectService(database, runtime());
 
   const created = await service.create({
     gameId: "new-game",
@@ -220,6 +234,10 @@ test("创建游戏项目固定为不下发的维护中草稿并记录审计", as
   });
   assert.equal(database.audits.length, 1);
   assert.equal(database.audits[0]?.[0], "new-game");
+  assert.equal(database.companionInserts.length, 3);
+  assert.match(database.companionInserts[0] ?? "", /game_directory_settings/u);
+  assert.match(database.companionInserts[1] ?? "", /game_integrations/u);
+  assert.match(database.companionInserts[2] ?? "", /INSERT INTO seq/u);
 
   await assert.rejects(
     service.create({
@@ -238,7 +256,7 @@ test("编辑使用 revision 乐观锁并阻止草稿启用、误下发和 disabl
     status: "maintenance",
     client_visible: 0,
   });
-  const service = new GameProjectService(database, await registry());
+  const service = new GameProjectService(database, runtime());
 
   await assert.rejects(
     service.update("draft-game", {
@@ -304,7 +322,7 @@ test("编辑使用 revision 乐观锁并阻止草稿启用、误下发和 disabl
   );
 });
 
-test("客户端列表只下发已配置、显式可见且未停用的 Registry 游戏", async () => {
+test("客户端列表以 MySQL 为唯一真源下发已配置且可见的游戏", async () => {
   const database = new FakeProjectDatabase();
   database.seed("game-a", {
     name: "游戏 A",
@@ -328,9 +346,15 @@ test("客户端列表只下发已配置、显式可见且未停用的 Registry �
   database.seed("missing-config", {
     client_visible: 1,
   });
-  const service = new GameProjectService(database, await registry());
+  const service = new GameProjectService(database, runtime());
 
   assert.deepEqual(await service.listForClient(), [
+    {
+      gameId: "missing-config",
+      name: "missing-config",
+      description: "",
+      status: "enabled",
+    },
     {
       gameId: "game-b",
       name: "游戏 B",
@@ -357,7 +381,12 @@ test("业务解析以数据库项目状态为真源并拒绝草稿", async () =>
     status: "maintenance",
     client_visible: 0,
   });
-  const service = new GameProjectService(database, await registry());
+  const service = new GameProjectService(database, runtime(async (gameId) => {
+    if (gameId === "game-a") {
+      throw new GameManageKitError(503, "GAME_DISABLED");
+    }
+    throw new GameManageKitError(404, "GAME_NOT_FOUND");
+  }));
 
   await assert.rejects(
     service.resolve("game-a"),

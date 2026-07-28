@@ -23,8 +23,8 @@ import {
 import type {
   AdminIdentity,
   GameContext,
-  GameRegistry,
-} from "../../domain/game/registry.js";
+  GameRuntimeRegistry,
+} from "../../domain/game/resolver.js";
 import type { GameProjectService } from "../../domain/game/projects.js";
 import { GameManageKitError } from "../../errors.js";
 import type { MetricsRegistry } from "../../infra/observability/metrics.js";
@@ -46,7 +46,7 @@ import {
 } from "./browser-security.js";
 
 export interface AdminRouteServices {
-  readonly games: GameRegistry;
+  readonly games: GameRuntimeRegistry;
   readonly gameProjects: Pick<GameProjectService, "resolve">;
   readonly admin: Pick<
     AdminAccountService,
@@ -134,7 +134,10 @@ async function authorizeSecret(
   request: FastifyRequest<{ Params: AccountParams }>,
   services: AdminRouteServices,
 ): Promise<AuthorizedAdmin> {
-  const identity: AdminIdentity = authenticateAdmin(request, services.games);
+  const identity: AdminIdentity = await authenticateAdmin(
+    request,
+    services.games,
+  );
   if (!services.games.canAccess(identity, request.params.gameId)) {
     await auditDenied(request, services, {
       operatorId: identity.operatorId,

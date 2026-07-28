@@ -44,7 +44,11 @@ const AREAS: AreaListResponse = {
 function config(nodeEnv: "development" | "production" = "development") {
   return loadConfig({
     NODE_ENV: nodeEnv,
-    GAME_MANAGE_KIT_MYSQL_URL: "mysql://root@127.0.0.1:3306/game_manage_kit_test",
+    GAME_MANAGE_KIT_MYSQL_URL:
+      "mysql://root@127.0.0.1:3306/game_manage_kit_test"
+      + (nodeEnv === "production"
+        ? "?ssl=%7B%22rejectUnauthorized%22%3Atrue%7D"
+        : ""),
     AUTH_DEV_ENABLED: nodeEnv === "development" ? "1" : "0",
     GAME_MANAGE_KIT_LOG_ENABLED: "0",
     ...(nodeEnv === "production"

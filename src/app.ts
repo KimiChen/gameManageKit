@@ -2,12 +2,14 @@ import type { FastifyInstance } from "fastify";
 import type { GameManageKitConfig } from "./config.js";
 import { AdminAccountService } from "./domain/account/admin.js";
 import { AdminAuthService } from "./domain/admin/auth.js";
+import { MachineIdentityService } from "./domain/admin/machine-identities.js";
 import { LoginService } from "./domain/account/login.js";
 import { CharacterService } from "./domain/character/service.js";
 import {
   DirectoryService,
 } from "./domain/directory/service.js";
 import { GameProjectService } from "./domain/game/projects.js";
+import { GameIntegrationService } from "./domain/game/integrations.js";
 import {
   GameConfigResolver,
   type GameRuntimeRegistry,
@@ -31,6 +33,14 @@ import {
   registerAdminGameRoutes,
   type AdminGameRouteServices,
 } from "./http/admin/game-routes.js";
+import {
+  registerAdminIntegrationRoutes,
+  type AdminIntegrationRouteServices,
+} from "./http/admin/integration-routes.js";
+import {
+  registerAdminMachineIdentityRoutes,
+  type AdminMachineIdentityRouteServices,
+} from "./http/admin/machine-identity-routes.js";
 import { registerAdminWebRoutes } from "./http/admin/web.js";
 import {
   registerInternalRoutes,
@@ -54,6 +64,8 @@ export type GameManageKitServices =
   & InternalRouteServices
   & AdminAuthRouteServices
   & AdminGameRouteServices
+  & AdminIntegrationRouteServices
+  & AdminMachineIdentityRouteServices
   & AdminRouteServices
   & SystemRouteServices
   & MetricsRouteServices;
@@ -69,6 +81,8 @@ export interface Runtime {
   readonly database: Database;
   readonly games: GameRuntimeRegistry;
   readonly configResolver: GameConfigResolver;
+  readonly integrations: GameIntegrationService;
+  readonly machineIdentities: MachineIdentityService;
   readonly gameProjects: GameProjectService;
   readonly gameServers: GameServerService;
   readonly metrics: MetricsRegistry;
@@ -86,6 +100,8 @@ export function buildApps(
   registerInternalRoutes(internalApp, services);
   registerAdminAuthRoutes(internalApp, config, services);
   registerAdminGameRoutes(internalApp, config, services);
+  registerAdminIntegrationRoutes(internalApp, config, services);
+  registerAdminMachineIdentityRoutes(internalApp, config, services);
   registerAdminRoutes(internalApp, config, services);
   registerAdminWebRoutes(internalApp);
   registerMetricsRoutes(internalApp, services);
@@ -105,7 +121,11 @@ export async function createRuntime(
   config: GameManageKitConfig,
   options: RuntimeOptions = {},
 ): Promise<Runtime> {
-  const database = new Database(config.mysqlUrl, config.mysqlPoolSize);
+  const database = new Database(
+    config.mysqlUrl,
+    config.mysqlPoolSize,
+    config.nodeEnv === "production",
+  );
   try {
     if (!await database.ready(config.schemaVersion)) {
       throw new Error(
@@ -133,6 +153,12 @@ export async function createRuntime(
       database,
       config.nodeEnv === "production",
     );
+    const integrations = new GameIntegrationService(
+      database,
+      configResolver,
+      config.nodeEnv === "production",
+    );
+    const machineIdentities = new MachineIdentityService(database);
     const sessions = new SessionService(database.pool, metrics);
     const characters = new CharacterService(database.pool, metrics);
     const login = new LoginService(
@@ -147,6 +173,8 @@ export async function createRuntime(
       games,
       gameProjects,
       gameServers,
+      integrations,
+      machineIdentities,
       metrics,
       login,
       directory,
@@ -167,6 +195,8 @@ export async function createRuntime(
       database,
       games,
       configResolver,
+      integrations,
+      machineIdentities,
       gameProjects,
       gameServers,
       metrics,

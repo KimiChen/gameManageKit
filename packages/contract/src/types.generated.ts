@@ -613,7 +613,7 @@ export type components = {
         ConfigurationAuditRecord: {
             action: string;
             /** @enum {string} */
-            auditType: "machine_identity" | "secret";
+            auditType: "game_configuration" | "machine_identity" | "secret";
             /** Format: date-time */
             createdAt: string;
             gameId: components["schemas"]["GameId"] | null;

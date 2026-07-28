@@ -63,11 +63,13 @@ test("生产启动配置不要求游戏文件或每游戏 Secret", () => {
   const config = loadConfig({
     NODE_ENV: "production",
     GAME_MANAGE_KIT_MYSQL_URL:
-      "mysql://gmk@mysql.example.invalid/game_manage_kit",
+      "mysql://gmk@mysql.example.invalid/game_manage_kit"
+      + "?ssl=%7B%22rejectUnauthorized%22%3Atrue%7D",
     AUTH_DEV_ENABLED: "0",
     GAME_MANAGE_KIT_ADMIN_ORIGIN: "https://admin.example.invalid",
   });
 
   assert.equal("gamesConfigPath" in config, false);
   assert.equal(config.mysqlUrl.includes("game_manage_kit"), true);
+  assert.equal(config.mysqlUrl.includes("ssl="), true);
 });

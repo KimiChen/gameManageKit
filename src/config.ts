@@ -56,7 +56,11 @@ function boolean(env: Env, name: string, fallback: boolean): boolean {
   throw new Error(`${name} 只允许 0/1/false/true`);
 }
 
-function validateMysqlUrl(raw: string, gameMysqlUrl: string | undefined): string {
+function validateMysqlUrl(
+  raw: string,
+  gameMysqlUrl: string | undefined,
+  production: boolean,
+): string {
   let parsed: URL;
   try {
     parsed = new URL(raw);
@@ -71,6 +75,30 @@ function validateMysqlUrl(raw: string, gameMysqlUrl: string | undefined): string
   }
   if (gameMysqlUrl && raw === gameMysqlUrl) {
     throw new Error("GAME_MANAGE_KIT_MYSQL_URL 不得与游戏库 MYSQL_URL 相同");
+  }
+  if (production) {
+    const sslParameter = parsed.searchParams.get("ssl");
+    let ssl: unknown = null;
+    if (sslParameter !== null) {
+      try {
+        ssl = JSON.parse(sslParameter);
+      } catch {
+        ssl = sslParameter;
+      }
+    }
+    const trustedProfile = typeof ssl === "string" && ssl.trim().length > 0;
+    const trustedOptions = (
+      typeof ssl === "object"
+      && ssl !== null
+      && !Array.isArray(ssl)
+      && (ssl as { rejectUnauthorized?: unknown }).rejectUnauthorized
+        !== false
+    );
+    if (!trustedProfile && !trustedOptions) {
+      throw new Error(
+        "生产环境 GAME_MANAGE_KIT_MYSQL_URL 必须配置校验证书的 ssl 参数",
+      );
+    }
   }
   return raw;
 }
@@ -128,7 +156,11 @@ export function loadConfig(env: Env = process.env): GameManageKitConfig {
     throw new Error("AUTH_DEV_ENABLED=1 在生产环境被显式开启");
   }
 
-  const mysqlUrl = validateMysqlUrl(required(env, "GAME_MANAGE_KIT_MYSQL_URL"), env.MYSQL_URL);
+  const mysqlUrl = validateMysqlUrl(
+    required(env, "GAME_MANAGE_KIT_MYSQL_URL"),
+    env.MYSQL_URL,
+    nodeEnv === "production",
+  );
 
   const trustedProxyCidrs = (env.GAME_MANAGE_KIT_TRUST_PROXY_CIDRS ?? "")
     .split(",")

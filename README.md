@@ -161,9 +161,13 @@ migration 入口：
 
 ```bash
 docker run --rm \
-  -e GAME_MANAGE_KIT_MYSQL_URL=mysql://... \
+  -e 'GAME_MANAGE_KIT_MYSQL_URL=mysql://...?ssl=%7B%22rejectUnauthorized%22%3Atrue%7D' \
   game-manage-kit:1.0.0 node dist/migrate.js
 ```
+
+生产进程会拒绝缺少 `ssl`、关闭证书校验或未实际协商出 TLS cipher 的 MySQL
+连接。私有 CA 可按 mysql2 的 `ssl` JSON 参数传入，或使用受支持的可信 SSL profile；
+数据库账号仍应设置服务端 `REQUIRE SSL` 作为纵深防御。
 
 生产镜像默认监听容器内 Public `0.0.0.0:2570` 与 Internal/Admin
 `0.0.0.0:2571`。只公开 Public 端口；Internal/Admin 必须位于受信网络和独立 HTTPS

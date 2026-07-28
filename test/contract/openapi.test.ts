@@ -746,6 +746,11 @@ test("机器身份契约只公开版本元数据，一次性 Secret 不可重放
     "newVersion",
     "createdAt",
   ]);
+  assert.deepEqual(record(record(audit.properties).auditType).enum, [
+    "game_configuration",
+    "machine_identity",
+    "secret",
+  ]);
   assert.equal(JSON.stringify(audit).includes("digest"), false);
 });
 

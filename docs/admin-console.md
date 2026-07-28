@@ -158,6 +158,8 @@ Cookie 名称，不能把降级方式带入生产。
 微信 AppSecret 以明文存入 MySQL，因此数据库本身属于生产 Secret 边界：
 
 - 应用与 MySQL 必须强制 TLS。
+- 生产 `GAME_MANAGE_KIT_MYSQL_URL` 必须提供启用证书校验的 `ssl` 参数；启动与
+  migration 会验证实际协商出的 TLS cipher，失败时拒绝继续。
 - 运行账号遵循最小权限；只有 gameManageKit 可以读取 AppSecret，禁止导出、复制和
   数据库管理权限。
 - 禁用包含绑定参数的 SQL/慢查询日志和 ORM/APM 请求体采集。

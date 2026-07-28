@@ -49,6 +49,7 @@ export class WechatClient implements WechatIdentityClient {
     try {
       const response = await this.fetchImpl(url, {
         signal: AbortSignal.timeout(this.options.timeoutMs),
+        redirect: "error",
       });
       body = await response.json() as Record<string, unknown>;
     } catch {

@@ -1634,6 +1634,7 @@ export const GameManageKitSchemas = {
       "auditType": {
         "type": "string",
         "enum": [
+          "game_configuration",
           "machine_identity",
           "secret"
         ]

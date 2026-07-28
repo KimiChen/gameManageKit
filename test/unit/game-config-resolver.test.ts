@@ -17,6 +17,7 @@ function configuredRow(overrides: Record<string, unknown> = {}) {
     configuration_state: "configured",
     game_revision: 1,
     wechat_app_id: "wx-app-a",
+    wechat_secret_configured: 1,
     wechat_endpoint: "https://api.weixin.qq.com/sns/jscode2session",
     wechat_timeout_ms: 3_000,
     wechat_breaker_threshold: 5,
@@ -56,6 +57,32 @@ test("GameConfigResolver 允许零游戏启动并就绪", async () => {
       && error.code === "GAME_NOT_FOUND"
     ),
   );
+});
+
+test("Resolver 对标记 configured 但缺少 Secret 的损坏数据启动失败", async () => {
+  const pool = {
+    async query(rawSql: string) {
+      const sql = compact(rawSql);
+      if (sql.startsWith("SELECT game_id FROM games")) {
+        return [[{ game_id: "game-a" }], []];
+      }
+      if (sql.includes("FROM games g")) {
+        return [[configuredRow({
+          wechat_secret_configured: 0,
+        })], []];
+      }
+      throw new Error(`未实现 query: ${sql}`);
+    },
+  } as unknown as Pool;
+  const resolver = new GameConfigResolver(pool, {
+    production: true,
+  });
+
+  await assert.rejects(
+    resolver.initialize(),
+    /微信接入配置不完整/,
+  );
+  assert.equal(resolver.ready(), false);
 });
 
 test("Resolver 延迟读取微信 Secret，本地失效后按 revision 重建 Client", async () => {

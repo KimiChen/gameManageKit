@@ -1,16 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import test, { type TestContext } from "node:test";
-import type { Pool } from "mysql2/promise";
+import test from "node:test";
 import { loadConfig } from "../../src/config.js";
-import { GameManageKitError } from "../../src/errors.js";
 import {
   DirectoryService,
   validateAreaDirectory,
 } from "../../src/domain/directory/service.js";
-import { GameRegistry } from "../../src/domain/game/registry.js";
+import type { GameContext } from "../../src/domain/game/resolver.js";
 import { parseAccessToken } from "../../src/domain/session/service.js";
 import { MetricsRegistry } from "../../src/infra/observability/metrics.js";
 import {
@@ -19,65 +14,19 @@ import {
   safeSecretEqual,
   TokenBucketLimiter,
 } from "../../src/infra/security/security.js";
+import { WechatClient } from "../../src/infra/wechat/client.js";
 
 const BASE_ENV = {
   NODE_ENV: "development",
-  GAME_MANAGE_KIT_MYSQL_URL: "mysql://root@127.0.0.1:3316/game_manage_kit_test",
-  GAME_MANAGE_KIT_GAMES_CONFIG: "config/games.json",
+  GAME_MANAGE_KIT_MYSQL_URL:
+    "mysql://root@127.0.0.1:3316/game_manage_kit_test",
   AUTH_DEV_ENABLED: "1",
   GAME_MANAGE_KIT_LOG_ENABLED: "0",
 } as const;
 
-const REGISTRY_ENV = {
-  GAME_A_WX_APPID: "wx-app-a",
-  GAME_A_WX_SECRET: "wx-secret-a-value",
-  GAME_B_WX_APPID: "wx-app-b",
-  GAME_B_WX_SECRET: "wx-secret-b-value",
-  GAME_A_SERVICE_SECRET: "service-secret-a",
-  GAME_B_SERVICE_SECRET: "service-secret-b",
-  GAME_A_ADMIN_SECRET: "admin-secret-a-value",
-  GAME_B_ADMIN_SECRET: "admin-secret-b-value",
-} as const;
-
-type RegistryDocument = {
-  games: Array<Record<string, unknown>>;
-  serviceIdentities: Array<Record<string, unknown>>;
-  adminIdentities: Array<Record<string, unknown>>;
-};
-
-async function registryDocument(): Promise<RegistryDocument> {
-  const document = JSON.parse(
-    await readFile("config/games.json", "utf8"),
-  ) as RegistryDocument;
-  for (const game of document.games) {
-    game.directoryPath = resolve("config", String(game.directoryPath));
-  }
-  return document;
-}
-
-async function writeRegistryDocument(
-  t: TestContext,
-  document: RegistryDocument,
-): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "game-registry-"));
-  t.after(async () => {
-    await rm(directory, { recursive: true, force: true });
-  });
-  const path = join(directory, "games.json");
-  await writeFile(path, JSON.stringify(document), "utf8");
-  return path;
-}
-
-function assertGameError(
-  error: unknown,
-  statusCode: number,
-  code: string,
-): boolean {
-  assert.equal(error instanceof GameManageKitError, true);
-  assert.equal((error as GameManageKitError).statusCode, statusCode);
-  assert.equal((error as GameManageKitError).code, code);
-  return true;
-}
+const PRODUCTION_MYSQL_URL =
+  "mysql://gmk@mysql.example.invalid/game_manage_kit"
+  + "?ssl=%7B%22rejectUnauthorized%22%3Atrue%7D";
 
 test("全局配置不再包含游戏配置文件入口并拒绝危险启动配置", () => {
   const config = loadConfig(BASE_ENV);
@@ -119,6 +68,7 @@ test("全局配置不再包含游戏配置文件入口并拒绝危险启动配�
       ...BASE_ENV,
       NODE_ENV: "production",
       AUTH_DEV_ENABLED: "0",
+      GAME_MANAGE_KIT_MYSQL_URL: PRODUCTION_MYSQL_URL,
       GAME_MANAGE_KIT_ADMIN_ORIGIN: "http://admin.example.invalid",
     }),
     /必须使用 https/,
@@ -126,7 +76,28 @@ test("全局配置不再包含游戏配置文件入口并拒绝危险启动配�
   assert.throws(
     () => loadConfig({
       ...BASE_ENV,
-      GAME_MANAGE_KIT_ADMIN_ORIGIN: "https://admin.example.invalid/path",
+      NODE_ENV: "production",
+      AUTH_DEV_ENABLED: "0",
+      GAME_MANAGE_KIT_ADMIN_ORIGIN: "https://admin.example.invalid",
+    }),
+    /ssl 参数/,
+  );
+  assert.throws(
+    () => loadConfig({
+      ...BASE_ENV,
+      NODE_ENV: "production",
+      AUTH_DEV_ENABLED: "0",
+      GAME_MANAGE_KIT_MYSQL_URL:
+        `${BASE_ENV.GAME_MANAGE_KIT_MYSQL_URL}?ssl=false`,
+      GAME_MANAGE_KIT_ADMIN_ORIGIN: "https://admin.example.invalid",
+    }),
+    /ssl 参数/,
+  );
+  assert.throws(
+    () => loadConfig({
+      ...BASE_ENV,
+      GAME_MANAGE_KIT_ADMIN_ORIGIN:
+        "https://admin.example.invalid/path",
     }),
     /只能包含/,
   );
@@ -167,7 +138,7 @@ test("访问令牌严格绑定 gameId、userId 和 24 字节随机段", () => {
     accessToken,
   });
   for (const invalid of [
-    `game-b.u_123`,
+    "game-b.u_123",
     `Game-a.u_123.${"ab".repeat(24)}`,
     `game-a.u_x.${"ab".repeat(24)}`,
     `game-a.u_123.${"ab".repeat(23)}`,
@@ -178,7 +149,7 @@ test("访问令牌严格绑定 gameId、userId 和 24 字节随机段", () => {
   }
 });
 
-test("指标只允许 Registry gameId 与有限标签并按身份范围过滤", () => {
+test("指标只允许已登记 gameId 与有限标签并按身份范围过滤", () => {
   const metrics = new MetricsRegistry(["game-a", "game-b"]);
   metrics.recordLogin("game-a", "success");
   metrics.recordRateLimit("game-a", "admin");
@@ -188,7 +159,10 @@ test("指标只允许 Registry gameId 与有限标签并按身份范围过滤", 
   const gameA = metrics.renderPrometheus(["game-a"]);
   assert.match(gameA, /game_id="game-a"/);
   assert.doesNotMatch(gameA, /game_id="game-b"/);
-  assert.doesNotMatch(gameA, /user_id|token|operation_id|service_id|operator_id/);
+  assert.doesNotMatch(
+    gameA,
+    /user_id|token|operation_id|service_id|operator_id/,
+  );
   assert.throws(
     () => metrics.recordLogin("missing-game", "success"),
     /指标拒绝未知 gameId/,
@@ -199,61 +173,41 @@ test("指标只允许 Registry gameId 与有限标签并按身份范围过滤", 
   );
 });
 
-test("GameRegistry 加载两游戏启动快照、身份范围与区服可用性", async () => {
-  const registry = await GameRegistry.load("config/games.json", {
-    production: true,
-    env: REGISTRY_ENV,
-  });
-
-  assert.equal(registry.ready(), true);
-  assert.deepEqual(registry.list().map((game) => game.gameId), ["game-a", "game-b"]);
-  assert.equal(registry.resolve("game-a").sessionTtlSeconds, 259_200);
-  assert.notEqual(
-    registry.resolve("game-a").wechat,
-    registry.resolve("game-b").wechat,
-  );
-  assert.notEqual(
-    registry.resolve("game-a").loginLimiter,
-    registry.resolve("game-b").loginLimiter,
-  );
-
-  const service = registry.authenticateService("game-a-service", "service-secret-a");
-  assert.deepEqual(service, {
-    serviceId: "game-a-service",
-    gameIds: ["game-a"],
-  });
-  assert.equal(registry.authenticateService("game-a-service", "wrong"), null);
-  assert.equal(service ? registry.canAccess(service, "game-a") : false, true);
-  assert.equal(service ? registry.canAccess(service, "game-b") : true, false);
-
-  const admin = registry.authenticateAdmin("game-b-admin", "admin-secret-b-value");
-  assert.deepEqual(admin, {
-    operatorId: "game-b-admin",
-    gameIds: ["game-b"],
-  });
-  assert.equal(admin ? registry.canAccess(admin, "game-b") : false, true);
-
-  const server = await registry.requireServer("game-a", 1);
-  assert.equal(server.name, "A 一区");
-  assert.equal(await registry.resolve("game-a").directory.isServerUsable(1), true);
-  assert.equal(await registry.resolve("game-a").directory.isServerUsable(9), false);
-  await assert.rejects(
-    registry.requireServer("game-a", 9),
-    (error) => assertGameError(error, 403, "SERVER_DISABLED"),
-  );
-  await assert.rejects(
-    registry.requireServer("game-a", 65_535),
-    (error) => assertGameError(error, 404, "SERVER_NOT_FOUND"),
-  );
-});
-
-test("DirectoryService 使用当前游戏会话参数并过滤目录外角色足迹", async () => {
-  const registry = await GameRegistry.load("config/games.json", {
-    production: true,
-    env: REGISTRY_ENV,
-  });
-  const game = registry.resolve("game-a");
-  const directory = new DirectoryService(
+test("DirectoryService 使用当前游戏 TTL 并过滤目录外角色足迹", async () => {
+  const servers = [
+    {
+      serverId: 1,
+      name: "一区",
+      tag: "normal" as const,
+      status: "smooth" as const,
+      openTime: 1,
+      gameHttpUrl: "https://game.example.invalid/1",
+      gameWsUrl: "wss://game.example.invalid/1",
+    },
+    {
+      serverId: 2,
+      name: "二区",
+      tag: "new" as const,
+      status: "busy" as const,
+      openTime: 2,
+      gameHttpUrl: "https://game.example.invalid/2",
+      gameWsUrl: "wss://game.example.invalid/2",
+    },
+  ];
+  const directory = validateAreaDirectory({
+    isOps: false,
+    servers,
+  }, true);
+  const game = {
+    gameId: "game-a",
+    sessionTtlSeconds: 259_200,
+    directory: {
+      async listAreas() {
+        return directory;
+      },
+    },
+  } as unknown as GameContext;
+  const service = new DirectoryService(
     {
       async verifyAnyZone(gameId, ttlSeconds, accessToken) {
         assert.equal(gameId, "game-a");
@@ -271,91 +225,16 @@ test("DirectoryService 使用当前游戏会话参数并过滤目录外角色足
     },
   );
 
-  const result = await directory.list(game, "game-a.u_1.token");
+  const result = await service.list(game, "game-a.u_1.token");
 
   assert.deepEqual(result.myServerIds, [2, 1]);
-  assert.deepEqual(result.servers.map((server) => server.serverId), [1, 2, 9]);
-});
-
-test("GameRegistry 区分未知、停用和维护中的游戏", async (t) => {
-  const document = await registryDocument();
-  document.games[0]!.status = "maintenance";
-  document.games[1]!.status = "disabled";
-  const path = await writeRegistryDocument(t, document);
-  const registry = await GameRegistry.load(path, {
-    production: true,
-    env: REGISTRY_ENV,
-  });
-
-  assert.throws(
-    () => registry.resolve("missing-game"),
-    (error) => assertGameError(error, 404, "GAME_NOT_FOUND"),
-  );
-  assert.throws(
-    () => registry.resolve("game-a"),
-    (error) => assertGameError(error, 503, "GAME_DISABLED"),
-  );
-  assert.throws(
-    () => registry.resolve("game-b"),
-    (error) => assertGameError(error, 403, "GAME_DISABLED"),
+  assert.deepEqual(
+    result.servers.map(({ serverId }) => serverId),
+    [1, 2],
   );
 });
 
-test("GameRegistry 拒绝重复 ID、非法 URL、未知权限范围和缺失密钥", async (t) => {
-  await assert.rejects(
-    GameRegistry.load("config/games.json", {
-      production: true,
-      env: {
-        ...REGISTRY_ENV,
-        GAME_B_WX_SECRET: "",
-      },
-    }),
-    /GAME_B_WX_SECRET 缺失/,
-  );
-  await assert.rejects(
-    GameRegistry.load("config/games.json", {
-      production: true,
-      env: {
-        ...REGISTRY_ENV,
-        GAME_A_SERVICE_SECRET: "short",
-      },
-    }),
-    /密钥长度必须是 16\.\.512/,
-  );
-
-  const duplicate = await registryDocument();
-  duplicate.games[1]!.gameId = "game-a";
-  await assert.rejects(
-    GameRegistry.load(await writeRegistryDocument(t, duplicate), {
-      production: true,
-      env: REGISTRY_ENV,
-    }),
-    /gameId 重复: game-a/,
-  );
-
-  const invalidUrl = await registryDocument();
-  (invalidUrl.games[0]!.wechat as Record<string, unknown>).endpoint =
-    "http://wechat.example.invalid/code2session";
-  await assert.rejects(
-    GameRegistry.load(await writeRegistryDocument(t, invalidUrl), {
-      production: true,
-      env: REGISTRY_ENV,
-    }),
-    /必须使用 https/,
-  );
-
-  const unknownScope = await registryDocument();
-  unknownScope.serviceIdentities[0]!.gameIds = ["missing-game"];
-  await assert.rejects(
-    GameRegistry.load(await writeRegistryDocument(t, unknownScope), {
-      production: true,
-      env: REGISTRY_ENV,
-    }),
-    /引用了未知游戏 missing-game/,
-  );
-});
-
-test("生产区服目录拒绝不安全协议和 URL 内嵌凭据", () => {
+test("目录校验拒绝不安全 URL，开发仅放行 loopback", () => {
   const server = {
     serverId: 1,
     name: "一区",
@@ -379,7 +258,6 @@ test("生产区服目录拒绝不安全协议和 URL 内嵌凭据", () => {
     }, true),
     /必须使用 https/,
   );
-
   assert.doesNotThrow(() => validateAreaDirectory({
     isOps: false,
     servers: [{
@@ -390,50 +268,14 @@ test("生产区服目录拒绝不安全协议和 URL 内嵌凭据", () => {
   }, false));
 });
 
-test("开发环境允许 IPv6 loopback 微信端点", async (t) => {
-  const document = await registryDocument();
-  (document.games[0]!.wechat as Record<string, unknown>).endpoint =
-    "http://[::1]:8082/code2session";
-
-  await assert.doesNotReject(GameRegistry.load(
-    await writeRegistryDocument(t, document),
-    {
-      production: false,
-      env: REGISTRY_ENV,
-    },
-  ));
-});
-
-test("principal 当前与 previous 密钥轮换且不向身份对象暴露 secret", async (t) => {
-  const document = await registryDocument();
-  document.serviceIdentities[0]!.previousSecretEnv = "GAME_A_SERVICE_SECRET_PREVIOUS";
-  const registry = await GameRegistry.load(await writeRegistryDocument(t, document), {
-    production: true,
-    env: {
-      ...REGISTRY_ENV,
-      GAME_A_SERVICE_SECRET_PREVIOUS: "service-secret-a-previous",
-    },
-  });
-
-  assert.deepEqual(
-    registry.authenticateService("game-a-service", "service-secret-a-previous"),
-    {
-      serviceId: "game-a-service",
-      gameIds: ["game-a"],
-    },
-  );
-  assert.deepEqual(
-    Object.keys(registry.authenticateService("game-a-service", "service-secret-a") ?? {}),
-    ["serviceId", "gameIds"],
-  );
-});
-
-test("两个游戏拥有独立微信熔断状态", async () => {
+test("每个微信 Client 的熔断状态互相隔离", async () => {
   let gameACalls = 0;
   let gameBCalls = 0;
-  const fetchImpl: typeof fetch = async (input) => {
-    const url = new URL(String(input));
-    if (url.searchParams.get("appid") === "wx-app-a") {
+  const redirects: Array<RequestRedirect | undefined> = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    redirects.push(init?.redirect);
+    const appId = new URL(String(input)).searchParams.get("appid");
+    if (appId === "wx-app-a") {
       gameACalls += 1;
       throw new Error("game-a upstream down");
     }
@@ -446,176 +288,37 @@ test("两个游戏拥有独立微信熔断状态", async () => {
       headers: { "content-type": "application/json" },
     });
   };
-  const registry = await GameRegistry.load("config/games.json", {
-    production: true,
-    env: REGISTRY_ENV,
+  const createClient = (appId: string) => new WechatClient({
+    appId,
+    secret: `${appId}-secret-value`,
+    endpoint: "https://api.weixin.qq.com/sns/jscode2session",
+    timeoutMs: 1_000,
+    breakerThreshold: 2,
+    breakerOpenMs: 10_000,
     fetchImpl,
   });
-  const gameAWechat = registry.resolve("game-a").wechat;
-  const gameBWechat = registry.resolve("game-b").wechat;
+  const gameA = createClient("wx-app-a");
+  const gameB = createClient("wx-app-b");
 
-  for (let index = 0; index < 5; index += 1) {
-    assert.deepEqual(
-      await gameAWechat.exchange(`failure-${index}`),
-      { ok: false, reason: "wx_unavailable" },
-    );
-  }
   assert.deepEqual(
-    await gameAWechat.exchange("short-circuit"),
+    await gameA.exchange("failure-1"),
     { ok: false, reason: "wx_unavailable" },
   );
-  assert.equal(gameACalls, 5);
-
-  assert.deepEqual(await gameBWechat.exchange("still-healthy"), {
+  assert.deepEqual(
+    await gameA.exchange("failure-2"),
+    { ok: false, reason: "wx_unavailable" },
+  );
+  assert.deepEqual(
+    await gameA.exchange("short-circuit"),
+    { ok: false, reason: "wx_unavailable" },
+  );
+  assert.equal(gameACalls, 2);
+  assert.deepEqual(await gameB.exchange("healthy"), {
     ok: true,
     openid: "game-b-openid",
     unionid: null,
     sessionKey: "game-b-session",
   });
   assert.equal(gameBCalls, 1);
-});
-
-test("GameRegistry sync 幂等写入 games 与每游戏序列", async () => {
-  const registry = await GameRegistry.load("config/games.json", {
-    production: true,
-    env: REGISTRY_ENV,
-  });
-  const statements: Array<{ sql: string; params: unknown }> = [];
-  let began = false;
-  let committed = false;
-  let released = false;
-  const connection = {
-    async beginTransaction() {
-      began = true;
-    },
-    async query() {
-      return [[], []];
-    },
-    async execute(sql: string, params: unknown) {
-      const compactSql = sql.replace(/\s+/g, " ").trim();
-      statements.push({ sql: compactSql, params });
-      return [{
-        affectedRows: compactSql.startsWith(
-          "INSERT IGNORE INTO game_directory_settings",
-        )
-          ? 1
-          : 0,
-      }, []];
-    },
-    async commit() {
-      committed = true;
-    },
-    async rollback() {},
-    release() {
-      released = true;
-    },
-  };
-  const pool = {
-    async getConnection() {
-      return connection;
-    },
-  } as unknown as Pool;
-
-  await registry.sync(pool);
-
-  assert.equal(began, true);
-  assert.equal(committed, true);
-  assert.equal(released, true);
-  assert.equal(statements.length, 11);
-  assert.equal(statements[0]?.sql.includes("INSERT INTO games"), true);
-  assert.equal(statements[1]?.sql.includes("INSERT INTO seq"), true);
-  assert.deepEqual(statements[2]?.params, ["game-a", 0]);
-  assert.equal(
-    statements[2]?.sql.includes("INSERT IGNORE INTO game_directory_settings"),
-    true,
-  );
-  assert.deepEqual(statements[3]?.params, [
-    "game-a",
-    1,
-    "A 一区",
-    "new",
-    "smooth",
-    1_700_000_000,
-    "https://game-a.example.invalid",
-    "wss://game-a.example.invalid",
-    0,
-  ]);
-  assert.equal(statements[3]?.sql.includes("INSERT INTO game_servers"), true);
-  assert.deepEqual(statements[8]?.params, ["game-b", 1]);
-  assert.equal(statements[9]?.sql.includes("INSERT INTO game_servers"), true);
-});
-
-test("GameRegistry sync 允许未接入草稿并拒绝遗漏已接入游戏", async () => {
-  const registry = await GameRegistry.load("config/games.json", {
-    production: true,
-    env: REGISTRY_ENV,
-  });
-  const poolWithRows = (rows: Array<{
-    game_id: string;
-    name: string;
-    status: string;
-    configuration_state: "draft" | "configured";
-  }>) => ({
-    async getConnection() {
-      return {
-        async beginTransaction() {},
-        async query() {
-          return [rows, []];
-        },
-        async execute() {
-          return [{ affectedRows: 0 }, []];
-        },
-        async commit() {},
-        async rollback() {},
-        release() {},
-      };
-    },
-  }) as unknown as Pool;
-
-  await assert.rejects(
-    registry.sync(poolWithRows([
-      {
-        game_id: "game-a",
-        name: "游戏 A",
-        status: "enabled",
-        configuration_state: "configured",
-      },
-      {
-        game_id: "retired-game",
-        name: "退役游戏",
-        status: "disabled",
-        configuration_state: "configured",
-      },
-    ])),
-    /游戏配置缺少已登记 gameId retired-game/,
-  );
-  await assert.doesNotReject(
-    registry.sync(poolWithRows([
-      {
-        game_id: "game-a",
-        name: "游戏 A",
-        status: "disabled",
-        configuration_state: "configured",
-      },
-      {
-        game_id: "game-b",
-        name: "游戏 B",
-        status: "enabled",
-        configuration_state: "configured",
-      },
-      {
-        game_id: "draft-game",
-        name: "待接入",
-        status: "maintenance",
-        configuration_state: "draft",
-      },
-    ])),
-  );
-  assert.throws(
-    () => registry.resolve("game-a"),
-    (error: unknown) => (
-      error instanceof GameManageKitError
-      && error.code === "GAME_DISABLED"
-    ),
-  );
+  assert.deepEqual(redirects, ["error", "error", "error"]);
 });

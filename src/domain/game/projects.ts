@@ -5,8 +5,12 @@ import type {
 } from "mysql2/promise";
 import { GameManageKitError } from "../../errors.js";
 import { normalizeIp } from "../../infra/security/security.js";
-import type { GameContext, GameRegistry, GameStatus } from "./registry.js";
-import { GAME_ID_PATTERN } from "./registry.js";
+import type {
+  GameContext,
+  GameRuntimeRegistry,
+  GameStatus,
+} from "./resolver.js";
+import { GAME_ID_PATTERN } from "./resolver.js";
 
 export type GameConfigurationState = "draft" | "configured";
 
@@ -203,7 +207,7 @@ const SELECT_PROJECT = `
 export class GameProjectService {
   constructor(
     private readonly database: GameProjectDatabase,
-    private readonly registry: GameRegistry,
+    private readonly registry: GameRuntimeRegistry,
   ) {}
 
   async list(
@@ -229,10 +233,7 @@ export class GameProjectService {
     );
     return Object.freeze(rows.flatMap((row) => {
       const project = projectFromRow(row);
-      if (
-        !this.registry.get(project.gameId)
-        || project.status === "disabled"
-      ) {
+      if (project.status === "disabled") {
         return [];
       }
       return [Object.freeze({
@@ -262,6 +263,21 @@ export class GameProjectService {
               client_visible, sort_order, revision)
            VALUES (?, ?, ?, 'maintenance', 'draft', 0, 0, 1)`,
           [input.gameId, name, description],
+        );
+        await connection.execute(
+          `INSERT INTO game_directory_settings
+             (game_id, is_ops, revision)
+           VALUES (?, 0, 1)`,
+          [input.gameId],
+        );
+        await connection.execute(
+          "INSERT INTO game_integrations (game_id) VALUES (?)",
+          [input.gameId],
+        );
+        await connection.execute(
+          `INSERT INTO seq (game_id, name, val)
+           VALUES (?, 'user_id', 0)`,
+          [input.gameId],
         );
         const project = await this.findLocked(connection, input.gameId);
         if (!project) {
@@ -361,38 +377,11 @@ export class GameProjectService {
       return project;
     });
 
-    if (updated.configurationState === "configured") {
-      this.registry.applyProjectMetadata(updated.gameId, {
-        name: updated.name,
-        status: updated.status,
-      });
-    }
+    this.registry.invalidate?.(updated.gameId);
     return updated;
   }
 
   async resolve(gameId: string): Promise<GameContext> {
-    const configured = this.registry.get(gameId);
-    if (!configured) {
-      throw new GameManageKitError(404, "GAME_NOT_FOUND");
-    }
-    const [rows] = await this.database.pool.query<GameProjectRow[]>(
-      `${SELECT_PROJECT}
-        WHERE game_id = ?
-        LIMIT 1`,
-      [gameId],
-    );
-    const row = rows[0];
-    if (!row) {
-      throw new GameManageKitError(404, "GAME_NOT_FOUND");
-    }
-    const project = projectFromRow(row);
-    if (project.configurationState !== "configured") {
-      throw new GameManageKitError(404, "GAME_NOT_FOUND");
-    }
-    this.registry.applyProjectMetadata(gameId, {
-      name: project.name,
-      status: project.status,
-    });
     return this.registry.resolve(gameId);
   }
 

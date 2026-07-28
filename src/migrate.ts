@@ -10,6 +10,7 @@ const defaultMigrationDir = resolve(here, "..", "migrations");
 export async function runMigrations(
   mysqlUrl = process.env.GAME_MANAGE_KIT_MYSQL_URL,
   migrationDir = defaultMigrationDir,
+  requireTls = process.env.NODE_ENV === "production",
 ): Promise<void> {
   if (!mysqlUrl) {
     throw new Error("GAME_MANAGE_KIT_MYSQL_URL 必填；gameManageKit 禁止回退游戏库 MYSQL_URL");
@@ -26,6 +27,17 @@ export async function runMigrations(
     multipleStatements: true,
   });
   try {
+    if (requireTls) {
+      const [tls] = await connection.query<RowDataPacket[]>(
+        "SHOW SESSION STATUS LIKE 'Ssl_cipher'",
+      );
+      if (
+        typeof tls[0]?.Value !== "string"
+        || tls[0].Value.length === 0
+      ) {
+        throw new Error("生产 MySQL TLS 未协商成功");
+      }
+    }
     await connection.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         version    INT UNSIGNED NOT NULL,

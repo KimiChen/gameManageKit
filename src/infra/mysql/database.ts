@@ -30,7 +30,11 @@ const REQUIRED_SCHEMA_TABLES = Object.freeze([
 export class Database {
   readonly pool: Pool;
 
-  constructor(mysqlUrl: string, connectionLimit: number) {
+  constructor(
+    mysqlUrl: string,
+    connectionLimit: number,
+    private readonly requireTls = false,
+  ) {
     this.pool = mysql.createPool({
       uri: mysqlUrl,
       connectionLimit,
@@ -62,6 +66,9 @@ export class Database {
   }
 
   async ready(expectedSchemaVersion: number): Promise<boolean> {
+    if (!await this.secureTransportReady()) {
+      return false;
+    }
     const [rows] = await this.pool.query<RowDataPacket[]>(
       "SELECT MAX(version) AS version FROM schema_migrations",
     );
@@ -82,6 +89,17 @@ export class Database {
       return false;
     }
     return true;
+  }
+
+  async secureTransportReady(): Promise<boolean> {
+    if (!this.requireTls) {
+      return true;
+    }
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      "SHOW SESSION STATUS LIKE 'Ssl_cipher'",
+    );
+    return typeof rows[0]?.Value === "string"
+      && rows[0].Value.length > 0;
   }
 
   async close(): Promise<void> {

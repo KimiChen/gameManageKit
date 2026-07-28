@@ -65,10 +65,7 @@ export interface AdminIdentity {
 
 type MaybePromise<T> = T | Promise<T>;
 
-/**
- * Common runtime boundary implemented by the database resolver and retained by
- * the legacy file registry only for isolated tests during the migration.
- */
+/** Database-backed runtime boundary shared by the HTTP and domain layers. */
 export interface GameRuntimeRegistry {
   initialize?(): Promise<void>;
   ready(): MaybePromise<boolean>;
@@ -110,6 +107,7 @@ interface GameConfigurationRow extends RowDataPacket {
   readonly configuration_state: string;
   readonly game_revision: number | string;
   readonly wechat_app_id: string | null;
+  readonly wechat_secret_configured: number | boolean | string | null;
   readonly wechat_endpoint: string | null;
   readonly wechat_timeout_ms: number | string | null;
   readonly wechat_breaker_threshold: number | string | null;
@@ -167,7 +165,9 @@ const MACHINE_ID_PATTERN = /^[a-z][a-z0-9_.-]{2,63}$/;
 const SELECT_GAME_CONFIGURATION = `
   SELECT g.game_id, g.name, g.status, g.configuration_state,
          g.revision AS game_revision,
-         i.wechat_app_id, i.wechat_endpoint, i.wechat_timeout_ms,
+         i.wechat_app_id,
+         (i.wechat_app_secret IS NOT NULL) AS wechat_secret_configured,
+         i.wechat_endpoint, i.wechat_timeout_ms,
          i.wechat_breaker_threshold, i.wechat_breaker_open_ms,
          i.session_ttl_seconds, i.login_rate_capacity,
          i.login_rate_refill_per_second, i.admin_rate_capacity,
@@ -223,14 +223,23 @@ function endpoint(
   if (parsed.username || parsed.password || parsed.hash) {
     throw new Error(`${label} 数据无效`);
   }
-  if (parsed.protocol === "https:") {
+  const officialWechatEndpoint = parsed.protocol === "https:"
+    && parsed.hostname === "api.weixin.qq.com"
+    && parsed.port === ""
+    && parsed.pathname === "/sns/jscode2session"
+    && parsed.search === "";
+  if (officialWechatEndpoint) {
     return value;
   }
   const loopback = parsed.hostname === "localhost"
     || parsed.hostname === "127.0.0.1"
     || parsed.hostname === "::1"
     || parsed.hostname === "[::1]";
-  if (!production && loopback && parsed.protocol === "http:") {
+  if (
+    !production
+    && loopback
+    && (parsed.protocol === "http:" || parsed.protocol === "https:")
+  ) {
     return value;
   }
   throw new Error(`${label} 数据无效`);
@@ -592,6 +601,16 @@ export class GameConfigResolver implements GameRuntimeRegistry {
       || row.directory_revision === null
     ) {
       throw new Error(`游戏 ${gameId} 缺少运行时配置`);
+    }
+    if (
+      configurationState === "configured"
+      && (
+        !row.wechat_app_id
+        || row.wechat_app_id.length > 128
+        || Number(row.wechat_secret_configured) !== 1
+      )
+    ) {
+      throw new Error(`游戏 ${gameId} 微信接入配置不完整`);
     }
     const loadedRevision = Object.freeze({
       game: revision(row.game_revision, "游戏 revision"),

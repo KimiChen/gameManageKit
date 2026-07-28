@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import type {
   AreaListResponse,
   AreaServer,
@@ -197,45 +196,6 @@ function databaseAreaServer(
     gameHttpUrl: row.game_http_url,
     gameWsUrl: row.game_ws_url,
   }, production);
-}
-
-export class FileDirectoryProvider implements DirectoryProvider {
-  private readonly serversById: ReadonlyMap<number, AreaServer>;
-
-  private constructor(private readonly directory: AreaDirectory) {
-    this.serversById = new Map(directory.servers.map((server) => [server.serverId, server]));
-  }
-
-  static async load(path: string, production: boolean): Promise<FileDirectoryProvider> {
-    const raw = await readFile(path, "utf8");
-    return new FileDirectoryProvider(validateAreaDirectory(JSON.parse(raw) as unknown, production));
-  }
-
-  async listAreas(): Promise<AreaDirectory> {
-    return this.directory;
-  }
-
-  async findServer(serverId: number): Promise<AreaServer | undefined> {
-    const server = this.serversById.get(serverId);
-    return server ? { ...server } : undefined;
-  }
-
-  async isServerUsable(serverId: number): Promise<boolean> {
-    return (await this.serverAdmission(serverId)).usable;
-  }
-
-  async serverAdmission(serverId: number): Promise<{
-    readonly server: AreaServer | undefined;
-    readonly usable: boolean;
-  }> {
-    const server = this.serversById.get(serverId);
-    return {
-      server: server ? { ...server } : undefined,
-      usable: server !== undefined
-        && (server.status === "smooth" || server.status === "busy")
-        && server.openTime <= Math.floor(Date.now() / 1_000),
-    };
-  }
 }
 
 export class MysqlDirectoryProvider implements DirectoryProvider {

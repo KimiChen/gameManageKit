@@ -308,7 +308,7 @@ CREATE TABLE admin_secret_operations (
         secret_kind IN ('service_secret', 'machine_admin_secret')
         AND game_id IS NULL
         AND identity_id IS NOT NULL
-        AND action IN ('rotate', 'revoke')
+        AND action IN ('set', 'rotate', 'revoke')
       )
     ),
   CONSTRAINT chk_admin_secret_operations_versions
@@ -344,7 +344,7 @@ CREATE TABLE admin_secret_audit (
   old_version BIGINT UNSIGNED NULL,
   new_version BIGINT UNSIGNED NULL,
   result      ENUM('succeeded', 'failed') NOT NULL,
-  reason      VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  reason      VARCHAR(255) NULL,
   request_id  VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   ip          VARBINARY(16) NULL,
   created_at  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -387,7 +387,7 @@ CREATE TABLE admin_secret_audit (
         secret_kind IN ('service_secret', 'machine_admin_secret')
         AND game_id IS NULL
         AND identity_id IS NOT NULL
-        AND action IN ('rotate', 'revoke')
+        AND action IN ('set', 'rotate', 'revoke')
       )
     ),
   CONSTRAINT chk_admin_secret_audit_versions
@@ -413,11 +413,8 @@ CREATE TABLE admin_secret_audit (
     ),
   CONSTRAINT chk_admin_secret_audit_result_reason
     CHECK (
-      (result = 'succeeded' AND reason IS NULL)
-      OR (
-        result = 'failed'
-        AND CHAR_LENGTH(reason) BETWEEN 1 AND 64
-      )
+      reason IS NULL
+      OR CHAR_LENGTH(reason) BETWEEN 1 AND 255
     ),
   CONSTRAINT chk_admin_secret_audit_request
     CHECK (CHAR_LENGTH(request_id) BETWEEN 1 AND 64),
@@ -463,6 +460,22 @@ SELECT games.game_id
   LEFT JOIN game_integrations
     ON game_integrations.game_id = games.game_id
  WHERE game_integrations.game_id IS NULL;
+
+UPDATE games
+JOIN game_integrations
+  ON game_integrations.game_id = games.game_id
+SET games.configuration_state = 'draft',
+    games.status = CASE
+      WHEN games.status = 'disabled' THEN 'disabled'
+      ELSE 'maintenance'
+    END,
+    games.client_visible = 0,
+    games.revision = games.revision + 1
+WHERE games.configuration_state = 'configured'
+  AND (
+    game_integrations.wechat_app_id IS NULL
+    OR game_integrations.wechat_app_secret IS NULL
+  );
 
 INSERT INTO seq (game_id, name, val)
 SELECT games.game_id, 'user_id', 0
