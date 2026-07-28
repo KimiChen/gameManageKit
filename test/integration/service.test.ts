@@ -680,6 +680,62 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
     });
     assert.equal(newAccepted.statusCode, 200, newAccepted.body);
 
+    const revokedCurrent = await mutate(
+      "POST",
+      "/v1/admin/machine-identities/game-a-service"
+        + "/secret-versions/2/revoke",
+      {
+        operationId: "revoke-game-a-service-v2",
+        revision: 3,
+        reason: "当前凭据疑似泄露",
+      },
+    );
+    assert.equal(revokedCurrent.statusCode, 200, revokedCurrent.body);
+    const revokedCurrentRejected = await internalApp.inject({
+      method: "POST",
+      url: "/v1/games/game-a/internal/sessions/verify",
+      headers: {
+        "x-service-id": "game-a-service",
+        "x-service-secret": rotatedServiceSecret,
+      },
+      payload: {
+        accessToken: loginBody.accessToken,
+        serverId: 1,
+      },
+    });
+    assert.equal(
+      revokedCurrentRejected.statusCode,
+      401,
+      revokedCurrentRejected.body,
+    );
+    const recoveredRotation = await mutate(
+      "POST",
+      "/v1/admin/machine-identities/game-a-service/secret-rotations",
+      {
+        operationId: "recover-game-a-service",
+        revision: 4,
+        previousValiditySeconds: 60,
+      },
+    );
+    assert.equal(recoveredRotation.statusCode, 200, recoveredRotation.body);
+    assert.equal(recoveredRotation.json().version, 3);
+    assert.equal(recoveredRotation.json().previousExpiresAt, null);
+    const recoveredServiceSecret = String(recoveredRotation.json().secret);
+    assert.match(recoveredServiceSecret, /^[A-Za-z0-9_-]{43}$/);
+    const recoveredAccepted = await internalApp.inject({
+      method: "POST",
+      url: "/v1/games/game-a/internal/sessions/verify",
+      headers: {
+        "x-service-id": "game-a-service",
+        "x-service-secret": recoveredServiceSecret,
+      },
+      payload: {
+        accessToken: loginBody.accessToken,
+        serverId: 1,
+      },
+    });
+    assert.equal(recoveredAccepted.statusCode, 200, recoveredAccepted.body);
+
     const integrationGet = await internalApp.inject({
       method: "GET",
       url: "/v1/admin/games/game-a/integration",
@@ -701,6 +757,7 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
         ...appSecrets.values(),
         serviceSecret,
         rotatedServiceSecret,
+        recoveredServiceSecret,
         machineAdminSecret,
       ]) {
         assert.equal(response.body.includes(secret), false);
@@ -770,6 +827,12 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
         identityId: "game-a-service",
         version: 2,
         bytes: 32,
+        state: "revoked",
+      },
+      {
+        identityId: "game-a-service",
+        version: 3,
+        bytes: 32,
         state: "current",
       },
     ]);
@@ -813,6 +876,7 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       ...appSecrets.values(),
       serviceSecret,
       rotatedServiceSecret,
+      recoveredServiceSecret,
       machineAdminSecret,
     ]) {
       assert.equal(auditText.includes(secret), false);

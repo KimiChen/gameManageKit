@@ -647,9 +647,6 @@ export class MachineIdentityService {
         const currentVersion = currentIdentity.secretVersions.find(
           (version) => version.state === "current",
         );
-        if (!currentVersion) {
-          throw new GameManageKitError(409, "OPERATION_CONFLICT");
-        }
         await connection.execute(
           `UPDATE machine_secret_versions
               SET state = 'revoked',
@@ -657,17 +654,19 @@ export class MachineIdentityService {
             WHERE identity_id = ? AND state = 'previous'`,
           [identityId],
         );
-        await connection.execute(
-          `UPDATE machine_secret_versions
-              SET state = 'previous',
-                  expires_at = TIMESTAMPADD(SECOND, ?, NOW(3))
-            WHERE identity_id = ? AND version = ? AND state = 'current'`,
-          [
-            normalized.previousValiditySeconds,
-            identityId,
-            currentVersion.version,
-          ],
-        );
+        if (currentVersion) {
+          await connection.execute(
+            `UPDATE machine_secret_versions
+                SET state = 'previous',
+                    expires_at = TIMESTAMPADD(SECOND, ?, NOW(3))
+              WHERE identity_id = ? AND version = ? AND state = 'current'`,
+            [
+              normalized.previousValiditySeconds,
+              identityId,
+              currentVersion.version,
+            ],
+          );
+        }
         const newVersion = Math.max(
           0,
           ...currentIdentity.secretVersions.map((version) => version.version),
@@ -697,7 +696,7 @@ export class MachineIdentityService {
           identityId,
           kind,
           "rotate",
-          currentVersion.version,
+          currentVersion?.version ?? null,
           newVersion,
         );
         await this.insertSecretAudit(
@@ -706,7 +705,7 @@ export class MachineIdentityService {
           identityId,
           kind,
           "rotate",
-          currentVersion.version,
+          currentVersion?.version ?? null,
           newVersion,
           null,
         );
@@ -715,9 +714,11 @@ export class MachineIdentityService {
           identityId,
           false,
         );
-        const previous = identity.secretVersions.find(
-          (version) => version.version === currentVersion.version,
-        );
+        const previous = currentVersion
+          ? identity.secretVersions.find(
+            (version) => version.version === currentVersion.version,
+          )
+          : undefined;
         return Object.freeze({
           identity,
           version: newVersion,
