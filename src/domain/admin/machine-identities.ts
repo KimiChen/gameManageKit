@@ -546,15 +546,8 @@ export class MachineIdentityService {
   ): Promise<MachineIdentity> {
     this.validateIdentityId(identityId);
     const normalized = this.normalizeUpdate(input);
-    const scopeRequiresElevation = await this.scopeWouldChange(
-      identityId,
-      normalized.gameIds,
-    );
     return this.database.transaction(async (connection) => {
-      await authorization.authorize(
-        connection,
-        scopeRequiresElevation ? "scope" : "write",
-      );
+      await authorization.authorize(connection, "write");
       const current = await this.requireIdentity(
         connection,
         identityId,
@@ -567,8 +560,8 @@ export class MachineIdentityService {
         || current.gameIds.some(
           (gameId, index) => normalized.gameIds[index] !== gameId,
         );
-      if (scopeChanged !== scopeRequiresElevation) {
-        throw new GameManageKitError(409, "OPERATION_CONFLICT");
+      if (scopeChanged) {
+        await authorization.authorize(connection, "scope");
       }
       await this.requireGames(connection, normalized.gameIds);
       const [updated] = await connection.execute<ResultSetHeader>(
@@ -1139,22 +1132,6 @@ export class MachineIdentityService {
         [identityId, gameId],
       );
     }
-  }
-
-  private async scopeWouldChange(
-    identityId: string,
-    gameIds: readonly string[],
-  ): Promise<boolean> {
-    const [rows] = await this.database.pool.query<IdentityGameRow[]>(
-      `SELECT identity_id, game_id
-         FROM machine_identity_games
-        WHERE identity_id = ?
-        ORDER BY game_id`,
-      [identityId],
-    );
-    const current = rows.map((row) => String(row.game_id));
-    return current.length !== gameIds.length
-      || current.some((gameId, index) => gameIds[index] !== gameId);
   }
 
   private async requireIdentity(
