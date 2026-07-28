@@ -38,7 +38,7 @@ export interface GameIntegrationRuntime {
 export interface WechatSecretMetadata {
   readonly configured: boolean;
   readonly version: number;
-  readonly state: "active" | "missing";
+  readonly state: "active" | "missing" | "validation_failed";
   readonly updatedAt: string | null;
 }
 
@@ -98,6 +98,7 @@ interface IntegrationRow extends RowDataPacket {
   readonly wechat_secret_configured: number | boolean | string;
   readonly wechat_secret_version: number | string;
   readonly wechat_secret_updated_at: Date | string | null;
+  readonly wechat_validation_failed_at: Date | string | null;
   readonly wechat_endpoint: string;
   readonly wechat_timeout_ms: number | string;
   readonly wechat_breaker_threshold: number | string;
@@ -140,6 +141,7 @@ const SELECT_INTEGRATION = `
          i.wechat_app_id,
          (i.wechat_app_secret IS NOT NULL) AS wechat_secret_configured,
          i.wechat_secret_version, i.wechat_secret_updated_at,
+         i.wechat_validation_failed_at,
          i.wechat_endpoint, i.wechat_timeout_ms,
          i.wechat_breaker_threshold, i.wechat_breaker_open_ms,
          i.session_ttl_seconds, i.login_rate_capacity,
@@ -267,7 +269,11 @@ function secretMetadataFromRow(row: IntegrationRow): WechatSecretMetadata {
   return Object.freeze({
     configured,
     version,
-    state: configured ? "active" : "missing",
+    state: !configured
+      ? "missing"
+      : row.wechat_validation_failed_at === null
+        ? "active"
+        : "validation_failed",
     updatedAt: optionalIsoDate(row.wechat_secret_updated_at),
   });
 }
@@ -406,6 +412,7 @@ export class GameIntegrationService {
                 login_rate_refill_per_second = ?,
                 admin_rate_capacity = ?,
                 admin_rate_refill_per_second = ?,
+                wechat_validation_failed_at = NULL,
                 revision = revision + 1
           WHERE game_id = ? AND revision = ?`,
         [
@@ -491,6 +498,7 @@ export class GameIntegrationService {
                   wechat_secret_version = ?,
                   wechat_secret_updated_by = ?,
                   wechat_secret_updated_at = NOW(3),
+                  wechat_validation_failed_at = NULL,
                   revision = revision + 1
             WHERE game_id = ? AND revision = ?`,
           [
@@ -692,7 +700,7 @@ export class GameIntegrationService {
       wechatSecret: Object.freeze({
         configured: true,
         version,
-        state: "active",
+        state: integration.wechatSecret.state,
         updatedAt,
       }),
       revision: integration.revision,

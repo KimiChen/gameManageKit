@@ -544,6 +544,24 @@ test("接入配置响应只接收 Secret 元数据并校验目录 revision", () 
       updatedAt: null,
     },
   );
+  assert.equal(
+    normalizeWechatSecretMetadata({
+      configured: true,
+      version: 2,
+      state: "validation_failed",
+      updatedAt: "2026-07-28T10:00:00.000Z",
+    }).state,
+    "validation_failed",
+  );
+  assert.throws(
+    () => normalizeWechatSecretMetadata({
+      configured: false,
+      version: 0,
+      state: "validation_failed",
+      updatedAt: null,
+    }),
+    InvalidApiPayloadError,
+  );
   const write = normalizeWechatSecretWrite({
     gameId: "game-a",
     configurationState: "configured",

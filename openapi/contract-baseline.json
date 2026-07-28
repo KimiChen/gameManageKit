@@ -114,7 +114,7 @@
     "schemas/VerifySessionRequest": "3b1f900c2794bf5c5be4ea273f1867bb4b6071a16f5b0f8ea9a5693a6a2e1d6f",
     "schemas/VerifySessionResponse": "9c7b8352c7058d31fa45963c788b4442355f9015fe579dbb785a212e84352cdf",
     "schemas/VersionResponse": "3bd00712605fca9eb612e2935a6f827a07542d35273fcb0f21f4380b4b5449b6",
-    "schemas/WechatSecretMetadata": "6e499e7733f789262f04528b518a0b8bb73fa453b0e37b061691314365ef4533",
+    "schemas/WechatSecretMetadata": "88e08846e2a79285e0e891cac1a159bd43a87ed10bb6539eec5168b87977fd4c",
     "schemas/WechatSecretWriteResponse": "dbd517a62353fc5ee39e935a731fea7f9467015440ef0a9e5a258e4a841c7781",
     "schemas/WxLoginRequest": "93e7173d922c0e5244431781acd2f78bd4ca519ee3adcf299574b9d2a2209c79",
     "securitySchemes/AdminSecret": "ddf2bb31df072c4f20c0247ef835ca97ae17221dbd5eea2bc37d67949d6cd0a5",

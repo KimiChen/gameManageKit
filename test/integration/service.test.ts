@@ -89,7 +89,25 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       AUTH_DEV_ENABLED: "1",
       GAME_MANAGE_KIT_LOG_ENABLED: "0",
     });
-    runtime = await createRuntime(config, { cacheTtlMs: 100 });
+    let wechatValidationShouldFail = true;
+    const validationFetch: typeof fetch = async () => new Response(
+      JSON.stringify(
+        wechatValidationShouldFail
+          ? { errcode: 40013, errmsg: "invalid appid" }
+          : {
+              openid: "validation-openid",
+              session_key: "validation-session-key",
+            },
+      ),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    );
+    runtime = await createRuntime(config, {
+      cacheTtlMs: 100,
+      fetchImpl: validationFetch,
+    });
     assert.deepEqual(runtime.games.list(), []);
 
     const administratorPassword = generateAdminPassword();
@@ -419,6 +437,34 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       },
     );
     assert.equal(enableGameA.statusCode, 200, enableGameA.body);
+    const validationContext = await runtime.games.resolve("game-a");
+    assert.deepEqual(
+      await validationContext.wechat.exchange("validation-failure"),
+      { ok: false, reason: "wx_invalid" },
+    );
+    const failedValidationMetadata = await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/games/game-a/integration",
+      headers: { cookie: adminCookie },
+    });
+    assert.equal(
+      failedValidationMetadata.json().wechatSecret.state,
+      "validation_failed",
+    );
+    wechatValidationShouldFail = false;
+    assert.equal(
+      (await validationContext.wechat.exchange("validation-success")).ok,
+      true,
+    );
+    const recoveredValidationMetadata = await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/games/game-a/integration",
+      headers: { cookie: adminCookie },
+    });
+    assert.equal(
+      recoveredValidationMetadata.json().wechatSecret.state,
+      "active",
+    );
     await configureGame("game-b", 20);
     const rotatedGameBAppSecret = randomValue();
     const concurrentSecretWrites = await Promise.all([

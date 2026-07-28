@@ -1826,7 +1826,7 @@ components:
           minimum: 0
         state:
           type: string
-          enum: [active, missing]
+          enum: [active, missing, validation_failed]
         updatedAt:
           type:
             - string

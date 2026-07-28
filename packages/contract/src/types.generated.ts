@@ -920,7 +920,7 @@ export type components = {
         WechatSecretMetadata: {
             configured: boolean;
             /** @enum {string} */
-            state: "active" | "missing";
+            state: "active" | "missing" | "validation_failed";
             /** Format: date-time */
             updatedAt: string | null;
             version: number;

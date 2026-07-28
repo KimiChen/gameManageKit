@@ -129,6 +129,7 @@ interface WechatConfigurationRow extends RowDataPacket {
   readonly wechat_breaker_threshold: number | string;
   readonly wechat_breaker_open_ms: number | string;
   readonly wechat_secret_version: number | string;
+  readonly wechat_validation_failed_at: Date | string | null;
   readonly revision: number | string;
 }
 
@@ -148,6 +149,8 @@ interface CachedWechat {
   readonly integrationRevision: number;
   readonly secretVersion: number;
   readonly client: WechatClient;
+  validationFailed: boolean;
+  validationReportExpiresAtMs: number;
 }
 
 const DEFAULT_CACHE_TTL_MS = 2_000;
@@ -302,9 +305,15 @@ class LazyWechatClient implements WechatIdentityClient {
       this.gameId,
       this.integrationRevision,
     ).catch(() => null);
-    return client
-      ? client.exchange(code)
+    const resolved: WechatExchangeResult = client
+      ? await client.exchange(code)
       : { ok: false, reason: "wx_unavailable" };
+    await this.resolver.recordWechatValidation(
+      this.gameId,
+      this.integrationRevision,
+      resolved,
+    ).catch(() => undefined);
+    return resolved;
   }
 }
 
@@ -463,7 +472,8 @@ export class GameConfigResolver implements GameRuntimeRegistry {
     const [rows] = await this.pool.query<WechatConfigurationRow[]>(
       `SELECT wechat_app_id, wechat_app_secret, wechat_endpoint,
               wechat_timeout_ms, wechat_breaker_threshold,
-              wechat_breaker_open_ms, wechat_secret_version, revision
+              wechat_breaker_open_ms, wechat_secret_version,
+              wechat_validation_failed_at, revision
          FROM game_integrations
         WHERE game_id = ?
         LIMIT 1`,
@@ -533,8 +543,63 @@ export class GameConfigResolver implements GameRuntimeRegistry {
       integrationRevision,
       secretVersion,
       client,
+      validationFailed: row.wechat_validation_failed_at !== null,
+      validationReportExpiresAtMs: 0,
     });
     return client;
+  }
+
+  async recordWechatValidation(
+    gameId: string,
+    expectedIntegrationRevision: number,
+    result: WechatExchangeResult,
+  ): Promise<void> {
+    const cached = this.wechatClients.get(gameId);
+    if (
+      !cached
+      || cached.integrationRevision !== expectedIntegrationRevision
+    ) {
+      return;
+    }
+    const validationFailed = !result.ok
+      && result.reason !== "wx_rate_limited";
+    if (
+      cached.validationFailed === validationFailed
+      && this.now() < cached.validationReportExpiresAtMs
+    ) {
+      return;
+    }
+    const previous = cached.validationFailed;
+    const previousExpiry = cached.validationReportExpiresAtMs;
+    cached.validationFailed = validationFailed;
+    cached.validationReportExpiresAtMs = this.now() + this.cacheTtlMs;
+    try {
+      if (validationFailed) {
+        await this.pool.execute(
+          `UPDATE game_integrations
+              SET wechat_validation_failed_at = NOW(3)
+            WHERE game_id = ?
+              AND revision = ?
+              AND wechat_validation_failed_at IS NULL`,
+          [gameId, expectedIntegrationRevision],
+        );
+      } else {
+        await this.pool.execute(
+          `UPDATE game_integrations
+              SET wechat_validation_failed_at = NULL
+            WHERE game_id = ?
+              AND revision = ?
+              AND wechat_validation_failed_at IS NOT NULL`,
+          [gameId, expectedIntegrationRevision],
+        );
+      }
+    } catch (error) {
+      if (this.wechatClients.get(gameId) === cached) {
+        cached.validationFailed = previous;
+        cached.validationReportExpiresAtMs = previousExpiry;
+      }
+      throw error;
+    }
   }
 
   private refresh(

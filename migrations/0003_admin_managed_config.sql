@@ -41,6 +41,7 @@ CREATE TABLE game_integrations (
   wechat_secret_updated_by         VARCHAR(64)
     CHARACTER SET ascii COLLATE ascii_bin NULL,
   wechat_secret_updated_at         DATETIME(3) NULL,
+  wechat_validation_failed_at      DATETIME(3) NULL,
   wechat_endpoint                  VARCHAR(2048) NOT NULL
     DEFAULT 'https://api.weixin.qq.com/sns/jscode2session',
   wechat_timeout_ms                INT UNSIGNED NOT NULL DEFAULT 3000,

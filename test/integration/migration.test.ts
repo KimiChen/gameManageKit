@@ -141,6 +141,7 @@ test("v3 迁移建立动态配置、权限、摘要与审计边界", async () =>
                 AND COLUMN_NAME IN (
                   'wechat_app_secret',
                   'wechat_secret_version',
+                  'wechat_validation_failed_at',
                   'revision'
                 ))
               OR (TABLE_NAME = 'machine_secret_versions'
@@ -154,6 +155,10 @@ test("v3 迁移建立动态配置、权限、摘要与审计边界", async () =>
       assert.equal(
         columnTypes.get("game_integrations.wechat_app_secret"),
         "varchar(512)",
+      );
+      assert.equal(
+        columnTypes.get("game_integrations.wechat_validation_failed_at"),
+        "datetime(3)",
       );
       assert.equal(
         columnTypes.get("machine_secret_versions.secret_digest"),

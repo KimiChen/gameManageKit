@@ -113,6 +113,7 @@ test("Resolver 延迟读取微信 Secret，本地失效后按 revision 重建 Cl
           wechat_breaker_threshold: 5,
           wechat_breaker_open_ms: 10_000,
           wechat_secret_version: secretVersion,
+          wechat_validation_failed_at: null,
           revision: row.integration_revision,
         }], []];
       }
@@ -165,6 +166,66 @@ test("Resolver 延迟读取微信 Secret，本地失效后按 revision 重建 Cl
     "wechat-secret-v1",
     "wechat-secret-v2",
   ]);
+});
+
+test("Resolver 记录微信连接验证失败并在后续成功时清除", async () => {
+  let shouldFail = true;
+  const validationUpdates: string[] = [];
+  const pool = {
+    async query(rawSql: string) {
+      const sql = compact(rawSql);
+      if (sql.startsWith("SELECT game_id FROM games")) {
+        return [[{ game_id: "game-a" }], []];
+      }
+      if (sql.includes("FROM games g") && sql.includes("game_revision")) {
+        return [[configuredRow()], []];
+      }
+      if (sql.includes("wechat_app_secret")) {
+        return [[{
+          wechat_app_id: "wx-app-a",
+          wechat_app_secret: "wechat-secret",
+          wechat_endpoint:
+            "https://api.weixin.qq.com/sns/jscode2session",
+          wechat_timeout_ms: 3_000,
+          wechat_breaker_threshold: 5,
+          wechat_breaker_open_ms: 10_000,
+          wechat_secret_version: 1,
+          wechat_validation_failed_at: null,
+          revision: 1,
+        }], []];
+      }
+      throw new Error(`未实现 query: ${sql}`);
+    },
+    async execute(rawSql: string, values: readonly unknown[]) {
+      const sql = compact(rawSql);
+      assert.deepEqual(values, ["game-a", 1]);
+      validationUpdates.push(sql);
+      return [{ affectedRows: 1 }, []];
+    },
+  } as unknown as Pool;
+  const resolver = new GameConfigResolver(pool, {
+    production: true,
+    fetchImpl: async () => new Response(JSON.stringify(
+      shouldFail
+        ? { errcode: 40013, errmsg: "invalid appid" }
+        : { openid: "openid-a", session_key: "session-a" },
+    ), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  });
+
+  await resolver.initialize();
+  const game = await resolver.resolve("game-a");
+  assert.deepEqual(await game.wechat.exchange("first-code"), {
+    ok: false,
+    reason: "wx_invalid",
+  });
+  assert.match(validationUpdates[0] ?? "", /SET wechat_validation_failed_at = NOW/u);
+
+  shouldFail = false;
+  assert.equal((await game.wechat.exchange("second-code")).ok, true);
+  assert.match(validationUpdates[1] ?? "", /SET wechat_validation_failed_at = NULL/u);
 });
 
 test("Resolver 通过短 TTL 发现其他实例状态更新且并发只刷新一次", async () => {

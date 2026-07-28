@@ -971,7 +971,8 @@ export const GameManageKitSchemas = {
         "type": "string",
         "enum": [
           "active",
-          "missing"
+          "missing",
+          "validation_failed"
         ]
       },
       "updatedAt": {

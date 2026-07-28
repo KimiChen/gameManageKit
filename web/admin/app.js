@@ -523,8 +523,14 @@ export function normalizeWechatSecretMetadata(payload) {
   if (
     typeof payload.configured !== "boolean"
     || version === null
-    || !["active", "missing"].includes(payload.state)
-    || (payload.configured && (version < 1 || payload.state !== "active"))
+    || !["active", "missing", "validation_failed"].includes(payload.state)
+    || (
+      payload.configured
+      && (
+        version < 1
+        || !["active", "validation_failed"].includes(payload.state)
+      )
+    )
     || (!payload.configured && payload.state !== "missing")
   ) {
     throw new InvalidApiPayloadError("微信 Secret 元数据无效");
@@ -2512,10 +2518,15 @@ export function bootstrapAdminConsole({
       String(integration.adminRateCapacity);
     elements.integrationAdminRefill.value =
       String(integration.adminRateRefillPerSecond);
+    const secretPresentation = !integration.wechatSecret.configured
+      ? { text: "未配置", variant: "warning" }
+      : integration.wechatSecret.state === "validation_failed"
+        ? { text: "连接验证失败", variant: "danger" }
+        : { text: "已生效", variant: "success" };
     setBadge(
       elements.wechatSecretStatusBadge,
-      integration.wechatSecret.configured ? "已生效" : "未配置",
-      integration.wechatSecret.configured ? "success" : "warning",
+      secretPresentation.text,
+      secretPresentation.variant,
     );
     elements.directoryIsOps.checked = state.directorySettings?.isOps ?? false;
     elements.directoryRevisionLabel.textContent = state.directorySettings

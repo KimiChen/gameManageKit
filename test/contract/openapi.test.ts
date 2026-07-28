@@ -662,6 +662,13 @@ test("目录、接入和 Secret 契约固定乐观锁、幂等与不回显边界
   ]);
   assert.equal(JSON.stringify(integration).includes("digest"), false);
   assert.equal(JSON.stringify(integration).includes("wechatAppSecret"), false);
+  assert.deepEqual(
+    record(record(schemas.WechatSecretMetadata).properties).state,
+    {
+      type: "string",
+      enum: ["active", "missing", "validation_failed"],
+    },
+  );
 
   const secretRequest = record(schemas.ReplaceWechatAppSecretRequest);
   assert.deepEqual(secretRequest.required, [
