@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import mysql from "mysql2/promise";
-import { hashAdminPassword } from "../dist/infra/security/admin-password.js";
 
 const publicUrl = process.env.SMOKE_PUBLIC_URL ?? "http://127.0.0.1:12570";
 const internalUrl = process.env.SMOKE_INTERNAL_URL ?? "http://127.0.0.1:12571";
@@ -114,64 +113,105 @@ assert.match(await adminApplication.text(), /bootstrapAdminConsole/u);
 
 await request(publicUrl, "/admin/", 404);
 await request(publicUrl, "/v1/admin/auth/session", 404);
+await request(publicUrl, "/v1/admin/bootstrap", 404);
 
 const initialGames = await request(publicUrl, "/v1/games", 200);
 assert.ok(Array.isArray(initialGames.body?.games));
 
-// The first personal administrator is the deployment trust root. The smoke
-// fixture creates that one row directly, then performs all business
-// configuration through the administrator API.
+const initialBootstrap = await request(
+  internalUrl,
+  "/v1/admin/bootstrap",
+  200,
+);
+assert.deepEqual(
+  initialBootstrap.body,
+  { required: true },
+  "docker smoke requires a fresh volume; run npm run mysql:docker:clean",
+);
+
 const suffix = `${Date.now().toString(36)}${randomBytes(3).toString("hex")}`;
 const operatorId = `smoke_${suffix}`;
 const adminPassword = randomBytes(24).toString("base64url");
-const adminPasswordHash = await hashAdminPassword(adminPassword);
 const gameA = `smoke-a-${suffix}`;
 const gameB = `smoke-b-${suffix}`;
 
 const connection = await mysql.createConnection(mysqlUrl);
-try {
-  await connection.beginTransaction();
-  await connection.execute(
-    `INSERT INTO admin_operators
-       (operator_id, display_name, password_hash, status, auth_version,
-        can_manage_games, can_manage_integrations, can_rotate_secrets,
-        can_manage_machine_identities)
-     VALUES (?, 'Docker Smoke', ?, 'enabled', 1, 1, 1, 1, 1)`,
-    [operatorId, adminPasswordHash],
-  );
-  await connection.execute(
-    `INSERT INTO admin_auth_audit (operator_id, event, reason)
-     VALUES (?, 'operator_created', 'docker_smoke')`,
-    [operatorId],
-  );
-  await connection.commit();
-} catch (error) {
-  await connection.rollback();
-  throw error;
-}
-
-const login = await request(
+const bootstrap = await request(
   internalUrl,
-  "/v1/admin/auth/login",
+  "/v1/admin/bootstrap",
   204,
   jsonInit(
     "POST",
-    { operatorId, password: adminPassword },
+    {
+      operatorId,
+      displayName: "Docker Smoke",
+      password: adminPassword,
+    },
     { origin: adminOrigin },
   ),
 );
-const setCookies = typeof login.headers.getSetCookie === "function"
-  ? login.headers.getSetCookie()
-  : [login.headers.get("set-cookie") ?? ""];
+assert.equal(bootstrap.headers.get("cache-control"), "no-store");
+const setCookies = typeof bootstrap.headers.getSetCookie === "function"
+  ? bootstrap.headers.getSetCookie()
+  : [bootstrap.headers.get("set-cookie") ?? ""];
 const cookieMatch = setCookies
   .join(", ")
   .match(/(?:^|[\s,])gmk_admin_session=([A-Za-z0-9_-]{43})(?:;|,|$)/u);
-assert.ok(cookieMatch, "administrator login did not issue a session cookie");
+assert.ok(cookieMatch, "administrator bootstrap did not issue a session cookie");
 const adminCookie = `gmk_admin_session=${cookieMatch[1]}`;
 const adminHeaders = {
   origin: adminOrigin,
   cookie: adminCookie,
 };
+
+const completedBootstrap = await request(
+  internalUrl,
+  "/v1/admin/bootstrap",
+  200,
+);
+assert.deepEqual(completedBootstrap.body, { required: false });
+const replayedBootstrap = await request(
+  internalUrl,
+  "/v1/admin/bootstrap",
+  409,
+  jsonInit(
+    "POST",
+    {
+      operatorId,
+      displayName: "Docker Smoke",
+      password: adminPassword,
+    },
+    { origin: adminOrigin },
+  ),
+);
+assert.equal(replayedBootstrap.body?.code, "ADMIN_ALREADY_INITIALIZED");
+
+const bootstrapSession = await request(
+  internalUrl,
+  "/v1/admin/auth/session",
+  200,
+  {
+    headers: {
+      accept: "application/json",
+      cookie: adminCookie,
+    },
+  },
+);
+assert.deepEqual(
+  {
+    canManageGames: bootstrapSession.body?.canManageGames,
+    canManageIntegrations: bootstrapSession.body?.canManageIntegrations,
+    canRotateSecrets: bootstrapSession.body?.canRotateSecrets,
+    canManageMachineIdentities:
+      bootstrapSession.body?.canManageMachineIdentities,
+  },
+  {
+    canManageGames: true,
+    canManageIntegrations: true,
+    canRotateSecrets: true,
+    canManageMachineIdentities: true,
+  },
+);
 
 async function adminRequest(path, expectedStatus, method = "GET", body) {
   return request(

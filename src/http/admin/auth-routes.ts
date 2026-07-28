@@ -1,6 +1,8 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   GameManageKitPath,
+  type AdminBootstrapRequest,
+  type AdminBootstrapStatus,
   type AdminLoginRequest,
   type AdminReauthenticateRequest,
   type AdminSessionResponse,
@@ -30,7 +32,8 @@ export interface AdminAuthRouteServices {
   readonly games: GameRuntimeRegistry;
   readonly adminAuth: Pick<
     AdminAuthService,
-    "login" | "reauthenticate" | "authenticate" | "logout"
+    "bootstrapRequired" | "bootstrap"
+    | "login" | "reauthenticate" | "authenticate" | "logout"
     | "requireAccountOperation"
     | "requireGameAccess" | "requireGameManagement"
   >;
@@ -38,6 +41,21 @@ export interface AdminAuthRouteServices {
 
 function noStore(reply: FastifyReply): void {
   void reply.header("cache-control", "no-store");
+}
+
+function sessionCookies(
+  sessionToken: string,
+  production: boolean,
+): readonly string[] {
+  return [
+    ...clearAdminSessionCookies(),
+    serializeAdminSessionCookie(sessionToken, {
+      production,
+      maxAgeSeconds: Math.floor(
+        ADMIN_SESSION_ABSOLUTE_TTL_MS / 1_000,
+      ),
+    }),
+  ];
 }
 
 const noStoreHook = async (
@@ -84,6 +102,60 @@ export function registerAdminAuthRoutes(
   const cookieReadOptions = { production } as const;
   const allowedOrigins = [config.adminOrigin] as const;
 
+  app.get(
+    fastifyPath(GameManageKitPath.GetAdminBootstrapStatus),
+    {
+      onRequest: noStoreHook,
+      schema: {
+        response: {
+          200: schemaRef("AdminBootstrapStatus"),
+          ...errorResponseSchemas,
+        },
+      },
+    },
+    async (_request, reply): Promise<AdminBootstrapStatus> => {
+      noStore(reply);
+      return {
+        required: await services.adminAuth.bootstrapRequired(),
+      };
+    },
+  );
+
+  app.post<{ Body: AdminBootstrapRequest }>(
+    fastifyPath(GameManageKitPath.BootstrapAdmin),
+    {
+      onRequest: noStoreHook,
+      schema: {
+        body: schemaRef("AdminBootstrapRequest"),
+        response: {
+          204: { type: "null" },
+          ...errorResponseSchemas,
+        },
+      },
+    },
+    async (request, reply) => {
+      noStore(reply);
+      requireAllowedAdminOrigin(
+        headerValue(request, "origin"),
+        allowedOrigins,
+      );
+      const issued = await services.adminAuth.bootstrap({
+        operatorId: request.body.operatorId,
+        displayName: request.body.displayName,
+        password: request.body.password,
+        ip: request.ip,
+      });
+      request.log = request.log.child({ operatorId: issued.operatorId });
+      return reply
+        .header(
+          "set-cookie",
+          sessionCookies(issued.sessionToken, production),
+        )
+        .code(204)
+        .send();
+    },
+  );
+
   app.post<{ Body: AdminLoginRequest }>(
     fastifyPath(GameManageKitPath.AdminLogin),
     {
@@ -110,15 +182,7 @@ export function registerAdminAuthRoutes(
       return reply
         .header(
           "set-cookie",
-          [
-            ...clearAdminSessionCookies(),
-            serializeAdminSessionCookie(issued.sessionToken, {
-              production,
-              maxAgeSeconds: Math.floor(
-                ADMIN_SESSION_ABSOLUTE_TTL_MS / 1_000,
-              ),
-            }),
-          ],
+          sessionCookies(issued.sessionToken, production),
         )
         .code(204)
         .send();

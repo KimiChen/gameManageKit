@@ -6,48 +6,41 @@
 
 ## 创建首个管理员
 
-先完成数据库 migration，再在可信终端创建引导管理员。空库尚无游戏时可以省略
-`--games`：
+先完成数据库 migration 并启动服务：
 
 ```bash
-npm run admin:create -- \
-  --operator-id ops_kimi \
-  --display-name Kimi \
-  --full-config
+npm run migrate
+npm run dev
 ```
 
-命令使用 `crypto.randomBytes` 生成 16 位 Base64URL 初始密码（12 字节、约 96 bit
-随机性），创建成功后仅在当前终端显示一次。请立即安全交付并存入受控密码管理器；
-不要把密码写入 Shell history、环境变量、配置文件、工单或 Git。创建命令拒绝覆盖已有
-管理员，并写入 `operator_created/cli` 安全审计。
+打开 Internal/Admin origin 的 `/admin/`。页面先检查服务端引导状态；数据库从未完成
+管理员引导时，会显示首个管理员创建页。操作者填写个人账号、显示名和两次一致的密码，
+创建成功后使用服务端签发的 HttpOnly Cookie 进入控制台。密码由操作者自行设置，必须
+为 12 至 256 个有效 Unicode 字符，且 UTF-8 不超过 1024 字节；后端不会裁剪或
+Unicode 归一化密码。不要把密码写入 URL、Shell history、环境变量、配置文件、工单
+或 Git。
 
-已有游戏后，可创建只负责逐游戏账号工作的管理员：
+首个管理员的 `enabled` 状态和全部四项 `full-config` 能力由服务端固定，网页不能
+降权或提交自定义能力。创建事务同时关闭一次性引导状态并写入
+`operator_created/web_bootstrap` 认证审计；多实例或并发提交也只能有一个请求成功。
+引导状态是单调的：完成后不会因为管理员被停用或删除而重新开放。管理员全部失效时，
+必须按受控的数据库恢复流程处理，不能把删除记录当成重新领取首管权限的方法。
 
-```bash
-npm run admin:create -- \
-  --operator-id support_a \
-  --display-name "Support A" \
-  --games game-a
-```
-
-增加 `--read-only` 会收回封禁和撤销会话能力。生产构建使用：
-
-```bash
-node --env-file=.env.production dist/admin-create.js \
-  --operator-id ops_kimi \
-  --display-name Kimi \
-  --full-config
-```
+首管创建 API 在初始化前没有既有账号可用于认证。初始化期间，Internal/Admin origin
+必须只允许受信操作者访问；推荐只监听本机并通过 SSH 隧道访问，或在入口使用 mTLS、
+VPN 和严格访问控制。精确 `Origin` 校验只能阻止浏览器跨站请求，不能阻止能直接访问
+该监听面的客户端伪造请求，绝不能把未初始化的端口暴露到公网或共享网络。
 
 ### 权限模型
 
-CLI 支持以下相互独立的全局能力：
+首个管理员固定拥有以下相互独立的全局能力：
 
-- `--manage-games`：创建/编辑游戏、目录设置和区服。
-- `--manage-integrations`：查看和编辑微信及运行参数。
-- `--rotate-secrets`：替换或轮换 Secret；还必须具备对应资源管理权限。
-- `--manage-machine-identities`：查看、创建和编辑 Service/机器 Admin 身份与范围。
-- `--full-config`：同时授予以上四项能力。
+- 游戏管理：创建/编辑游戏、目录设置和区服。
+- 接入管理：查看和编辑微信及运行参数。
+- Secret 轮换：替换或轮换 Secret；还必须具备对应资源管理权限。
+- 机器身份管理：查看、创建和编辑 Service/机器 Admin 身份与范围。
+
+以上四项合称 `full-config`，首管创建请求不能选择或修改它们。
 
 `admin_game_access` 的一行只授予对应游戏的账号查看权限；
 `can_operate_accounts=1` 才允许封禁或撤销该游戏账号会话。全局配置权限不会自动扩大
@@ -190,7 +183,8 @@ Cookie 名称，不能把降级方式带入生产。
 
 ## Schema 升级
 
-动态配置使用 schema v3。升级现有开发库直接执行：
+动态配置主体使用 schema v3，首管一次性引导锁存器由 schema v4 提供；当前服务要求
+schema v4。升级现有开发库直接执行：
 
 ```bash
 npm run migrate

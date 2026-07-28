@@ -24,8 +24,6 @@
     "check:contract-breaking": "tsx scripts/check-contract-breaking.ts",
     "migrate": "tsx --env-file=.env src/migrate.ts",
     "migrate:prod": "node --env-file=.env dist/migrate.js",
-    "admin:create": "tsx --env-file=.env src/admin-create.ts",
-    "admin:create:prod": "node --env-file=.env dist/admin-create.js",
     "mysql:docker:up": "docker compose up -d --wait mysql",
     "mysql:docker:down": "docker compose --profile smoke down",
     "mysql:docker:clean": "docker compose --profile smoke down --volumes",

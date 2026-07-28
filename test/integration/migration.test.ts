@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import mysql, { type RowDataPacket } from "mysql2/promise";
+import { AdminAuthService } from "../../src/domain/admin/auth.js";
+import { GameManageKitError } from "../../src/errors.js";
 import { Database } from "../../src/infra/mysql/database.js";
 import { runMigrations } from "../../src/migrate.js";
 
@@ -26,7 +28,7 @@ function hasMysqlErrno(expected: number): (error: unknown) => boolean {
   );
 }
 
-test("v3 迁移建立动态配置、权限、摘要与审计边界", async () => {
+test("v4 迁移建立动态配置、安全边界与单调管理员引导锁存器", async () => {
   const adminUrl = process.env.GAME_MANAGE_KIT_TEST_MYSQL_ADMIN_URL
     ?? "mysql://root@127.0.0.1:3316/mysql";
   const databaseName = `game_manage_kit_migration_${process.pid}_${Date.now()}`;
@@ -102,6 +104,7 @@ test("v3 迁移建立动态配置、权限、摘要与审计边界", async () =>
           [1, "0001_initial.sql"],
           [2, "0002_game_servers.sql"],
           [3, "0003_admin_managed_config.sql"],
+          [4, "0004_admin_bootstrap.sql"],
         ],
       );
 
@@ -117,6 +120,7 @@ test("v3 迁移建立动态配置、权限、摘要与审计边界", async () =>
         "admin_secret_operations",
         "admin_secret_audit",
         "admin_machine_identity_audit",
+        "admin_bootstrap_latch",
       ]) {
         assert.equal(tableNames.has(table), true, `${table} 未创建`);
       }
@@ -255,6 +259,17 @@ test("v3 迁移建立动态配置、权限、摘要与审计边界", async () =>
         canRotateSecrets: 0,
         canManageMachineIdentities: 0,
       });
+      const [bootstrapLatch] = await connection.query<RowDataPacket[]>(
+        `SELECT initialized, initialized_by, initialized_at
+           FROM admin_bootstrap_latch
+          WHERE latch_id = 1`,
+      );
+      assert.equal(Number(bootstrapLatch[0]?.initialized), 1);
+      assert.equal(
+        String(bootstrapLatch[0]?.initialized_by),
+        "ops_before_upgrade",
+      );
+      assert.ok(bootstrapLatch[0]?.initialized_at);
 
       const appSecret = randomBytes(24).toString("base64url");
       await connection.query(
@@ -355,8 +370,8 @@ test("v3 迁移建立动态配置、权限、摘要与审计边界", async () =>
 
       const database = new Database(mysqlUrl, 2);
       try {
-        assert.equal(await database.ready(3), true);
-        assert.equal(await database.ready(4), false);
+        assert.equal(await database.ready(4), true);
+        assert.equal(await database.ready(5), false);
       } finally {
         await database.close();
       }
@@ -365,6 +380,139 @@ test("v3 迁移建立动态配置、权限、摘要与审计边界", async () =>
     }
   } finally {
     await rm(initialMigrations, { recursive: true, force: true });
+    await admin.query(`DROP DATABASE IF EXISTS \`${databaseName}\``);
+    await admin.end();
+  }
+});
+
+test("并发首管创建仅一个成功且删除管理员不会重新开放引导", async () => {
+  const adminUrl = process.env.GAME_MANAGE_KIT_TEST_MYSQL_ADMIN_URL
+    ?? "mysql://root@127.0.0.1:3316/mysql";
+  const databaseName =
+    `game_manage_kit_bootstrap_${process.pid}_${Date.now()}`;
+  assert.match(databaseName, /^[a-z0-9_]+$/u);
+
+  const admin = await mysql.createConnection(adminUrl);
+  const mysqlUrl = databaseUrl(adminUrl, databaseName);
+  let database: Database | undefined;
+  try {
+    await admin.query(
+      `CREATE DATABASE \`${databaseName}\`
+       CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci`,
+    );
+    await runMigrations(mysqlUrl);
+    database = new Database(mysqlUrl, 4);
+
+    const [initialLatch] = await database.pool.query<RowDataPacket[]>(
+      `SELECT initialized, initialized_by, initialized_at
+         FROM admin_bootstrap_latch
+        WHERE latch_id = 1`,
+    );
+    assert.deepEqual({
+      initialized: Number(initialLatch[0]?.initialized),
+      initializedBy: initialLatch[0]?.initialized_by,
+      initializedAt: initialLatch[0]?.initialized_at,
+    }, {
+      initialized: 0,
+      initializedBy: null,
+      initializedAt: null,
+    });
+
+    let hashArrivals = 0;
+    let releaseHashes: (() => void) | undefined;
+    const bothHashing = new Promise<void>((resolve) => {
+      releaseHashes = resolve;
+    });
+    const hashPassword = (value: string) => async (password: string) => {
+      assert.equal(password, "correct horse battery");
+      hashArrivals += 1;
+      if (hashArrivals === 2) {
+        releaseHashes?.();
+      }
+      await bothHashing;
+      return value;
+    };
+    const first = new AdminAuthService(database, {
+      randomBytes: () => Buffer.alloc(32, 0x31),
+      hashPassword: hashPassword("first-test-hash"),
+    });
+    const second = new AdminAuthService(database, {
+      randomBytes: () => Buffer.alloc(32, 0x32),
+      hashPassword: hashPassword("second-test-hash"),
+    });
+
+    const results = await Promise.allSettled([
+      first.bootstrap({
+        operatorId: "ops_first",
+        displayName: "First",
+        password: "correct horse battery",
+        ip: "192.0.2.10",
+      }),
+      second.bootstrap({
+        operatorId: "ops_second",
+        displayName: "Second",
+        password: "correct horse battery",
+        ip: "192.0.2.11",
+      }),
+    ]);
+    assert.equal(hashArrivals, 2);
+    assert.equal(
+      results.filter((result) => result.status === "fulfilled").length,
+      1,
+    );
+    const rejected = results.find((result) => result.status === "rejected");
+    assert.ok(rejected);
+    assert.equal(rejected.reason instanceof GameManageKitError, true);
+    assert.equal(
+      (rejected.reason as GameManageKitError).code,
+      "ADMIN_ALREADY_INITIALIZED",
+    );
+
+    const [state] = await database.pool.query<RowDataPacket[]>(
+      `SELECT
+         (SELECT COUNT(*) FROM admin_operators) AS operator_count,
+         (SELECT COUNT(*) FROM admin_sessions) AS session_count,
+         (SELECT COUNT(*) FROM admin_auth_audit
+           WHERE event = 'operator_created'
+             AND reason = 'web_bootstrap') AS audit_count,
+         l.initialized, l.initialized_by
+       FROM admin_bootstrap_latch AS l
+       WHERE l.latch_id = 1`,
+    );
+    assert.deepEqual({
+      operatorCount: Number(state[0]?.operator_count),
+      sessionCount: Number(state[0]?.session_count),
+      auditCount: Number(state[0]?.audit_count),
+      initialized: Number(state[0]?.initialized),
+      initializedBy: String(state[0]?.initialized_by),
+    }, {
+      operatorCount: 1,
+      sessionCount: 1,
+      auditCount: 1,
+      initialized: 1,
+      initializedBy:
+        results[0]?.status === "fulfilled" ? "ops_first" : "ops_second",
+    });
+
+    await database.pool.query("DELETE FROM admin_operators");
+    assert.equal(await first.bootstrapRequired(), false);
+    const hashCallsBeforeRetry = hashArrivals;
+    await assert.rejects(
+      first.bootstrap({
+        operatorId: "ops_reopened",
+        displayName: "Reopened",
+        password: "correct horse battery",
+        ip: "192.0.2.12",
+      }),
+      (error) => (
+        error instanceof GameManageKitError
+        && error.statusCode === 409
+        && error.code === "ADMIN_ALREADY_INITIALIZED"
+      ),
+    );
+    assert.equal(hashArrivals, hashCallsBeforeRetry);
+  } finally {
+    await database?.close();
     await admin.query(`DROP DATABASE IF EXISTS \`${databaseName}\``);
     await admin.end();
   }

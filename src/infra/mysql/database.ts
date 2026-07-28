@@ -12,6 +12,7 @@ const REQUIRED_SCHEMA_TABLES = Object.freeze([
   "machine_identities",
   "machine_identity_games",
   "machine_secret_versions",
+  "admin_bootstrap_latch",
   "admin_operators",
   "admin_game_access",
   "admin_game_audit",

@@ -77,13 +77,19 @@ async function readRequestBody(request) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function createAdminFixtureServer() {
+async function createAdminFixtureServer({
+  bootstrapRequired = false,
+  bootstrapResponse = "success",
+  emptyGames = false,
+} = {}) {
   let authenticated = false;
+  let requiresBootstrap = bootstrapRequired;
   let elevatedUntil = null;
   let nextOperationGate = null;
   let nextServerListGate = null;
   let nextServerConflict = false;
   const errors = [];
+  const bootstrapMutations = [];
   const operations = [];
   const gameMutations = [];
   const serverMutations = [];
@@ -91,7 +97,7 @@ async function createAdminFixtureServer() {
   const machineIdentityMutations = [];
   const machineOperationStatuses = new Map();
   let directoryRevision = 3;
-  const gameProjects = [
+  const gameProjects = emptyGames ? [] : [
     {
       gameId: "game-a",
       name: "游戏 A",
@@ -180,6 +186,53 @@ async function createAdminFixtureServer() {
 
       if (
         request.method === "GET"
+        && url.pathname === "/v1/admin/bootstrap"
+      ) {
+        json(reply, 200, { required: requiresBootstrap });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && url.pathname === "/v1/admin/bootstrap"
+      ) {
+        const body = JSON.parse(await readRequestBody(request));
+        bootstrapMutations.push(body);
+        if (!requiresBootstrap) {
+          json(reply, 409, {
+            code: "ADMIN_ALREADY_INITIALIZED",
+            message: "bootstrap already completed",
+          });
+          return;
+        }
+        requiresBootstrap = false;
+        if (bootstrapResponse === "conflict") {
+          json(reply, 409, {
+            code: "ADMIN_ALREADY_INITIALIZED",
+            message: "bootstrap completed concurrently",
+          });
+          return;
+        }
+        if (bootstrapResponse === "server-error") {
+          json(reply, 503, {
+            code: "INTERNAL",
+            message: "bootstrap result unknown",
+          });
+          return;
+        }
+        authenticated = true;
+        reply.writeHead(204, {
+          "cache-control": "no-store",
+          "set-cookie":
+            "gmk_admin_session=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA; "
+            + "Path=/; HttpOnly; SameSite=Strict",
+        });
+        reply.end();
+        return;
+      }
+
+      if (
+        request.method === "GET"
         && url.pathname === "/v1/admin/auth/session"
       ) {
         if (!authenticated) {
@@ -194,7 +247,7 @@ async function createAdminFixtureServer() {
             operatorId: "ops_kimi",
             displayName: "Kimi",
           },
-          games: [
+          games: emptyGames ? [] : [
             {
               gameId: "game-a",
               name: "游戏 A",
@@ -819,6 +872,7 @@ async function createAdminFixtureServer() {
   assert.ok(address);
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
+    bootstrapMutations,
     delayNextOperation() {
       if (nextOperationGate) {
         throw new Error("已有待延迟的管理员操作");
@@ -866,9 +920,10 @@ async function createAdminFixtureServer() {
     machineIdentityMutations,
     operations,
     serverMutations,
-    close: () => new Promise((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    }),
+    close: async () => {
+      server.close();
+      server.closeAllConnections();
+    },
   };
 }
 
@@ -991,6 +1046,315 @@ async function focusAndType(client, selector, value) {
   );
   await client.send("Input.insertText", { text: value });
 }
+
+async function launchAdminPage(t, executable, baseUrl, {
+  height = 900,
+  width = 1024,
+} = {}) {
+  const profileDirectory = await mkdtemp(join(tmpdir(), "gmk-admin-chrome-"));
+  let chrome = null;
+  let client = null;
+  t.after(async () => {
+    client?.close();
+    if (chrome?.exitCode === null) {
+      chrome.kill("SIGKILL");
+    }
+    await rm(profileDirectory, { force: true, recursive: true });
+  });
+  chrome = spawn(executable, [
+    "--headless=new",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--disable-default-apps",
+    "--disable-extensions",
+    "--disable-features=Translate",
+    "--disable-gpu",
+    "--no-default-browser-check",
+    "--no-first-run",
+    "--no-sandbox",
+    "--remote-debugging-port=0",
+    `--user-data-dir=${profileDirectory}`,
+    `--window-size=${width},${height}`,
+    "about:blank",
+  ], {
+    stdio: "ignore",
+  });
+
+  const port = await waitForDevToolsPort(profileDirectory, chrome);
+  const targetResponse = await fetch(
+    `http://127.0.0.1:${port}/json/new?`
+      + encodeURIComponent(`${baseUrl}/admin/`),
+    { method: "PUT" },
+  );
+  assert.equal(targetResponse.ok, true);
+  const target = await targetResponse.json();
+  assert.equal(typeof target.webSocketDebuggerUrl, "string");
+
+  client = new DevToolsClient(target.webSocketDebuggerUrl);
+  await client.open();
+
+  const browserErrors = [];
+  const runtimeErrors = [];
+  client.on("Runtime.exceptionThrown", ({ exceptionDetails }) => {
+    const message =
+      exceptionDetails.exception?.description ?? exceptionDetails.text;
+    runtimeErrors.push(message);
+    browserErrors.push(message);
+  });
+  client.on("Log.entryAdded", ({ entry }) => {
+    if (entry.level === "error") {
+      browserErrors.push(entry.text);
+    }
+  });
+  await Promise.all([
+    client.send("Page.enable"),
+    client.send("Runtime.enable"),
+    client.send("Log.enable"),
+  ]);
+  return { browserErrors, client, runtimeErrors };
+}
+
+test("真实 Chrome 在零管理员时完成可访问的首次创建并清理密码", {
+  timeout: 30_000,
+}, async (t) => {
+  const executable = chromePath();
+  if (!executable) {
+    t.skip("未找到 Chrome/Chromium；可通过 GMK_CHROME_PATH 指定");
+    return;
+  }
+
+  const fixture = await createAdminFixtureServer({
+    bootstrapRequired: true,
+    emptyGames: true,
+  });
+  const conflictFixture = await createAdminFixtureServer({
+    bootstrapRequired: true,
+    bootstrapResponse: "conflict",
+    emptyGames: true,
+  });
+  const unknownFixture = await createAdminFixtureServer({
+    bootstrapRequired: true,
+    bootstrapResponse: "server-error",
+    emptyGames: true,
+  });
+  t.after(fixture.close);
+  t.after(conflictFixture.close);
+  t.after(unknownFixture.close);
+  const { browserErrors, client, runtimeErrors } = await launchAdminPage(
+    t,
+    executable,
+    fixture.baseUrl,
+  );
+
+  await waitFor(
+    client,
+    "!document.querySelector('#bootstrap-view').hidden",
+    "显示管理员创建页",
+  );
+  // Restoring an anonymous session intentionally receives 401.
+  browserErrors.length = 0;
+  assert.equal(
+    await evaluate(client, "document.activeElement.id"),
+    "bootstrap-title",
+  );
+
+  await client.send("Emulation.setDeviceMetricsOverride", {
+    deviceScaleFactor: 1,
+    height: 844,
+    mobile: false,
+    width: 375,
+  });
+  assert.equal(
+    await evaluate(
+      client,
+      "document.documentElement.scrollWidth <= window.innerWidth",
+    ),
+    true,
+  );
+
+  await pressKey(client, "Tab");
+  assert.equal(
+    await evaluate(client, "document.activeElement.id"),
+    "bootstrap-operator-id",
+  );
+  await client.send("Input.insertText", { text: "ops_kimi" });
+  await pressKey(client, "Tab");
+  assert.equal(
+    await evaluate(client, "document.activeElement.id"),
+    "bootstrap-display-name",
+  );
+  await client.send("Input.insertText", { text: "Kimi" });
+  await pressKey(client, "Tab");
+  assert.equal(
+    await evaluate(client, "document.activeElement.id"),
+    "bootstrap-password",
+  );
+  await client.send("Input.insertText", { text: "correct horse battery" });
+  await focusAndType(
+    client,
+    "#bootstrap-password-confirm",
+    "different password",
+  );
+  await evaluate(client, "document.querySelector('#bootstrap-submit').focus()");
+  await pressKey(client, "Enter");
+  assert.equal(fixture.bootstrapMutations.length, 0);
+  assert.equal(
+    await evaluate(
+      client,
+      "document.querySelector('#bootstrap-password-confirm').validationMessage",
+    ),
+    "两次输入的密码不一致。",
+  );
+
+  await evaluate(client, `(() => {
+    const input = document.querySelector("#bootstrap-password-confirm");
+    input.value = "";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  })()`);
+  await focusAndType(
+    client,
+    "#bootstrap-password-confirm",
+    "correct horse battery",
+  );
+  await evaluate(client, "document.querySelector('#bootstrap-submit').focus()");
+  await pressKey(client, "Enter");
+  await waitFor(
+    client,
+    "!document.querySelector('#games-view').hidden",
+    "创建后进入游戏项目页",
+  );
+
+  assert.deepEqual(fixture.bootstrapMutations, [{
+    operatorId: "ops_kimi",
+    displayName: "Kimi",
+    password: "correct horse battery",
+  }]);
+  assert.deepEqual(
+    await evaluate(client, `({
+      bootstrapHashClean: !location.hash.includes("correct horse battery"),
+      confirmType:
+        document.querySelector("#bootstrap-password-confirm").type,
+      confirmValue:
+        document.querySelector("#bootstrap-password-confirm").value,
+      liveRegionClean: ![...document.querySelectorAll("[aria-live]")]
+        .some((node) => node.textContent.includes("correct horse battery")),
+      passwordType: document.querySelector("#bootstrap-password").type,
+      passwordValue: document.querySelector("#bootstrap-password").value,
+      storageClean:
+        !Object.values(localStorage).includes("correct horse battery")
+        && !Object.values(sessionStorage).includes("correct horse battery"),
+      toastClean:
+        !document.querySelector("#toast-region").textContent
+          .includes("correct horse battery"),
+    })`),
+    {
+      bootstrapHashClean: true,
+      confirmType: "password",
+      confirmValue: "",
+      liveRegionClean: true,
+      passwordType: "password",
+      passwordValue: "",
+      storageClean: true,
+      toastClean: true,
+    },
+  );
+  assert.deepEqual(browserErrors, []);
+
+  await client.send("Page.navigate", {
+    url: `${conflictFixture.baseUrl}/admin/`,
+  });
+  await waitFor(
+    client,
+    "!document.querySelector('#bootstrap-view').hidden",
+    "竞争初始化前显示管理员创建页",
+  );
+  browserErrors.length = 0;
+  await evaluate(client, `(() => {
+    const values = new Map([
+      ["#bootstrap-operator-id", "ops_loser"],
+      ["#bootstrap-display-name", "Loser"],
+      ["#bootstrap-password", "correct horse battery"],
+      ["#bootstrap-password-confirm", "correct horse battery"],
+    ]);
+    for (const [selector, value] of values) {
+      const input = document.querySelector(selector);
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    document.querySelector("#bootstrap-form").requestSubmit();
+  })()`);
+  await waitFor(
+    client,
+    "!document.querySelector('#login-view').hidden",
+    "竞争失败后重新检查并进入登录页",
+  );
+  assert.deepEqual(conflictFixture.bootstrapMutations, [{
+    operatorId: "ops_loser",
+    displayName: "Loser",
+    password: "correct horse battery",
+  }]);
+  assert.deepEqual(
+    await evaluate(client, `({
+      loginOperator: document.querySelector("#operator-id").value,
+      password: document.querySelector("#bootstrap-password").value,
+      passwordConfirm:
+        document.querySelector("#bootstrap-password-confirm").value,
+    })`),
+    {
+      loginOperator: "",
+      password: "",
+      passwordConfirm: "",
+    },
+  );
+
+  await client.send("Page.navigate", {
+    url: `${unknownFixture.baseUrl}/admin/`,
+  });
+  await waitFor(
+    client,
+    "!document.querySelector('#bootstrap-view').hidden",
+    "未知创建结果前显示管理员创建页",
+  );
+  browserErrors.length = 0;
+  await evaluate(client, `(() => {
+    const values = new Map([
+      ["#bootstrap-operator-id", "ops_uncertain"],
+      ["#bootstrap-display-name", "Uncertain"],
+      ["#bootstrap-password", "correct horse battery"],
+      ["#bootstrap-password-confirm", "correct horse battery"],
+    ]);
+    for (const [selector, value] of values) {
+      const input = document.querySelector(selector);
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    document.querySelector("#bootstrap-form").requestSubmit();
+  })()`);
+  await waitFor(
+    client,
+    "!document.querySelector('#login-view').hidden",
+    "未知结果后重新检查并进入登录页",
+  );
+  assert.deepEqual(unknownFixture.bootstrapMutations, [{
+    operatorId: "ops_uncertain",
+    displayName: "Uncertain",
+    password: "correct horse battery",
+  }]);
+  assert.deepEqual(
+    await evaluate(client, `({
+      loginOperator: document.querySelector("#operator-id").value,
+      password: document.querySelector("#bootstrap-password").value,
+      passwordConfirm:
+        document.querySelector("#bootstrap-password-confirm").value,
+    })`),
+    {
+      loginOperator: "ops_uncertain",
+      password: "",
+      passwordConfirm: "",
+    },
+  );
+  assert.deepEqual(runtimeErrors, []);
+});
 
 test("真实 Chrome 可用键盘完成管理员登录、查询和确认操作", {
   timeout: 30_000,

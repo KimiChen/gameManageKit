@@ -17,6 +17,8 @@ const TOKEN = Buffer.alloc(32, 0x41).toString("base64url");
 const COOKIE = `gmk_admin_session=${TOKEN}`;
 
 interface Calls {
+  bootstrapRequired: number;
+  bootstrap: number;
   login: number;
   reauthenticate: number;
   authenticate: number;
@@ -37,6 +39,8 @@ async function fixture() {
   });
   const games = createTestRuntimeRegistry();
   const calls: Calls = {
+    bootstrapRequired: 0,
+    bootstrap: 0,
     login: 0,
     reauthenticate: 0,
     authenticate: 0,
@@ -253,6 +257,27 @@ async function fixture() {
       },
     },
     adminAuth: {
+      async bootstrapRequired() {
+        calls.bootstrapRequired += 1;
+        return true;
+      },
+      async bootstrap(input) {
+        assert.deepEqual(input, {
+          operatorId: "ops_bootstrap",
+          displayName: "Bootstrap Admin",
+          password: "correct horse battery",
+          ip: "127.0.0.1",
+        });
+        calls.bootstrap += 1;
+        return {
+          ...identity,
+          operatorId: input.operatorId,
+          displayName: input.displayName,
+          games: [],
+          elevatedUntil: null,
+          sessionToken: TOKEN,
+        };
+      },
       async login() {
         calls.login += 1;
         return { ...identity, sessionToken: TOKEN };
@@ -326,6 +351,70 @@ async function fixture() {
   await Promise.all([apps.publicApp.ready(), apps.internalApp.ready()]);
   return { apps, calls };
 }
+
+test("管理员引导端点检查空状态、校验 Origin 并签发普通会话", async (t) => {
+  const { apps, calls } = await fixture();
+  t.after(async () => {
+    await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);
+  });
+
+  const status = await apps.internalApp.inject({
+    method: "GET",
+    url: "/v1/admin/bootstrap",
+  });
+  assert.equal(status.statusCode, 200, status.body);
+  assert.deepEqual(status.json(), { required: true });
+  assert.equal(status.headers["cache-control"], "no-store");
+  assert.equal(calls.bootstrapRequired, 1);
+
+  const denied = await apps.internalApp.inject({
+    method: "POST",
+    url: "/v1/admin/bootstrap",
+    headers: { origin: "https://evil.example.invalid" },
+    payload: {
+      operatorId: "ops_bootstrap",
+      displayName: "Bootstrap Admin",
+      password: "correct horse battery",
+    },
+  });
+  assert.equal(denied.statusCode, 403, denied.body);
+  assert.equal(denied.json().code, "ORIGIN_FORBIDDEN");
+  assert.equal(calls.bootstrap, 0);
+
+  const invalid = await apps.internalApp.inject({
+    method: "POST",
+    url: "/v1/admin/bootstrap",
+    headers: { origin: ORIGIN },
+    payload: {
+      operatorId: "INVALID",
+      displayName: "Bootstrap Admin",
+      password: "short",
+    },
+  });
+  assert.equal(invalid.statusCode, 400, invalid.body);
+  assert.equal(invalid.json().code, "INVALID_PAYLOAD");
+  assert.equal(calls.bootstrap, 0);
+
+  const created = await apps.internalApp.inject({
+    method: "POST",
+    url: "/v1/admin/bootstrap",
+    headers: { origin: ORIGIN },
+    payload: {
+      operatorId: "ops_bootstrap",
+      displayName: "Bootstrap Admin",
+      password: "correct horse battery",
+    },
+  });
+  assert.equal(created.statusCode, 204, created.body);
+  assert.equal(created.headers["cache-control"], "no-store");
+  const cookies = created.headers["set-cookie"];
+  assert.ok(Array.isArray(cookies));
+  assert.equal(cookies.length, 3);
+  assert.match(cookies[2] ?? "", /^gmk_admin_session=/u);
+  assert.match(cookies[2] ?? "", /HttpOnly/u);
+  assert.match(cookies[2] ?? "", /SameSite=Strict/u);
+  assert.equal(calls.bootstrap, 1);
+});
 
 test("管理员认证端点设置严格 Cookie、实时会话并完成退出", async (t) => {
   const { apps, calls } = await fixture();
@@ -650,6 +739,7 @@ test("机器 Admin Secret 保持可用且 Public 面完全不暴露管理员资�
   for (const url of [
     "/admin/",
     "/admin/app.js",
+    "/v1/admin/bootstrap",
     "/v1/admin/auth/session",
     "/v1/games/game-a/admin/accounts/u_42",
   ]) {

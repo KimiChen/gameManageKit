@@ -76,7 +76,7 @@ OpenAPI、管理员写入校验、运行时 Resolver 和数据库 `CHECK` 约束
 
 - gameManageKit 自己的 MySQL 连接；
 - TLS 私钥或反向代理证书；
-- 首个个人管理员的 CLI 引导流程；
+- 首个个人管理员网页引导期间的 Internal/Admin 访问控制（一次性状态保存在 MySQL）；
 - 监听地址、可信代理、请求和关闭超时等进程参数。
 
 系统配置不包含任何每游戏微信或机器 Secret。
@@ -146,7 +146,18 @@ Service 和机器 Admin Secret 不需要恢复原文。它们由服务端使用 
 
 ### 管理员配置与权限
 
-首个个人管理员通过 CLI 创建，随后在 Internal/Admin `/admin/` 从空状态完成：
+完成 migration 并启动服务后，Internal/Admin `/admin/` 会在尚未完成管理员引导时
+进入首个管理员创建页。操作者自设账号、显示名和密码，服务端固定创建
+`enabled + full-config` 管理员并关闭引导状态。引导状态是单调的一次性状态，多实例
+并发下也只能完成一次；删除或停用全部管理员不会重新开放。管理员全部失效只能通过
+受控数据库恢复流程处理。
+
+由于创建首管前不存在可复用的管理员身份，初始化阶段的 Internal/Admin 监听面必须
+只允许受信操作者访问，例如本机监听配合 SSH 隧道，或部署侧 mTLS、VPN 和严格访问
+控制。`Origin` 校验只承担 CSRF 防护，不能作为首管身份凭据；未初始化监听面不得发布
+到公网或共享网络。
+
+首管创建成功后从空状态完成：
 
 ```text
 创建草稿游戏
@@ -218,8 +229,9 @@ AND game_servers.open_time <= 当前时间
 
 ### Schema 演进
 
-当前动态配置结构由 migration v3 提供，包括 integration、目录 revision、机器身份、
-机器 Secret 版本、管理员配置权限、提升会话和 Secret 审计。
+动态配置主体由 migration v3 提供，包括 integration、目录 revision、机器身份、
+机器 Secret 版本、管理员配置权限、提升会话和 Secret 审计；migration v4 增加单调的
+首管网页引导锁存器。当前服务要求 schema v4。
 
 开发阶段曾直接改写初始 migration，因此执行过不受支持旧结构的本地数据库应删除并
 重建；生产环境不得使用删库升级。受支持数据库按正常发布流程备份后执行：

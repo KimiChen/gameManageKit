@@ -14,6 +14,48 @@ tags:
   - name: Admin
   - name: System
 paths:
+  /v1/admin/bootstrap:
+    get:
+      operationId: getAdminBootstrapStatus
+      tags: [Admin]
+      security: []
+      responses:
+        '200':
+          description: 是否仍需创建首个管理员
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminBootstrapStatus'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    post:
+      operationId: bootstrapAdmin
+      description: 仅在单调引导锁存器尚未完成时创建首个全权限管理员、签发普通会话；必须校验请求 Origin。
+      tags: [Admin]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminBootstrapRequest'
+      responses:
+        '204':
+          description: 首个管理员创建成功；会话仅通过 HttpOnly Cookie 返回
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
   /v1/admin/auth/login:
     post:
       operationId: adminLogin
@@ -1267,6 +1309,7 @@ components:
         - ORIGIN_FORBIDDEN
         - GAME_PROJECT_CONFLICT
         - GAME_SERVER_CONFLICT
+        - ADMIN_ALREADY_INITIALIZED
     ErrorResponse:
       type: object
       additionalProperties: false
@@ -1432,6 +1475,32 @@ components:
           type: string
           minLength: 1
           maxLength: 255
+    AdminBootstrapRequest:
+      type: object
+      additionalProperties: false
+      required: [operatorId, displayName, password]
+      properties:
+        operatorId:
+          type: string
+          minLength: 3
+          maxLength: 64
+          pattern: '^[a-z][a-z0-9_.-]{2,63}$'
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 128
+        password:
+          type: string
+          minLength: 12
+          maxLength: 256
+          writeOnly: true
+    AdminBootstrapStatus:
+      type: object
+      additionalProperties: false
+      required: [required]
+      properties:
+        required:
+          type: boolean
     AdminLoginRequest:
       type: object
       additionalProperties: false

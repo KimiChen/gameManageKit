@@ -29,25 +29,28 @@ mysql --protocol=tcp -h 127.0.0.1 -P 3306 -u root \
   -e 'CREATE DATABASE IF NOT EXISTS game_manage_kit CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci'
 
 npm run migrate
-npm run admin:create -- \
-  --operator-id ops_kimi \
-  --display-name Kimi \
-  --full-config
 npm run dev
 ```
 
-创建命令使用系统加密随机源生成初始密码，只在成功后显示一次。请立即存入受控密码
-管理器，不要写入 Shell history、环境变量、配置文件或 Git。`--full-config` 授予游戏、
-接入参数、Secret 和机器身份管理能力；首个管理员可以在尚无游戏时创建。更细的权限和
-逐游戏账号访问方式见[管理员控制台运维指南](docs/admin-console.md)。
+服务启动后打开 Internal/Admin origin 的 `/admin/`。系统尚未创建过管理员时，页面
+会进入首个管理员创建流程；操作者设置个人账号、显示名和密码，服务端固定授予
+`full-config` 权限并建立管理员会话。这个引导开关只允许完成一次：即使之后从数据库
+删除或停用全部管理员，也不会自动重新开放。
 
-管理员网页位于 Internal/Admin origin 的 `/admin/`。从空库开始的配置顺序是：
+首次初始化没有可复用的管理员凭据，因此初始化期间必须确保 Internal/Admin origin
+只有受信操作者可达，例如只监听本机并通过 SSH 隧道访问，或在反向代理前使用
+mTLS、VPN 与访问控制。`Origin` 校验是 CSRF 防护，不是首个操作者的身份证明，不能
+把尚未初始化的 Internal/Admin 端口直接发布到公网或共享网络。完整要求见
+[管理员控制台运维指南](docs/admin-console.md)。
 
-1. 创建草稿游戏项目。
-2. 配置目录设置和全部区服；没有区服也是合法状态。
-3. 在独立“接入配置”页面保存微信 AppID、调用参数和 AppSecret。
-4. 创建 Service 或机器 Admin 身份，安全保存只显示一次的 Secret。
-5. 游戏变为 `configured` 后，再按需要切换为 `enabled` 并允许客户端发现。
+从空库开始的配置顺序是：
+
+1. 在 `/admin/` 创建首个管理员并登录。
+2. 创建草稿游戏项目。
+3. 配置目录设置和全部区服；没有区服也是合法状态。
+4. 在独立“接入配置”页面保存微信 AppID、调用参数和 AppSecret。
+5. 创建 Service 或机器 Admin 身份，安全保存只显示一次的 Secret。
+6. 游戏变为 `configured` 后，再按需要切换为 `enabled` 并允许客户端发现。
 
 完整流程见[游戏接入指南](docs/game-onboarding.md)。
 
@@ -63,7 +66,7 @@ npm run dev
 在 `NODE_ENV=development` 或 `test` 时显式设为 `1`；生产即使请求 dev-login 路径也
 固定返回 404。
 
-`npm run dev`、migration、管理员创建和集成测试都会读取仓库根目录的 `.env`。
+`npm run dev`、migration 和集成测试都会读取仓库根目录的 `.env`。
 本地 MySQL root 有密码时，请同步修改连接 URL。默认监听为 Public
 `127.0.0.1:2570`、Internal/Admin `127.0.0.1:2571`。容器 bridge 网络应将两个 host
 设置为 `0.0.0.0`，但只向受信网络发布 Internal/Admin 端口。
@@ -135,15 +138,16 @@ npm run test:int
 Docker 可用时，可以构建生产镜像并执行动态配置冒烟测试：
 
 ```bash
+npm run mysql:docker:clean
 npm run test:docker
 npm run mysql:docker:down
 ```
 
-冒烟测试先在空或已有 schema 中创建一次性的引导管理员，然后只通过管理员 API 创建
+冒烟测试必须使用尚未完成管理员引导的新数据库。它先通过
+`GET/POST /v1/admin/bootstrap` 创建一次性首管并取得会话，再只通过管理员 API 创建
 两个游戏、区服、微信接入和机器身份。它验证租户账号隔离、Service 越权拒绝、机器
-Admin 范围、Secret 摘要和无停机轮换。测试不依赖静态游戏文件或每游戏环境变量；每次
-使用唯一 fixture，命名卷会保留数据，需要彻底清理时运行
-`npm run mysql:docker:clean`。
+Admin 范围、Secret 摘要和无停机轮换。测试不依赖静态游戏文件或每游戏环境变量；
+命名卷会保留引导完成状态，再次测试前必须运行 `npm run mysql:docker:clean`。
 
 ## 生产部署
 

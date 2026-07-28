@@ -7,19 +7,21 @@ Secret 环境变量。管理员保存后通过 revision 自动热更新，不需
 
 ## 0. 准备管理员
 
-先完成 migration，并创建具备全量配置能力的个人管理员：
+先完成 migration 并启动服务：
 
 ```bash
 npm run migrate
-npm run admin:create -- \
-  --operator-id ops_kimi \
-  --display-name Kimi \
-  --full-config
+npm run dev
 ```
 
-初始密码只显示一次。登录 Internal/Admin origin 的 `/admin/` 后，从“游戏项目”和
-“接入配置”完成以下步骤。Secret 写入与机器身份范围修改会要求再次输入当前管理员密码，
-提升会话约 5 分钟。
+打开 Internal/Admin origin 的 `/admin/`。系统从未完成管理员引导时，页面会进入
+首个管理员创建流程；操作者设置个人账号、显示名和密码，服务端固定授予
+`full-config` 权限。引导只允许成功一次，删除或停用管理员不会使它重新开放。
+
+初始化期间必须保证 Internal/Admin 监听面只有受信操作者可达，例如通过本机监听与
+SSH 隧道，或受控的 mTLS/VPN 入口访问；不能把未初始化端口发布到公网或共享网络。
+创建并登录后，从“游戏项目”和“接入配置”完成以下步骤。Secret 写入与机器身份范围
+修改会要求再次输入当前管理员密码，提升会话约 5 分钟。
 
 ## 1. 创建草稿游戏
 

@@ -132,6 +132,17 @@ function assertNoSensitiveFields(payload, label) {
   }
 }
 
+export function normalizeBootstrapStatus(payload) {
+  if (
+    !isRecord(payload)
+    || Object.keys(payload).length !== 1
+    || typeof payload.required !== "boolean"
+  ) {
+    throw new InvalidApiPayloadError("管理员初始化状态响应无效");
+  }
+  return Object.freeze({ required: payload.required });
+}
+
 export function normalizeSession(payload) {
   if (!isRecord(payload) || !isRecord(payload.operator)) {
     throw new InvalidApiPayloadError("管理员会话响应无效");
@@ -1013,6 +1024,24 @@ export function isValidUserId(value) {
   return typeof value === "string" && USER_ID_PATTERN.test(value.trim());
 }
 
+function hasUnpairedSurrogate(value) {
+  return [...value].some((character) => (
+    character.length === 1
+    && character.charCodeAt(0) >= 0xd800
+    && character.charCodeAt(0) <= 0xdfff
+  ));
+}
+
+export function isValidAdminDisplayNameInput(value) {
+  return (
+    typeof value === "string"
+    && value.trim() === value
+    && [...value].length >= 1
+    && [...value].length <= 128
+    && !hasUnpairedSurrogate(value)
+  );
+}
+
 export function isValidAdminPasswordInput(value) {
   if (typeof value !== "string") {
     return false;
@@ -1022,11 +1051,7 @@ export function isValidAdminPasswordInput(value) {
     codePoints.length >= 12
     && codePoints.length <= 256
     && new TextEncoder().encode(value).length <= 1_024
-    && !codePoints.some((character) => (
-      character.length === 1
-      && character.charCodeAt(0) >= 0xd800
-      && character.charCodeAt(0) <= 0xdfff
-    ))
+    && !hasUnpairedSurrogate(value)
   );
 }
 
@@ -1276,6 +1301,17 @@ export function createAdminApi(fetchImpl = globalThis.fetch, {
   }
 
   return Object.freeze({
+    async bootstrapStatus() {
+      return normalizeBootstrapStatus(
+        await request("/v1/admin/bootstrap"),
+      );
+    },
+    async createBootstrapAdmin(input) {
+      await request("/v1/admin/bootstrap", {
+        method: "POST",
+        body: input,
+      });
+    },
     async login(operatorId, password) {
       await request("/v1/admin/auth/login", {
         method: "POST",
@@ -1468,6 +1504,9 @@ export function describeApiError(error, context) {
   if (error.status === 403) {
     return `当前管理员没有执行此操作的权限。${suffix}`;
   }
+  if (error.status === 400 && context === "bootstrap") {
+    return `管理员信息无效，请检查后重试。${suffix}`;
+  }
   if (
     error.status === 400
     && typeof context === "string"
@@ -1496,6 +1535,9 @@ export function describeApiError(error, context) {
     return `这个游戏或区服已不存在，请关闭窗口后重新加载。${suffix}`;
   }
   if (error.status === 409) {
+    if (context === "bootstrap") {
+      return `管理员初始化已经完成，请使用管理员账号登录。${suffix}`;
+    }
     if (context === "game-create") {
       return `游戏 ID 已存在，请使用另一个 ID。${suffix}`;
     }
@@ -1714,6 +1756,34 @@ export function bootstrapAdminConsole({
     bootSpinner: requiredElement(document, "boot-spinner"),
     bootMessage: requiredElement(document, "boot-message"),
     bootRetry: requiredElement(document, "boot-retry"),
+    bootstrapForm: requiredElement(document, "bootstrap-form"),
+    bootstrapOperatorId: requiredElement(
+      document,
+      "bootstrap-operator-id",
+    ),
+    bootstrapDisplayName: requiredElement(
+      document,
+      "bootstrap-display-name",
+    ),
+    bootstrapPassword: requiredElement(document, "bootstrap-password"),
+    bootstrapPasswordToggle: requiredElement(
+      document,
+      "bootstrap-password-toggle",
+    ),
+    bootstrapPasswordConfirm: requiredElement(
+      document,
+      "bootstrap-password-confirm",
+    ),
+    bootstrapPasswordConfirmToggle: requiredElement(
+      document,
+      "bootstrap-password-confirm-toggle",
+    ),
+    bootstrapError: requiredElement(document, "bootstrap-error"),
+    bootstrapErrorMessage: requiredElement(
+      document,
+      "bootstrap-error-message",
+    ),
+    bootstrapSubmit: requiredElement(document, "bootstrap-submit"),
     loginForm: requiredElement(document, "login-form"),
     operatorId: requiredElement(document, "operator-id"),
     password: requiredElement(document, "operator-password"),
@@ -2121,6 +2191,8 @@ export function bootstrapAdminConsole({
 
   const state = {
     session: null,
+    bootstrapRequired: null,
+    bootstrapSubmitting: false,
     selectedGameId: null,
     account: null,
     accountRequestVersion: 0,
@@ -2194,7 +2266,9 @@ export function bootstrapAdminConsole({
     for (const [viewName, view] of elements.views) {
       view.hidden = viewName !== name;
     }
-    if (name === "login") {
+    if (name === "bootstrap") {
+      replaceHash("#bootstrap");
+    } else if (name === "login") {
       replaceHash("#login");
     } else if (name === "accounts" || name === "no-access") {
       replaceHash("#accounts");
@@ -2208,7 +2282,11 @@ export function bootstrapAdminConsole({
         name !== "accounts" || (state.session?.games.length ?? 0) === 0;
     }
     if (focus) {
-      elements.views.get(name)?.querySelector("h1")?.focus();
+      const view = elements.views.get(name);
+      (
+        view?.querySelector('h1[tabindex="-1"]')
+        ?? view?.querySelector("h1")
+      )?.focus();
     }
   }
 
@@ -2223,6 +2301,60 @@ export function bootstrapAdminConsole({
   function hideLoginError() {
     elements.loginError.hidden = true;
     elements.loginErrorMessage.textContent = "";
+  }
+
+  function showBootstrapError(message) {
+    elements.bootstrapErrorMessage.textContent = message;
+    elements.bootstrapError.hidden = false;
+    elements.bootstrapError.focus();
+  }
+
+  function hideBootstrapError() {
+    elements.bootstrapError.hidden = true;
+    elements.bootstrapErrorMessage.textContent = "";
+  }
+
+  function clearBootstrapPasswords() {
+    for (const [input, toggle] of [
+      [elements.bootstrapPassword, elements.bootstrapPasswordToggle],
+      [
+        elements.bootstrapPasswordConfirm,
+        elements.bootstrapPasswordConfirmToggle,
+      ],
+    ]) {
+      input.value = "";
+      input.setCustomValidity("");
+      resetPasswordControl(input, toggle);
+    }
+  }
+
+  function setBootstrapBusy(busy) {
+    state.bootstrapSubmitting = busy;
+    elements.bootstrapForm.setAttribute("aria-busy", String(busy));
+    for (const control of [
+      elements.bootstrapOperatorId,
+      elements.bootstrapDisplayName,
+      elements.bootstrapPassword,
+      elements.bootstrapPasswordToggle,
+      elements.bootstrapPasswordConfirm,
+      elements.bootstrapPasswordConfirmToggle,
+    ]) {
+      control.disabled = busy;
+    }
+    setButtonBusy(elements.bootstrapSubmit, busy, {
+      idleLabel: "创建并进入控制台",
+      busyLabel: "正在创建…",
+    });
+  }
+
+  function showBootFailure(message) {
+    state.bootstrapRequired = null;
+    clearBootstrapPasswords();
+    showView("boot", { focus: false });
+    elements.bootSpinner.hidden = true;
+    elements.bootMessage.textContent = message;
+    elements.bootRetry.hidden = false;
+    elements.views.get("boot")?.querySelector("h1")?.focus();
   }
 
   function clearExpiryTimer() {
@@ -2346,6 +2478,7 @@ export function bootstrapAdminConsole({
   }
 
   function clearSensitiveState() {
+    clearBootstrapPasswords();
     clearWechatSecretInput();
     closeWechatSecretDialog();
     closeReauthenticationDialog();
@@ -2946,6 +3079,7 @@ export function bootstrapAdminConsole({
     state.pendingOperation = null;
     state.retryOperation = null;
     state.operationSubmitting = false;
+    setBootstrapBusy(false);
     state.managedGames = [];
     state.managedGamesLoaded = false;
     state.gameFormMode = null;
@@ -3000,8 +3134,18 @@ export function bootstrapAdminConsole({
     clearAccount();
   }
 
+  function enterBootstrap() {
+    clearAuthenticatedState();
+    state.bootstrapRequired = true;
+    hideLoginError();
+    hideBootstrapError();
+    showView("bootstrap");
+  }
+
   function becomeAnonymous(message = "") {
     clearAuthenticatedState();
+    state.bootstrapRequired = false;
+    hideBootstrapError();
     elements.password.value = "";
     resetPasswordControl(elements.password, elements.passwordToggle);
     if (message) {
@@ -5086,6 +5230,7 @@ export function bootstrapAdminConsole({
     const previousGameId = state.selectedGameId;
     state.authGeneration += 1;
     state.session = session;
+    state.bootstrapRequired = false;
     state.idleExpiresAt = now() + ADMIN_SESSION_IDLE_TTL_MS;
     state.selectedGameId = chooseInitialGame(session.games, previousGameId);
     elements.operatorName.textContent = session.operator.displayName;
@@ -5113,6 +5258,7 @@ export function bootstrapAdminConsole({
       state.configurationLoaded = false;
     }
     hideLoginError();
+    hideBootstrapError();
     populateGames();
     clearAccount();
     renderGame();
@@ -5131,6 +5277,7 @@ export function bootstrapAdminConsole({
   async function restoreSession({ showBoot = true } = {}) {
     const version = sessionRequests.begin();
     if (showBoot) {
+      state.bootstrapRequired = null;
       showView("boot", { focus: false });
       elements.bootSpinner.hidden = false;
       elements.bootRetry.hidden = true;
@@ -5147,16 +5294,34 @@ export function bootstrapAdminConsole({
         return;
       }
       if (error instanceof AdminApiError && error.status === 401) {
-        becomeAnonymous();
+        if (showBoot) {
+          elements.bootMessage.textContent = "正在检查管理员初始化状态…";
+        }
+        try {
+          const status = await api.bootstrapStatus();
+          if (!sessionRequests.isCurrent(version)) {
+            return;
+          }
+          if (status.required) {
+            enterBootstrap();
+          } else {
+            becomeAnonymous();
+          }
+        } catch (bootstrapError) {
+          if (!sessionRequests.isCurrent(version)) {
+            return;
+          }
+          if (!showBoot) {
+            throw bootstrapError;
+          }
+          showBootFailure(describeApiError(bootstrapError, "bootstrap"));
+        }
         return;
       }
       if (!showBoot) {
         throw error;
       }
-      elements.bootSpinner.hidden = true;
-      elements.bootMessage.textContent = describeApiError(error, "session");
-      elements.bootRetry.hidden = false;
-      elements.views.get("boot")?.querySelector("h1")?.focus();
+      showBootFailure(describeApiError(error, "session"));
     }
   }
 
@@ -5463,7 +5628,150 @@ export function bootstrapAdminConsole({
     becomeAnonymous("你已安全退出管理控制台。");
   }
 
+  function switchToLoginAfterBootstrap(operatorId) {
+    becomeAnonymous("管理员初始化已经完成，请使用管理员账号登录。");
+    elements.operatorId.value = operatorId ?? "";
+    elements.operatorId.focus();
+  }
+
+  async function loadSessionAfterBootstrap(version, operatorId) {
+    try {
+      const session = await api.session();
+      if (!sessionRequests.isCurrent(version)) {
+        return;
+      }
+      applySession(session);
+    } catch (error) {
+      if (!sessionRequests.isCurrent(version)) {
+        return;
+      }
+      if (error instanceof AdminApiError && error.status === 401) {
+        switchToLoginAfterBootstrap(operatorId);
+        return;
+      }
+      showBootFailure(
+        "管理员已经创建，但控制台会话暂时无法加载。请重新连接。",
+      );
+    }
+  }
+
+  function bootstrapWriteNeedsStatusCheck(error) {
+    return (
+      !(error instanceof AdminApiError)
+      || error.status === 0
+      || error.status === 408
+      || error.status === 409
+      || error.status >= 500
+    );
+  }
+
+  async function reconcileBootstrapWrite(error, version, operatorId) {
+    let status;
+    try {
+      status = await api.bootstrapStatus();
+    } catch {
+      if (sessionRequests.isCurrent(version)) {
+        showBootFailure(
+          "无法确认管理员是否创建成功，请重新连接后检查，避免重复提交。",
+        );
+      }
+      return;
+    }
+    if (!sessionRequests.isCurrent(version)) {
+      return;
+    }
+    if (status.required) {
+      showBootstrapError(describeApiError(error, "bootstrap"));
+      return;
+    }
+    const mayHaveCreated = !(
+      error instanceof AdminApiError
+      && error.status === 409
+    );
+    await loadSessionAfterBootstrap(
+      version,
+      mayHaveCreated ? operatorId : null,
+    );
+  }
+
   elements.bootRetry.addEventListener("click", () => restoreSession());
+  elements.bootstrapForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (state.bootstrapSubmitting || state.bootstrapRequired !== true) {
+      return;
+    }
+    hideBootstrapError();
+
+    const operatorId = elements.bootstrapOperatorId.value.trim();
+    const displayName = elements.bootstrapDisplayName.value.trim();
+    elements.bootstrapOperatorId.value = operatorId;
+    elements.bootstrapDisplayName.value = displayName;
+    elements.bootstrapOperatorId.setCustomValidity(
+      OPERATOR_ID_PATTERN.test(operatorId)
+        ? ""
+        : "账号必须以小写字母开头，只能包含小写字母、数字、点、下划线或连字符，共 3–64 个字符。",
+    );
+    elements.bootstrapDisplayName.setCustomValidity(
+      isValidAdminDisplayNameInput(displayName)
+        ? ""
+        : "显示名称必须为 1–128 个字符。",
+    );
+    elements.bootstrapPassword.setCustomValidity(
+      isValidAdminPasswordInput(elements.bootstrapPassword.value)
+        ? ""
+        : "密码必须为 12–256 个 Unicode 字符，且不超过 1024 字节。",
+    );
+    elements.bootstrapPasswordConfirm.setCustomValidity(
+      elements.bootstrapPasswordConfirm.value
+        === elements.bootstrapPassword.value
+        ? ""
+        : "两次输入的密码不一致。",
+    );
+    if (!elements.bootstrapForm.reportValidity()) {
+      return;
+    }
+
+    const password = elements.bootstrapPassword.value;
+    const version = sessionRequests.begin();
+    setBootstrapBusy(true);
+    try {
+      await api.createBootstrapAdmin({
+        operatorId,
+        displayName,
+        password,
+      });
+      if (!sessionRequests.isCurrent(version)) {
+        return;
+      }
+      clearBootstrapPasswords();
+      await loadSessionAfterBootstrap(version, operatorId);
+    } catch (error) {
+      clearBootstrapPasswords();
+      if (!sessionRequests.isCurrent(version)) {
+        return;
+      }
+      if (bootstrapWriteNeedsStatusCheck(error)) {
+        await reconcileBootstrapWrite(error, version, operatorId);
+      } else {
+        showBootstrapError(describeApiError(error, "bootstrap"));
+      }
+    } finally {
+      setBootstrapBusy(false);
+    }
+  });
+  elements.bootstrapOperatorId.addEventListener("input", () => {
+    elements.bootstrapOperatorId.setCustomValidity("");
+  });
+  elements.bootstrapDisplayName.addEventListener("input", () => {
+    elements.bootstrapDisplayName.setCustomValidity("");
+  });
+  elements.bootstrapPassword.addEventListener("input", () => {
+    elements.bootstrapPassword.setCustomValidity("");
+    elements.bootstrapPasswordConfirm.setCustomValidity("");
+  });
+  elements.bootstrapPasswordConfirm.addEventListener("input", () => {
+    elements.bootstrapPasswordConfirm.setCustomValidity("");
+  });
   elements.loginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (state.loginSubmitting) {
@@ -6039,7 +6347,13 @@ export function bootstrapAdminConsole({
   }
   window.addEventListener("hashchange", () => {
     if (!state.session) {
-      showView("login");
+      showView(
+        state.bootstrapRequired === true
+          ? "bootstrap"
+          : state.bootstrapRequired === false
+            ? "login"
+            : "boot",
+      );
     } else {
       routeAuthenticated();
     }
@@ -6052,6 +6366,7 @@ export function bootstrapAdminConsole({
     snapshot() {
       return Object.freeze({
         authenticated: state.session !== null,
+        bootstrapRequired: state.bootstrapRequired,
         selectedGameId: state.selectedGameId,
         accountUserId: state.account?.userId ?? null,
         pendingOperationId: state.pendingOperation?.operationId ?? null,

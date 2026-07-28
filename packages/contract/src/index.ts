@@ -19,6 +19,10 @@ export type RegisterCharacterResponse = components["schemas"]["RegisterCharacter
 export type HasCharacterResponse = components["schemas"]["HasCharacterResponse"];
 export type AdminAccountRequest = components["schemas"]["AdminAccountRequest"];
 export type AdminAccountResponse = components["schemas"]["AdminAccountResponse"];
+export type AdminBootstrapRequest =
+  components["schemas"]["AdminBootstrapRequest"];
+export type AdminBootstrapStatus =
+  components["schemas"]["AdminBootstrapStatus"];
 export type AdminLoginRequest = components["schemas"]["AdminLoginRequest"];
 export type AdminReauthenticateRequest =
   components["schemas"]["AdminReauthenticateRequest"];

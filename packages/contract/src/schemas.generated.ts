@@ -59,7 +59,8 @@ export const GameManageKitSchemas = {
       "ADMIN_AUTH_REQUIRED",
       "ORIGIN_FORBIDDEN",
       "GAME_PROJECT_CONFLICT",
-      "GAME_SERVER_CONFLICT"
+      "GAME_SERVER_CONFLICT",
+      "ADMIN_ALREADY_INITIALIZED"
     ],
     "$id": "ErrorCode"
   },
@@ -361,6 +362,48 @@ export const GameManageKitSchemas = {
       }
     },
     "$id": "AdminAccountRequest"
+  },
+  "AdminBootstrapRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "operatorId",
+      "displayName",
+      "password"
+    ],
+    "properties": {
+      "operatorId": {
+        "type": "string",
+        "minLength": 3,
+        "maxLength": 64,
+        "pattern": "^[a-z][a-z0-9_.-]{2,63}$"
+      },
+      "displayName": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "password": {
+        "type": "string",
+        "minLength": 12,
+        "maxLength": 256,
+        "writeOnly": true
+      }
+    },
+    "$id": "AdminBootstrapRequest"
+  },
+  "AdminBootstrapStatus": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "required"
+    ],
+    "properties": {
+      "required": {
+        "type": "boolean"
+      }
+    },
+    "$id": "AdminBootstrapStatus"
   },
   "AdminLoginRequest": {
     "type": "object",

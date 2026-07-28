@@ -163,6 +163,12 @@ function serviceStubs(games: GameRuntimeRegistry): GameManageKitServices {
       },
     },
     adminAuth: {
+      async bootstrapRequired() {
+        return false;
+      },
+      async bootstrap() {
+        throw new Error("测试未调用");
+      },
       async login() {
         return {
           sessionToken: Buffer.alloc(32, 1).toString("base64url"),

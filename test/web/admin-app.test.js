@@ -24,12 +24,14 @@ import {
   gameServerPath,
   isSessionExpired,
   isCompletedLogout,
+  isValidAdminDisplayNameInput,
   isValidAdminPasswordInput,
   isValidUserId,
   machineIdentityPath,
   machineSecretRevokePath,
   machineSecretRotationPath,
   normalizeAccount,
+  normalizeBootstrapStatus,
   normalizeConfigurationAuditPage,
   normalizeDirectorySettings,
   normalizeGameIntegration,
@@ -185,6 +187,23 @@ test("管理员页面只引用本地资源且不包含共享 Secret", async () =
   assert.match(html, /lang="zh-CN"/u);
   assert.match(html, /autocomplete="username"/u);
   assert.match(html, /autocomplete="current-password"/u);
+  assert.match(
+    html,
+    /id="bootstrap-form"[\s\S]+?aria-labelledby="bootstrap-title"/u,
+  );
+  assert.match(
+    html,
+    /id="bootstrap-operator-id"[\s\S]+?pattern="\[a-z\]\[a-z0-9_.\\-\]\{2,63\}"/u,
+  );
+  assert.match(
+    html,
+    /id="bootstrap-password"[\s\S]+?autocomplete="new-password"/u,
+  );
+  assert.match(
+    html,
+    /id="bootstrap-password-confirm"[\s\S]+?autocomplete="new-password"/u,
+  );
+  assert.match(html, /id="bootstrap-error"[\s\S]+?role="alert"/u);
   assert.match(html, /id="operator-password"[\s\S]+?minlength="12"/u);
   assert.match(html, /id="operation-reason"[\s\S]+?maxlength="255"/u);
   assert.match(html, /aria-labelledby="operation-dialog-title"/u);
@@ -232,6 +251,28 @@ test("管理员页面只引用本地资源且不包含共享 Secret", async () =
     wskCss,
     /f920dc584db1cb8d1b3e4206a54e1f1eebe497eb/u,
   );
+});
+
+test("管理员初始化状态只接受单一布尔字段", () => {
+  const required = normalizeBootstrapStatus({ required: true });
+  assert.deepEqual(required, { required: true });
+  assert.equal(Object.isFrozen(required), true);
+  assert.deepEqual(
+    normalizeBootstrapStatus({ required: false }),
+    { required: false },
+  );
+  for (const payload of [
+    null,
+    {},
+    { required: "yes" },
+    { required: true, operatorId: "ops_kimi" },
+    { required: true, password: "must-not-leak" },
+  ]) {
+    assert.throws(
+      () => normalizeBootstrapStatus(payload),
+      InvalidApiPayloadError,
+    );
+  }
 });
 
 test("会话响应按管理员和游戏权限严格校验", () => {
@@ -774,7 +815,13 @@ test("游戏状态与客户端下发遵守草稿和永久停用规则", () => {
   assert.equal(canSelectGameStatus(disabled, "enabled"), false);
 });
 
-test("登录密码校验与服务端 Unicode 和字节边界一致", () => {
+test("管理员名称与密码校验和服务端 Unicode 边界一致", () => {
+  assert.equal(isValidAdminDisplayNameInput("Kimi"), true);
+  assert.equal(isValidAdminDisplayNameInput("管理😀"), true);
+  assert.equal(isValidAdminDisplayNameInput(""), false);
+  assert.equal(isValidAdminDisplayNameInput(" Kimi"), false);
+  assert.equal(isValidAdminDisplayNameInput("名".repeat(129)), false);
+  assert.equal(isValidAdminDisplayNameInput(`Kimi\ud800`), false);
   assert.equal(isValidAdminPasswordInput("密".repeat(12)), true);
   assert.equal(isValidAdminPasswordInput("密".repeat(11)), false);
   assert.equal(isValidAdminPasswordInput("a".repeat(256)), true);
@@ -1282,6 +1329,41 @@ test("接入配置 API 路径编码并按契约发送精确请求", async () => 
   assert.deepEqual(JSON.parse(requests[8].init.body), updateIdentityInput);
   assert.deepEqual(JSON.parse(requests[9].init.body), rotateInput);
   assert.deepEqual(JSON.parse(requests[10].init.body), revokeInput);
+});
+
+test("管理员初始化 API 严格检查状态并只提交创建字段", async () => {
+  const requests = [];
+  const responses = [
+    jsonResponse({ required: true }),
+    new Response(null, { status: 204 }),
+  ];
+  const api = createAdminApi(async (path, init) => {
+    requests.push({ path, init });
+    return responses.shift();
+  });
+
+  const status = await api.bootstrapStatus();
+  await api.createBootstrapAdmin({
+    operatorId: "ops_bootstrap",
+    displayName: "Bootstrap Admin",
+    password: "correct horse battery",
+  });
+
+  assert.deepEqual(status, { required: true });
+  assert.deepEqual(
+    requests.map((request) => [request.path, request.init.method]),
+    [
+      ["/v1/admin/bootstrap", "GET"],
+      ["/v1/admin/bootstrap", "POST"],
+    ],
+  );
+  assert.equal(requests[0].init.body, undefined);
+  assert.deepEqual(JSON.parse(requests[1].init.body), {
+    operatorId: "ops_bootstrap",
+    displayName: "Bootstrap Admin",
+    password: "correct horse battery",
+  });
+  assert.equal("passwordConfirm" in JSON.parse(requests[1].init.body), false);
 });
 
 test("API 客户端使用同源 Cookie、正确方法和 JSON 请求", async () => {

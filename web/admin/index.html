@@ -173,6 +173,175 @@
         </div>
       </section>
 
+      <section
+        class="gmk-centered-view"
+        id="bootstrap-view"
+        data-view="bootstrap"
+        hidden
+      >
+        <div class="gmk-login-shell">
+          <div class="gmk-login-intro" aria-hidden="true">
+            <div class="gmk-orbit gmk-orbit-one"></div>
+            <div class="gmk-orbit gmk-orbit-two"></div>
+            <span class="gmk-intro-icon">
+              <svg class="wsk-icon"><use href="#shield"></use></svg>
+            </span>
+            <p class="wsk-panel-title">SECURE INITIAL SETUP</p>
+            <h1>建立第一位管理员，<br />再开始配置游戏。</h1>
+            <p>
+              初始化入口仅在系统尚未完成初始化时开放。创建完成后，后续访问统一使用管理员登录。
+            </p>
+          </div>
+
+          <form
+            class="wsk-auth-card gmk-login-card"
+            id="bootstrap-form"
+            aria-labelledby="bootstrap-title"
+          >
+            <div>
+              <p class="wsk-panel-title">ADMIN INITIAL SETUP</p>
+              <h1 id="bootstrap-title" tabindex="-1">创建首位管理员</h1>
+              <p class="wsk-help gmk-login-copy">
+                首位管理员会获得游戏项目、接入配置、Secret 轮换和机器身份管理权限。
+              </p>
+            </div>
+
+            <div class="wsk-alert wsk-info gmk-login-notice">
+              <svg class="wsk-icon" aria-hidden="true"><use href="#info"></use></svg>
+              <div>
+                <strong>仅限首次初始化</strong>
+                <p>创建后将直接进入控制台；敏感操作仍需重新认证。</p>
+              </div>
+            </div>
+
+            <div class="wsk-field">
+              <label class="wsk-label" for="bootstrap-operator-id">
+                管理员账号
+              </label>
+              <input
+                class="wsk-control"
+                id="bootstrap-operator-id"
+                name="operatorId"
+                type="text"
+                autocomplete="username"
+                autocapitalize="none"
+                spellcheck="false"
+                pattern="[a-z][a-z0-9_.\-]{2,63}"
+                minlength="3"
+                maxlength="64"
+                placeholder="例如：ops_kimi"
+                required
+              />
+            </div>
+
+            <div class="wsk-field">
+              <label class="wsk-label" for="bootstrap-display-name">
+                显示名称
+              </label>
+              <input
+                class="wsk-control"
+                id="bootstrap-display-name"
+                name="displayName"
+                type="text"
+                autocomplete="name"
+                maxlength="256"
+                placeholder="例如：Kimi"
+                required
+              />
+            </div>
+
+            <div class="wsk-field">
+              <label class="wsk-label" for="bootstrap-password">
+                登录密码
+              </label>
+              <div class="wsk-input-wrap">
+                <input
+                  class="wsk-control"
+                  id="bootstrap-password"
+                  name="password"
+                  type="password"
+                  autocomplete="new-password"
+                  minlength="12"
+                  maxlength="512"
+                  aria-describedby="bootstrap-password-help"
+                  placeholder="设置至少 12 个字符的密码"
+                  required
+                />
+                <button
+                  class="wsk-icon-button"
+                  id="bootstrap-password-toggle"
+                  type="button"
+                  data-password
+                  aria-controls="bootstrap-password"
+                  aria-label="显示密码"
+                  aria-pressed="false"
+                  title="显示密码"
+                >
+                  <svg class="wsk-icon" aria-hidden="true"><use href="#eye"></use></svg>
+                </button>
+              </div>
+              <p class="wsk-help" id="bootstrap-password-help">
+                请输入 12–256 个 Unicode 字符，UTF-8 编码不超过 1024 字节。
+              </p>
+            </div>
+
+            <div class="wsk-field">
+              <label class="wsk-label" for="bootstrap-password-confirm">
+                确认密码
+              </label>
+              <div class="wsk-input-wrap">
+                <input
+                  class="wsk-control"
+                  id="bootstrap-password-confirm"
+                  name="passwordConfirm"
+                  type="password"
+                  autocomplete="new-password"
+                  minlength="12"
+                  maxlength="512"
+                  placeholder="再次输入登录密码"
+                  required
+                />
+                <button
+                  class="wsk-icon-button"
+                  id="bootstrap-password-confirm-toggle"
+                  type="button"
+                  data-password
+                  aria-controls="bootstrap-password-confirm"
+                  aria-label="显示密码"
+                  aria-pressed="false"
+                  title="显示密码"
+                >
+                  <svg class="wsk-icon" aria-hidden="true"><use href="#eye"></use></svg>
+                </button>
+              </div>
+            </div>
+
+            <div
+              class="wsk-alert wsk-danger"
+              id="bootstrap-error"
+              role="alert"
+              tabindex="-1"
+              hidden
+            >
+              <svg class="wsk-icon" aria-hidden="true"><use href="#warning"></use></svg>
+              <div>
+                <strong>暂时无法创建管理员</strong>
+                <p id="bootstrap-error-message"></p>
+              </div>
+            </div>
+
+            <button
+              class="wsk-button wsk-auth-submit"
+              id="bootstrap-submit"
+              type="submit"
+            >
+              <span class="wsk-spinner" data-button-spinner aria-hidden="true" hidden></span>
+              <span data-button-label>创建并进入控制台</span>
+            </button>
+          </form>
+        </div>
+      </section>
+
       <section class="gmk-centered-view" id="login-view" data-view="login" hidden>
         <div class="gmk-login-shell">
           <div class="gmk-login-intro" aria-hidden="true">

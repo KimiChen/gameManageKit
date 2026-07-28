@@ -63,6 +63,10 @@ function compactSql(sql: string): string {
 }
 
 class FakeDatabase implements AdminAuthDatabase {
+  transactionActive = false;
+  latchInitialized = 0;
+  latchInitializedBy: string | null = null;
+  latchInitializedAt: Date | null = null;
   readonly operators = new Map<string, FakeOperator>();
   readonly access = new Map<string, Array<{
     game_id: string;
@@ -95,7 +99,12 @@ class FakeDatabase implements AdminAuthDatabase {
         this.execute("transaction", sql, values)
       ),
     } as unknown as PoolConnection;
-    return fn(connection);
+    this.transactionActive = true;
+    try {
+      return await fn(connection);
+    } finally {
+      this.transactionActive = false;
+    }
   }
 
   addOperator(
@@ -124,6 +133,29 @@ class FakeDatabase implements AdminAuthDatabase {
   ): Promise<[RowDataPacket[], unknown]> {
     const sql = compactSql(rawSql);
     this.logs.push({ source, method: "query", sql, values });
+    if (sql.includes("FROM admin_bootstrap_latch AS l")) {
+      return [[{
+        initialized: this.latchInitialized,
+        operator_exists: this.operators.size > 0 ? 1 : 0,
+      }] as RowDataPacket[], []];
+    }
+    if (sql.includes("FROM admin_bootstrap_latch")) {
+      return [[{
+        initialized: this.latchInitialized,
+      }] as RowDataPacket[], []];
+    }
+    if (
+      sql.startsWith("SELECT operator_id FROM admin_operators")
+      && sql.includes("LIMIT 1")
+    ) {
+      const operator = [...this.operators.values()]
+        .sort((left, right) => (
+          left.operator_id.localeCompare(right.operator_id, "en")
+        ))[0];
+      return [[...(operator
+        ? [{ operator_id: operator.operator_id }]
+        : [])] as RowDataPacket[], []];
+    }
     if (sql.includes("FROM admin_operators")) {
       const operator = this.operators.get(String(values[0]));
       return [[...(operator ? [operator] : [])] as RowDataPacket[], []];
@@ -158,6 +190,33 @@ class FakeDatabase implements AdminAuthDatabase {
   ): Promise<[Record<string, number>, unknown]> {
     const sql = compactSql(rawSql);
     this.logs.push({ source, method: "execute", sql, values });
+    if (sql.startsWith("INSERT INTO admin_operators")) {
+      const operatorId = String(values[0]);
+      if (this.operators.has(operatorId)) {
+        throw Object.assign(new Error("duplicate"), { errno: 1062 });
+      }
+      this.operators.set(operatorId, {
+        operator_id: operatorId,
+        display_name: String(values[1]),
+        password_hash: String(values[2]),
+        status: "enabled",
+        auth_version: 1,
+        can_manage_games: 1,
+        can_manage_integrations: 1,
+        can_rotate_secrets: 1,
+        can_manage_machine_identities: 1,
+      });
+      return [{ affectedRows: 1 }, []];
+    }
+    if (sql.startsWith("UPDATE admin_bootstrap_latch")) {
+      if (this.latchInitialized !== 0) {
+        return [{ affectedRows: 0 }, []];
+      }
+      this.latchInitialized = 1;
+      this.latchInitializedBy = String(values[0]);
+      this.latchInitializedAt = new Date(values[1] as Date);
+      return [{ affectedRows: 1 }, []];
+    }
     if (sql.startsWith("INSERT INTO admin_auth_audit")) {
       this.audits.push({
         operatorId: values[0] === null ? null : String(values[0]),
@@ -243,6 +302,209 @@ test("会话令牌使用 32 字节随机值并以 BINARY(32) SHA-256 表示", ()
   ]) {
     assert.equal(parseAdminSessionToken(invalid), null, invalid.slice(0, 20));
     assert.equal(hashAdminSessionToken(invalid), null, invalid.slice(0, 20));
+  }
+});
+
+test("管理员引导状态同时受单调锁存器和任意管理员行约束", async () => {
+  const database = new FakeDatabase();
+  const service = new AdminAuthService(database, {
+    loginProtection: ALLOW_LOGIN,
+  });
+
+  assert.equal(await service.bootstrapRequired(), true);
+  database.addOperator({ status: "disabled" });
+  assert.equal(await service.bootstrapRequired(), false);
+  database.operators.clear();
+  database.latchInitialized = 1;
+  assert.equal(await service.bootstrapRequired(), false);
+});
+
+test("首个管理员以固定全权限创建并在同一事务签发普通会话", async () => {
+  const database = new FakeDatabase();
+  const now = new Date("2026-07-28T10:00:00.000Z");
+  const entropy = Buffer.alloc(32, 0x2a);
+  const password = "correct horse battery";
+  let hashCalls = 0;
+  let releases = 0;
+  const service = new AdminAuthService(database, {
+    now: () => now,
+    randomBytes: () => Buffer.from(entropy),
+    hashPassword: async (candidate) => {
+      assert.equal(database.transactionActive, false);
+      assert.equal(candidate, password);
+      hashCalls += 1;
+      return "bootstrap-password-hash";
+    },
+    loginProtection: {
+      checkRateLimit() {
+        return null;
+      },
+      acquireScrypt() {
+        return {
+          ok: true,
+          release() {
+            releases += 1;
+          },
+        };
+      },
+    },
+  });
+
+  const issued = await service.bootstrap({
+    operatorId: " OPS_BOOTSTRAP ",
+    displayName: " 首个管理员 ",
+    password,
+    ip: "127.0.0.1:4512",
+  });
+
+  assert.equal(hashCalls, 1);
+  assert.equal(releases, 1);
+  assert.equal(database.latchInitialized, 1);
+  assert.equal(database.latchInitializedBy, "ops_bootstrap");
+  assert.equal(database.latchInitializedAt?.toISOString(), now.toISOString());
+  assert.deepEqual(database.operators.get("ops_bootstrap"), {
+    operator_id: "ops_bootstrap",
+    display_name: "首个管理员",
+    password_hash: "bootstrap-password-hash",
+    status: "enabled",
+    auth_version: 1,
+    can_manage_games: 1,
+    can_manage_integrations: 1,
+    can_rotate_secrets: 1,
+    can_manage_machine_identities: 1,
+  });
+  assert.equal(issued.sessionToken, entropy.toString("base64url"));
+  assert.equal(issued.elevatedUntil, null);
+  assert.deepEqual({
+    canManageGames: issued.canManageGames,
+    canManageIntegrations: issued.canManageIntegrations,
+    canRotateSecrets: issued.canRotateSecrets,
+    canManageMachineIdentities: issued.canManageMachineIdentities,
+    games: issued.games,
+  }, {
+    canManageGames: true,
+    canManageIntegrations: true,
+    canRotateSecrets: true,
+    canManageMachineIdentities: true,
+    games: [],
+  });
+  assert.deepEqual(database.audits, [{
+    operatorId: "ops_bootstrap",
+    event: "operator_created",
+    reason: "web_bootstrap",
+    ip: "127.0.0.1",
+  }]);
+  assert.equal(JSON.stringify(database.logs).includes(password), false);
+});
+
+test("开放锁存器发现任意既有管理员时先永久消费再拒绝引导", async () => {
+  const database = new FakeDatabase();
+  database.addOperator({
+    operator_id: "ops_disabled",
+    status: "disabled",
+  });
+  let hashCalls = 0;
+  const service = new AdminAuthService(database, {
+    hashPassword: async () => {
+      hashCalls += 1;
+      return "unused";
+    },
+    loginProtection: ALLOW_LOGIN,
+  });
+
+  await assert.rejects(
+    service.bootstrap({
+      operatorId: "ops_attacker",
+      displayName: "Attacker",
+      password: "correct horse battery",
+      ip: "192.0.2.1",
+    }),
+    (error) => isGameError(error, 409, "ADMIN_ALREADY_INITIALIZED"),
+  );
+  assert.equal(hashCalls, 0);
+  assert.equal(database.latchInitialized, 1);
+  assert.equal(database.latchInitializedBy, "ops_disabled");
+
+  database.operators.clear();
+  assert.equal(await service.bootstrapRequired(), false);
+});
+
+test("管理员引导哈希失败仍释放 scrypt 许可且不消费锁存器", async () => {
+  const database = new FakeDatabase();
+  let releases = 0;
+  const service = new AdminAuthService(database, {
+    hashPassword: async () => {
+      throw new Error("hash failed");
+    },
+    loginProtection: {
+      checkRateLimit() {
+        return null;
+      },
+      acquireScrypt() {
+        return {
+          ok: true,
+          release() {
+            releases += 1;
+          },
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    service.bootstrap({
+      operatorId: "ops_bootstrap",
+      displayName: "Bootstrap",
+      password: "correct horse battery",
+      ip: null,
+    }),
+    /hash failed/u,
+  );
+  assert.equal(releases, 1);
+  assert.equal(database.latchInitialized, 0);
+  assert.equal(database.operators.size, 0);
+  assert.equal(database.sessions.size, 0);
+});
+
+test("管理员引导复用登录保护并在限流或容量耗尽时拒绝哈希", async () => {
+  for (const mode of ["rate", "capacity"] as const) {
+    const database = new FakeDatabase();
+    let hashCalls = 0;
+    const service = new AdminAuthService(database, {
+      hashPassword: async () => {
+        hashCalls += 1;
+        return "unused";
+      },
+      loginProtection: {
+        checkRateLimit() {
+          return mode === "rate" ? "rate_limited_ip" : null;
+        },
+        acquireScrypt() {
+          return mode === "capacity"
+            ? { ok: false }
+            : { ok: true, release() {} };
+        },
+      },
+    });
+
+    await assert.rejects(
+      service.bootstrap({
+        operatorId: "ops_bootstrap",
+        displayName: "Bootstrap",
+        password: "correct horse battery",
+        ip: "192.0.2.22",
+      }),
+      (error) => isGameError(error, 429, "RATE_LIMITED"),
+    );
+    assert.equal(hashCalls, 0);
+    assert.equal(database.latchInitialized, 0);
+    assert.deepEqual(database.audits, [{
+      operatorId: "ops_bootstrap",
+      event: "bootstrap_failure",
+      reason:
+        mode === "rate" ? "rate_limited_ip" : "scrypt_capacity",
+      ip: "192.0.2.22",
+    }]);
   }
 });
 

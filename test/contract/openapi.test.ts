@@ -10,6 +10,8 @@ import {
 type JsonRecord = Record<string, unknown>;
 
 const EXPECTED_OPERATIONS = new Map([
+  ["GET /v1/admin/bootstrap", "Admin"],
+  ["POST /v1/admin/bootstrap", "Admin"],
   ["POST /v1/admin/auth/login", "Admin"],
   ["POST /v1/admin/auth/reauthenticate", "Admin"],
   ["GET /v1/admin/auth/session", "Admin"],
@@ -175,6 +177,10 @@ test("管理员网页契约使用 Cookie 会话且保留机器管理员身份", 
   });
 
   const paths = record(document.paths);
+  const bootstrap = record(paths["/v1/admin/bootstrap"]);
+  assert.deepEqual(record(bootstrap.get).security, []);
+  assert.deepEqual(record(bootstrap.post).security, []);
+  assert.match(String(record(bootstrap.post).description), /Origin/u);
   const login = record(record(paths["/v1/admin/auth/login"]).post);
   assert.deepEqual(login.security, []);
   const reauthenticate = record(
@@ -633,10 +639,37 @@ test("目录、接入和 Secret 契约固定乐观锁、幂等与不回显边界
   const loginPassword = record(
     record(record(schemas.AdminLoginRequest).properties).password,
   );
+  const bootstrapRequest = record(schemas.AdminBootstrapRequest);
+  assert.deepEqual(
+    bootstrapRequest.required,
+    ["operatorId", "displayName", "password"],
+  );
+  const bootstrapPassword = record(
+    record(bootstrapRequest.properties).password,
+  );
+  assert.deepEqual(bootstrapPassword, {
+    type: "string",
+    minLength: 12,
+    maxLength: 256,
+    writeOnly: true,
+  });
+  assert.deepEqual(schemas.AdminBootstrapStatus, {
+    type: "object",
+    additionalProperties: false,
+    required: ["required"],
+    properties: {
+      required: { type: "boolean" },
+    },
+  });
   const reauthenticatePassword = record(
     record(record(schemas.AdminReauthenticateRequest).properties).password,
   );
   assert.equal(loginPassword.writeOnly, true);
+  assert.equal(
+    (record(schemas.ErrorCode).enum as string[])
+      .includes("ADMIN_ALREADY_INITIALIZED"),
+    true,
+  );
   assert.equal(reauthenticatePassword.writeOnly, true);
 
   const integration = record(schemas.GameIntegration);

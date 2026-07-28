@@ -7,6 +7,7 @@ import type {
 } from "mysql2/promise";
 import { GameManageKitError } from "../../errors.js";
 import {
+  hashAdminPassword,
   validateAdminPassword,
   verifyAdminPassword,
 } from "../../infra/security/admin-password.js";
@@ -70,6 +71,15 @@ interface ExpiredSessionRow extends RowDataPacket {
   idle_expired: number | boolean | string;
 }
 
+interface BootstrapLatchRow extends RowDataPacket {
+  initialized: number | boolean | string;
+  operator_exists?: number | boolean | string;
+}
+
+interface AnyOperatorRow extends RowDataPacket {
+  operator_id: string;
+}
+
 export interface AdminAuthDatabase {
   readonly pool: Pool;
   transaction<T>(
@@ -106,6 +116,13 @@ export interface IssuedAdminSession extends AdminSessionIdentity {
 
 export interface AdminLoginInput {
   readonly operatorId: string;
+  readonly password: string;
+  readonly ip: string | null;
+}
+
+export interface AdminBootstrapInput {
+  readonly operatorId: string;
+  readonly displayName: string;
   readonly password: string;
   readonly ip: string | null;
 }
@@ -215,6 +232,7 @@ export class DefaultAdminLoginProtection implements AdminLoginProtection {
 export interface AdminAuthServiceOptions {
   readonly now?: () => Date;
   readonly randomBytes?: (size: number) => Buffer;
+  readonly hashPassword?: (password: string) => Promise<string>;
   readonly verifyPassword?: (
     password: string,
     storedHash: string,
@@ -227,6 +245,8 @@ export interface AdminAuthServiceOptions {
 }
 
 type AuthAuditEvent =
+  | "operator_created"
+  | "bootstrap_failure"
   | "login_success"
   | "login_failure"
   | "reauthentication_success"
@@ -236,6 +256,7 @@ type AuthAuditEvent =
   | "session_invalidated";
 
 type AuthAuditReason =
+  | "web_bootstrap"
   | "invalid_credentials"
   | AdminLoginLimitReason
   | "scrypt_capacity"
@@ -264,6 +285,35 @@ function normalizedPositiveDuration(
     throw new TypeError(`${name} 必须为正整数毫秒`);
   }
   return duration;
+}
+
+function wellFormedUnicodeLength(value: string): number | null {
+  let length = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) {
+        return null;
+      }
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return null;
+    }
+    length += 1;
+  }
+  return length;
+}
+
+function normalizeAdminDisplayName(value: string): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim();
+  const length = wellFormedUnicodeLength(normalized);
+  return length !== null && length >= 1 && length <= 128
+    ? normalized
+    : null;
 }
 
 export function normalizeAdminOperatorId(value: string): string | null {
@@ -401,6 +451,7 @@ export function requireAdminGameManagement(
 export class AdminAuthService {
   private readonly now: () => Date;
   private readonly randomBytes: (size: number) => Buffer;
+  private readonly hashPassword: (password: string) => Promise<string>;
   private readonly verifyPassword: (
     password: string,
     storedHash: string,
@@ -417,6 +468,7 @@ export class AdminAuthService {
   ) {
     this.now = options.now ?? (() => new Date());
     this.randomBytes = options.randomBytes ?? cryptoRandomBytes;
+    this.hashPassword = options.hashPassword ?? hashAdminPassword;
     this.verifyPassword = options.verifyPassword ?? verifyAdminPassword;
     this.loginProtection = options.loginProtection
       ?? new DefaultAdminLoginProtection();
@@ -447,6 +499,129 @@ export class AdminAuthService {
       () => this.currentTime().getTime(),
       options.protectionAuditMaximumBuckets ?? 10_000,
     );
+  }
+
+  async bootstrapRequired(): Promise<boolean> {
+    const [rows] = await this.database.pool.query<BootstrapLatchRow[]>(
+      `SELECT l.initialized,
+              EXISTS(
+                SELECT 1
+                  FROM admin_operators
+                 LIMIT 1
+              ) AS operator_exists
+         FROM admin_bootstrap_latch AS l
+        WHERE l.latch_id = 1`,
+    );
+    const initialized = Number(rows[0]?.initialized);
+    const operatorExists = Number(rows[0]?.operator_exists);
+    if (
+      rows.length !== 1
+      || (initialized !== 0 && initialized !== 1)
+      || (operatorExists !== 0 && operatorExists !== 1)
+    ) {
+      throw new Error("管理员引导锁存器数据无效");
+    }
+    return initialized === 0 && operatorExists === 0;
+  }
+
+  async bootstrap(input: AdminBootstrapInput): Promise<IssuedAdminSession> {
+    const operatorId = normalizeAdminOperatorId(input.operatorId);
+    const displayName = normalizeAdminDisplayName(input.displayName);
+    if (!operatorId || !displayName) {
+      throw new GameManageKitError(400, "INVALID_PAYLOAD");
+    }
+    try {
+      validateAdminPassword(input.password);
+    } catch {
+      throw new GameManageKitError(400, "INVALID_PAYLOAD");
+    }
+    const ip = normalizeIp(input.ip);
+
+    const available = await this.database.transaction(
+      (connection) => this.lockAvailableBootstrap(connection),
+    );
+    if (!available) {
+      throw new GameManageKitError(409, "ADMIN_ALREADY_INITIALIZED");
+    }
+
+    const limited = this.loginProtection.checkRateLimit(operatorId, ip);
+    if (limited) {
+      await this.auditProtectionFailure({
+        operatorId,
+        event: "bootstrap_failure",
+        reason: limited,
+        ip,
+      });
+      throw new GameManageKitError(429, "RATE_LIMITED");
+    }
+    const permit = this.loginProtection.acquireScrypt();
+    if (!permit.ok) {
+      await this.auditProtectionFailure({
+        operatorId,
+        event: "bootstrap_failure",
+        reason: "scrypt_capacity",
+        ip,
+      });
+      throw new GameManageKitError(429, "RATE_LIMITED");
+    }
+
+    let passwordHash: string;
+    try {
+      passwordHash = await this.hashPassword(input.password);
+    } finally {
+      permit.release();
+    }
+
+    const issued = await this.database.transaction(async (connection) => {
+      if (!await this.lockAvailableBootstrap(connection)) {
+        return null;
+      }
+
+      await connection.execute<ResultSetHeader>(
+        `INSERT INTO admin_operators
+           (operator_id, display_name, password_hash, status, auth_version,
+            can_manage_games, can_manage_integrations, can_rotate_secrets,
+            can_manage_machine_identities)
+         VALUES (?, ?, ?, 'enabled', 1, 1, 1, 1, 1)`,
+        [operatorId, displayName, passwordHash],
+      );
+
+      const now = this.currentTime();
+      await this.completeBootstrapLatch(connection, operatorId, now);
+
+      const operator = {
+        operator_id: operatorId,
+        display_name: displayName,
+        password_hash: passwordHash,
+        status: "enabled",
+        auth_version: 1,
+        can_manage_games: 1,
+        can_manage_integrations: 1,
+        can_rotate_secrets: 1,
+        can_manage_machine_identities: 1,
+      } as OperatorRow;
+      const expiresAt = new Date(now.getTime() + this.absoluteTtlMs);
+      const sessionToken = await this.insertUniqueSession(
+        connection,
+        operator,
+        now,
+        expiresAt,
+      );
+      await insertAuthAudit(connection, {
+        operatorId,
+        event: "operator_created",
+        reason: "web_bootstrap",
+        ip,
+      });
+      return {
+        ...identityFrom(operator, [], expiresAt, null),
+        sessionToken,
+      };
+    });
+    if (!issued) {
+      throw new GameManageKitError(409, "ADMIN_ALREADY_INITIALIZED");
+    }
+    return issued;
   }
 
   async login(input: AdminLoginInput): Promise<IssuedAdminSession> {
@@ -1123,6 +1298,62 @@ export class AdminAuthService {
     if (!elevatedUntil || now.getTime() >= elevatedUntil.getTime()) {
       throw new GameManageKitError(403, "GAME_ACCESS_DENIED");
     }
+  }
+
+  private async completeBootstrapLatch(
+    connection: PoolConnection,
+    operatorId: string,
+    initializedAt: Date,
+  ): Promise<void> {
+    const [result] = await connection.execute<ResultSetHeader>(
+      `UPDATE admin_bootstrap_latch
+          SET initialized = 1,
+              initialized_by = ?,
+              initialized_at = ?
+        WHERE latch_id = 1 AND initialized = 0`,
+      [operatorId, initializedAt],
+    );
+    if (result.affectedRows !== 1) {
+      throw new Error("管理员引导锁存器更新失败");
+    }
+  }
+
+  private async lockAvailableBootstrap(
+    connection: PoolConnection,
+  ): Promise<boolean> {
+    const [latchRows] = await connection.query<BootstrapLatchRow[]>(
+      `SELECT initialized
+         FROM admin_bootstrap_latch
+        WHERE latch_id = 1
+        FOR UPDATE`,
+    );
+    const initialized = Number(latchRows[0]?.initialized);
+    if (
+      latchRows.length !== 1
+      || (initialized !== 0 && initialized !== 1)
+    ) {
+      throw new Error("管理员引导锁存器数据无效");
+    }
+    if (initialized === 1) {
+      return false;
+    }
+
+    const [operators] = await connection.query<AnyOperatorRow[]>(
+      `SELECT operator_id
+         FROM admin_operators
+        ORDER BY operator_id
+        LIMIT 1`,
+    );
+    const existing = operators[0];
+    if (!existing) {
+      return true;
+    }
+    await this.completeBootstrapLatch(
+      connection,
+      existing.operator_id,
+      this.currentTime(),
+    );
+    return false;
   }
 
   private currentTime(): Date {

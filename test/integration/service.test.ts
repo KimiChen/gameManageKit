@@ -4,12 +4,9 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import test from "node:test";
 import mysql, { type RowDataPacket } from "mysql2/promise";
-import {
-  createAdminOperator,
-  generateAdminPassword,
-} from "../../src/admin-create.js";
 import { createRuntime, type Runtime } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
+import { hashAdminPassword } from "../../src/infra/security/admin-password.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -27,6 +24,21 @@ function databaseUrl(adminUrl: string, databaseName: string): string {
 
 function randomValue(bytes = 24): string {
   return randomBytes(bytes).toString("base64url");
+}
+
+async function createLimitedTestAdministrator(
+  runtime: Runtime,
+  password: string,
+): Promise<void> {
+  const passwordHash = await hashAdminPassword(password);
+  await runtime.database.pool.execute(
+    `INSERT INTO admin_operators
+       (operator_id, display_name, password_hash, status, auth_version,
+        can_manage_games, can_manage_integrations, can_rotate_secrets,
+        can_manage_machine_identities)
+     VALUES ('ops_no_secret', 'Integration Only', ?, 'enabled', 1, 0, 1, 0, 0)`,
+    [passwordHash],
+  );
 }
 
 function sessionCookie(
@@ -110,28 +122,70 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
     });
     assert.deepEqual(runtime.games.list(), []);
 
-    const administratorPassword = generateAdminPassword();
-    await createAdminOperator(runtime.database, {
-      operatorId: "ops_integration",
-      displayName: "Integration Admin",
-      gameIds: [],
-      canOperateAccounts: false,
-      canManageGames: true,
-      canManageIntegrations: true,
-      canRotateSecrets: true,
-      canManageMachineIdentities: true,
-    }, administratorPassword);
-    const limitedPassword = generateAdminPassword();
-    await createAdminOperator(runtime.database, {
-      operatorId: "ops_no_secret",
-      displayName: "Integration Only",
-      gameIds: [],
-      canOperateAccounts: false,
-      canManageIntegrations: true,
-      canRotateSecrets: false,
-    }, limitedPassword);
-
     const { internalApp, publicApp } = runtime.apps;
+    const administratorPassword = randomValue();
+    const bootstrapStatus = await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/bootstrap",
+    });
+    assert.equal(bootstrapStatus.statusCode, 200, bootstrapStatus.body);
+    assert.equal(bootstrapStatus.headers["cache-control"], "no-store");
+    assert.deepEqual(bootstrapStatus.json(), { required: true });
+
+    const concurrentBootstrap = await Promise.all([
+      internalApp.inject({
+        method: "POST",
+        url: "/v1/admin/bootstrap",
+        headers: { origin: config.adminOrigin },
+        payload: {
+          operatorId: "ops_integration",
+          displayName: "Integration Admin",
+          password: administratorPassword,
+        },
+      }),
+      internalApp.inject({
+        method: "POST",
+        url: "/v1/admin/bootstrap",
+        headers: { origin: config.adminOrigin },
+        payload: {
+          operatorId: "ops_integration",
+          displayName: "Integration Admin",
+          password: administratorPassword,
+        },
+      }),
+    ]);
+    assert.deepEqual(
+      concurrentBootstrap.map((response) => response.statusCode).sort(),
+      [204, 409],
+      concurrentBootstrap.map((response) => response.body).join("\n"),
+    );
+    const bootstrap = concurrentBootstrap.find(
+      (response) => response.statusCode === 204,
+    );
+    assert.ok(bootstrap);
+    assert.equal(bootstrap.headers["cache-control"], "no-store");
+    const adminCookie = sessionCookie(bootstrap.headers["set-cookie"]);
+
+    const bootstrapClosed = await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/bootstrap",
+    });
+    assert.equal(bootstrapClosed.statusCode, 200, bootstrapClosed.body);
+    assert.deepEqual(bootstrapClosed.json(), { required: false });
+    const secondBootstrap = await internalApp.inject({
+      method: "POST",
+      url: "/v1/admin/bootstrap",
+      headers: { origin: config.adminOrigin },
+      payload: {
+        operatorId: "ops_second",
+        displayName: "Second Bootstrap",
+        password: randomValue(),
+      },
+    });
+    assert.equal(secondBootstrap.statusCode, 409, secondBootstrap.body);
+
+    const limitedPassword = randomValue();
+    await createLimitedTestAdministrator(runtime, limitedPassword);
     const loginAdmin = async (
       operatorId: string,
       password: string,
@@ -145,10 +199,6 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       assert.equal(response.statusCode, 204, response.body);
       return sessionCookie(response.headers["set-cookie"]);
     };
-    const adminCookie = await loginAdmin(
-      "ops_integration",
-      administratorPassword,
-    );
     const limitedCookie = await loginAdmin(
       "ops_no_secret",
       limitedPassword,
