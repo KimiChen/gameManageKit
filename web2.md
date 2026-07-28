@@ -35,19 +35,16 @@ MySQL 中：
 
 - `GAME_MANAGE_KIT_MYSQL_URL`。
 - TLS 私钥或反向代理证书。
-- KMS/Vault 的工作负载身份。
-- 本地开发使用的主加密密钥。
 - 首个管理员的引导创建流程。
 
-生产环境优先使用云 KMS、Vault 或同类专用 Secret Manager。没有外部 Secret
-Manager 时，本地和开发环境可以使用部署环境提供的 32 字节主密钥，但主密钥不得写入
-MySQL、Git、镜像或数据库备份。
+由于微信 AppSecret 按本设计以明文存入 MySQL，数据库访问凭据、数据库 TLS、磁盘加密
+和备份加密属于部署信任边界，不能通过管理员网页关闭。
 
 ## 3. 核心原则
 
 1. MySQL 是游戏、区服和接入元数据的唯一真源。
 2. 既有 Secret 永不通过 GET API 或管理员网页回显。
-3. 微信 AppSecret 使用可逆的认证加密；Service Secret 只保存不可逆摘要。
+3. 微信 AppSecret 在 MySQL 中明文保存；Service Secret 只保存不可逆摘要。
 4. Secret 修改与普通游戏编辑使用不同权限。
 5. Secret 变更要求最近重新认证。
 6. 所有配置写入使用 revision 乐观锁和事务内实时权限复核。
@@ -62,10 +59,7 @@ MySQL、Git、镜像或数据库备份。
 flowchart LR
     UI["管理员网页"] --> ADMIN["管理员配置 API"]
     ADMIN --> DB["gameManageKit MySQL"]
-    ADMIN --> PROTECTOR["SecretProtector"]
-    PROTECTOR --> KMS["KMS / Vault / 本地主密钥"]
     DB --> RESOLVER["GameConfigResolver"]
-    KMS --> RESOLVER
     RESOLVER --> PUBLIC["Public API"]
     RESOLVER --> INTERNAL["Internal API"]
     PUBLIC --> WX["微信接口"]
@@ -73,7 +67,7 @@ flowchart LR
     INTERNAL --> GAME["游戏服务"]
 ```
 
-管理员 API 负责验证、加密、摘要、事务、版本和审计。Public 与 Internal API 只通过
+管理员 API 负责验证、摘要、事务、版本和审计。Public 与 Internal API 只通过
 运行时 Resolver 获取已经生效的配置，不直接读取管理员请求内容。
 
 ## 5. 配置分类
@@ -82,13 +76,15 @@ flowchart LR
 |---|---|---|
 | 游戏名称、端点、TTL、限流 | MySQL 明文 | 可查看、可编辑 |
 | 微信 AppID | MySQL 明文 | 可查看、可编辑 |
-| 微信 AppSecret | KMS/Vault 或 AES-256-GCM 密文 | 只能替换，永不回显 |
+| 微信 AppSecret | MySQL 明文 | 只能替换，永不回显 |
 | Service Secret | 服务端生成，MySQL 仅保存摘要 | 创建或轮换时显示一次 |
 | 机器 Admin Secret | 服务端生成，MySQL 仅保存摘要 | 创建或轮换时显示一次 |
-| MySQL 凭据、主加密密钥、TLS 私钥 | 部署信任根 | 不进入网页 |
+| MySQL 凭据、TLS 私钥 | 部署信任根 | 不进入网页 |
 
-微信 AppSecret 必须可恢复，因为 gameManageKit 调用微信时需要使用明文。Service
-Secret 和机器 Admin Secret 只用于校验请求，不需要恢复原文。
+微信 AppSecret 必须可恢复，因为 gameManageKit 调用微信时需要使用明文。本项目明确
+选择直接存储明文，不在应用层加密。该选择降低了实现和运维复杂度，但意味着一旦 MySQL
+账号、数据库快照或备份泄露，AppSecret 也会直接泄露。Service Secret 和机器 Admin
+Secret 只用于校验请求，不需要恢复原文。
 
 ## 6. 数据模型
 
@@ -187,6 +183,10 @@ game_servers
 game_integrations
 ├── game_id
 ├── wechat_app_id
+├── wechat_app_secret
+├── wechat_secret_version
+├── wechat_secret_updated_by
+├── wechat_secret_updated_at
 ├── wechat_endpoint
 ├── wechat_timeout_ms
 ├── wechat_breaker_threshold
@@ -203,37 +203,11 @@ game_integrations
 
 创建游戏草稿时同时创建默认接入配置。缺少 AppID 或 AppSecret 时，游戏保持 `draft`。
 
-### 6.5 微信 Secret 版本
+`wechat_app_secret` 使用可空文本字段明文存储。替换时直接覆盖旧值，不保留旧
+AppSecret；`wechat_secret_version` 在同一事务中递增。审计只记录版本、操作者和时间，
+不得记录新旧 AppSecret。
 
-新增 `game_secret_versions`：
-
-```text
-game_secret_versions
-├── id
-├── game_id
-├── secret_kind
-├── version
-├── state
-├── encryption_provider
-├── key_id
-├── wrapped_data_key
-├── nonce
-├── ciphertext
-├── auth_tag
-├── created_by
-├── created_at
-├── activated_at
-└── retired_at
-```
-
-约束：
-
-- `secret_kind` 第一阶段只允许 `wechat_app_secret`。
-- `state` 只允许 `pending`、`active`、`retired`。
-- 每个游戏、每种 Secret 最多一个 `active` 版本。
-- Secret 明文、密文和认证标签不得进入普通审计 JSON。
-
-### 6.6 机器身份
+### 6.5 机器身份
 
 新增：
 
@@ -278,7 +252,7 @@ machine_secret_versions
 每个身份最多同时存在一个 `current` 和一个未过期的 `previous` 版本。`previous`
 必须有明确失效时间。
 
-### 6.7 管理员权限与提升会话
+### 6.6 管理员权限与提升会话
 
 扩展 `admin_operators`：
 
@@ -303,49 +277,26 @@ elevated_until
 - 撤销当前或 previous Secret。
 - 修改机器身份的游戏授权范围。
 
-## 7. Secret 保护方案
+## 7. Secret 存储与保护
 
-### 7.1 SecretProtector 接口
+### 7.1 微信 AppSecret
 
-业务代码只依赖抽象接口：
+微信 AppSecret 由管理员输入，后端校验非空和长度后直接写入
+`game_integrations.wechat_app_secret`。为降低明文存储的暴露面：
 
-```ts
-interface SecretProtector {
-  encrypt(input: SecretPlaintext, context: SecretContext): Promise<EncryptedSecret>;
-  decrypt(input: EncryptedSecret, context: SecretContext): Promise<string>;
-}
-```
+- 仅运行 gameManageKit 的数据库账号可以读取该字段。
+- 管理后台使用的数据库账号不得授予导出、复制或管理权限。
+- 应用与 MySQL 之间强制使用 TLS。
+- MySQL 数据盘、快照和备份必须加密，并限制下载权限。
+- 禁止在 SQL 日志、慢查询日志、ORM 参数日志和错误追踪中记录该字段。
+- 不提供 AppSecret 查询、查看、复制、导出或历史版本功能。
+- 替换时在单个事务内覆盖旧值、递增版本并写入不含 Secret 的审计记录。
+- 删除游戏时按数据保留策略同时删除 AppSecret，不进入软删除快照。
 
-生产实现使用 KMS/Vault；本地开发实现使用 Node.js `crypto` 的 AES-256-GCM。
+管理员保存成功只代表已经写入 MySQL，不代表微信侧凭据验证成功。运行时首次调用微信
+失败时记录不含 Secret 的错误，并在管理页面显示连接验证失败状态。
 
-### 7.2 AES-256-GCM 本地实现
-
-- 主密钥必须是独立的 32 字节随机值。
-- 每次加密生成独立的 12 字节随机 nonce。
-- 使用 16 字节认证标签。
-- AAD 必须绑定：
-
-```text
-environment
-gameId
-secretKind
-version
-```
-
-AAD 防止把一个环境、游戏或 Secret 类型的密文复制到另一个范围内解密。
-
-主密钥使用版本化 key ring：
-
-```text
-active key id
-current key
-old read-only keys
-```
-
-新写入只使用 active key；旧 key 仅用于解密和重新加密。主密钥轮换不能要求一次性
-停机重写全部 Secret。
-
-### 7.3 Service Secret
+### 7.2 Service Secret
 
 Service Secret 和机器 Admin Secret 必须由服务端生成，不允许管理员手工输入低熵值：
 
@@ -406,12 +357,12 @@ GET 只返回 Secret 元数据：
 任何 GET 都不得返回：
 
 - Secret 明文。
-- 密文。
-- nonce 或认证标签。
 - 完整摘要。
-- KMS wrapped key。
+- 数据库内部字段名或存储结构。
 
 微信 AppSecret 写入成功后也只返回版本和状态，不返回刚提交的明文。
+写入请求必须携带当前 `revision` 和唯一 `operationId`；同一个 `operationId` 重试时返回
+第一次的结果，不重复覆盖字段或递增版本。该路由必须关闭请求体日志。
 
 ### 8.3 机器身份
 
@@ -512,7 +463,6 @@ JavaScript 返回独立的高权限 Bearer Token。
 加载系统级启动配置
 → 连接 MySQL
 → 校验 migration
-→ 初始化 SecretProtector
 → 加载已配置游戏元数据
 → 构造 GameConfigResolver
 → 启动 Public 和 Internal 服务
@@ -538,8 +488,8 @@ JavaScript 返回独立的高权限 Bearer Token。
 - 限流器。
 - 当前配置 revision。
 
-微信 AppSecret 只在需要构造或刷新微信 Client 时解密，并仅保存在运行时内存中。不得
-写入日志、错误或指标。
+微信 AppSecret 只在需要构造或刷新微信 Client 时从 MySQL 读取，并仅保存在后端运行时
+内存中。不得写入日志、错误或指标。
 
 ### 10.3 热更新
 
@@ -601,8 +551,6 @@ admin_secret_audit
 只记录 Secret 元数据和操作结果。禁止记录：
 
 - 明文。
-- 密文。
-- nonce、认证标签或 wrapped key。
 - 完整摘要。
 - Secret 请求体和请求头。
 
@@ -614,17 +562,18 @@ APM 和错误追踪也必须禁用 Secret 路由的请求体采集。
 - Secret 轮换和撤销。
 - 重新认证失败。
 - 旧版本或已撤销版本仍被使用。
-- KMS/Vault 不可用。
+- AppSecret 读取或微信凭据验证失败。
 - 多次轮换冲突。
 
 ## 13. 备份与恢复
 
-- 数据库备份只包含密文、wrapped key、摘要和元数据。
-- 主加密密钥或 KMS 权限必须独立保存。
-- 数据库备份和主密钥不得进入同一备份包。
-- 定期在隔离环境演练 MySQL 与 KMS 的联合恢复。
+- 数据库备份会包含明文微信 AppSecret，必须视为生产 Secret 集合管理。
+- 备份必须加密、限制下载权限、记录访问审计并设置明确保留期限。
+- 测试和开发环境不得直接恢复生产备份；脱敏副本必须删除 AppSecret。
+- 定期在隔离且受控的生产等价环境演练 MySQL 恢复。
 - 恢复后不得复活已经撤销或过期的 Secret。
-- 高风险恢复后应重新轮换 Service 和机器 Admin Secret。
+- 备份疑似泄露或恢复环境失去控制时，应立即替换微信 AppSecret，并轮换 Service 和
+  机器 Admin Secret。
 
 ## 14. 配置文件与环境变量清理
 
@@ -646,21 +595,20 @@ APM 和错误追踪也必须禁用 Secret 路由的请求体采集。
 - MySQL 连接。
 - Public/Internal 监听地址。
 - Admin Origin。
-- KMS/Vault 连接或本地主密钥。
 - 日志、代理、请求和关闭超时等进程级参数。
 
 ## 15. 实施阶段
 
-### 第一阶段：安全存储基础
+### 第一阶段：明文存储边界
 
-1. 增加 `SecretProtector` 接口。
-2. 实现 KMS/Vault Provider 接口。
-3. 实现仅用于本地开发的 AES-256-GCM Provider。
-4. 增加 Secret 密文篡改、AAD 范围和 key rotation 测试。
+1. 为 `game_integrations` 增加 AppSecret 明文字段和更新元数据。
+2. 限制 MySQL 账号权限，启用连接 TLS、数据盘和备份加密。
+3. 对 HTTP、SQL、ORM、审计、APM 和错误追踪增加 AppSecret 脱敏测试。
+4. 禁止生产数据库向测试和开发环境直接复制。
 
 ### 第二阶段：数据结构与权限
 
-1. 增加游戏接入、Secret 版本、机器身份和 Secret 审计表。
+1. 增加游戏接入、机器身份、机器 Secret 版本和 Secret 审计表。
 2. 增加目录 revision。
 3. 增加 Secret 独立权限。
 4. 增加管理员最近重新认证。
@@ -699,27 +647,26 @@ APM 和错误追踪也必须禁用 Secret 路由的请求体采集。
 
 ### 安全
 
-- 任意 GET 响应都不包含 Secret、密文或摘要。
-- 微信 AppSecret 在 MySQL 中只存在密文。
+- 任意 GET 响应都不包含 Secret 或摘要。
+- 使用测试凭据写入后，微信 AppSecret 在 MySQL 对应字段中以原值明文保存。
 - Service 和机器 Admin Secret 在 MySQL 中只存在摘要。
-- 相同 AppSecret 加密两次得到不同密文。
-- 修改密文、nonce、认证标签或 AAD 后解密失败。
-- game-a 密文不能作为 game-b Secret 解密。
+- 替换 AppSecret 后数据库不保留旧值。
+- 没有应用读取权限的 MySQL 账号不能读取 AppSecret。
+- 生产备份经过加密，且不能直接恢复到测试或开发环境。
 - Secret 不出现在日志、审计、指标、浏览器存储或错误响应。
 - 一次性 Service Secret 关闭窗口后无法恢复。
 - 未重新认证或没有 Secret 权限的管理员无法修改 Secret。
 
 ### 稳定性
 
-- KMS/Vault 不可用时 Secret 写入失败关闭，不保存不完整版本。
+- AppSecret 与其版本、操作者和审计记录在同一事务中成功或回滚。
 - Secret 写入网络超时后不会因网页自动重试产生多个版本。
 - 多实例在规定时间内加载同一 revision。
 - 旧配置缓存不会无限期存活。
-- 数据库与 KMS 联合恢复流程经过测试。
+- MySQL 恢复流程经过测试，恢复后 AppSecret 可正常调用微信接口。
 
 ## 17. 参考资料
 
 - [OWASP Secrets Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html)
 - [OWASP Cryptographic Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html)
-- [OWASP Key Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Key_Management_Cheat_Sheet.html)
 - [Node.js 22 Crypto Documentation](https://nodejs.org/download/release/v22.17.0/docs/api/crypto.html)
