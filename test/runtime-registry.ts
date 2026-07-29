@@ -50,12 +50,26 @@ function context(game: TestRuntimeGame): GameContext {
     configurationState: game.configurationState ?? "configured",
     directory,
     wechat: {
+      provider: "wechat",
       async exchange() {
         return {
           ok: true,
-          openid: "openid",
-          unionid: null,
-          sessionKey: "session-key",
+          provider: "wechat",
+          providerAppId: "wx-test-app",
+          subject: "openid",
+          unionSubject: null,
+        };
+      },
+    },
+    douyin: {
+      provider: "douyin",
+      async exchange() {
+        return {
+          ok: true,
+          provider: "douyin",
+          providerAppId: "tt-test-app",
+          subject: "openid",
+          unionSubject: null,
         };
       },
     },

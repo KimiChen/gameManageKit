@@ -19,6 +19,7 @@ type JsonRecord = Record<string, unknown>;
 
 const OLD_SINGLE_GAME_OPERATIONS = [
   "POST /v1/sessions/wechat",
+  "POST /v1/sessions/douyin",
   "POST /v1/sessions/dev",
   "GET /v1/areas",
   "POST /v1/internal/sessions/verify",
@@ -40,6 +41,55 @@ function serviceStubs(games: GameRuntimeRegistry): GameManageKitServices {
     revision: 1,
     createdAt: "2026-07-28T00:00:00.000Z",
     updatedAt: "2026-07-28T00:00:00.000Z",
+  };
+  const integrationStubs = {
+    async get() {
+      throw new Error("测试未调用");
+    },
+    async updateShared() {
+      throw new Error("测试未调用");
+    },
+    async updateProvider() {
+      throw new Error("测试未调用");
+    },
+    async replaceProviderSecret() {
+      throw new Error("测试未调用");
+    },
+    async clearProviderSecret() {
+      throw new Error("测试未调用");
+    },
+  };
+  const loginStubs = {
+    async loginWechat() {
+      return {
+        ok: true as const,
+        response: {
+          userId: "u_1",
+          accessToken: "opaque",
+          isNewAccount: true,
+        },
+      };
+    },
+    async loginDouyin() {
+      return {
+        ok: true as const,
+        response: {
+          userId: "u_1",
+          accessToken: "opaque",
+          isNewAccount: true,
+        },
+      };
+    },
+    async loginDev() {
+      return {
+        ok: true as const,
+        response: {
+          userId: "u_1",
+          accessToken: "opaque",
+          isNewAccount: true,
+        },
+      };
+    },
   };
   return {
     games,
@@ -88,17 +138,7 @@ function serviceStubs(games: GameRuntimeRegistry): GameManageKitServices {
         throw new Error("测试未调用");
       },
     },
-    integrations: {
-      async get() {
-        throw new Error("测试未调用");
-      },
-      async update() {
-        throw new Error("测试未调用");
-      },
-      async replaceWechatSecret() {
-        throw new Error("测试未调用");
-      },
-    },
+    integrations: integrationStubs,
     machineIdentities: {
       async list() {
         throw new Error("测试未调用");
@@ -123,20 +163,7 @@ function serviceStubs(games: GameRuntimeRegistry): GameManageKitServices {
       },
     },
     metrics: new MetricsRegistry(games.list().map((game) => game.gameId)),
-    login: {
-      async loginWechat() {
-        return {
-          ok: true,
-          response: { userId: "u_1", accessToken: "opaque", isNewAccount: true },
-        };
-      },
-      async loginDev() {
-        return {
-          ok: true,
-          response: { userId: "u_1", accessToken: "opaque", isNewAccount: true },
-        };
-      },
-    },
+    login: loginStubs,
     directory: {
       async list() {
         return { isOps: false, hash: "hash", servers: [], myServerIds: [] };
@@ -285,7 +312,7 @@ test("实际双监听路由全集与 OpenAPI method/path/tag 完全一致", asyn
   }
 });
 
-test("当前 OpenAPI 未破坏 committed v1 基线", async () => {
+test("当前 OpenAPI 未破坏 committed 基线", async () => {
   await checkContractBreaking();
 });
 

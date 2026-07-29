@@ -136,10 +136,16 @@ function services(
       async get() {
         throw new Error("测试未调用");
       },
-      async update() {
+      async updateShared() {
         throw new Error("测试未调用");
       },
-      async replaceWechatSecret() {
+      async updateProvider() {
+        throw new Error("测试未调用");
+      },
+      async replaceProviderSecret() {
+        throw new Error("测试未调用");
+      },
+      async clearProviderSecret() {
         throw new Error("测试未调用");
       },
     },
@@ -169,6 +175,9 @@ function services(
     metrics,
     login: {
       async loginWechat() {
+        return { ok: true, response: LOGIN };
+      },
+      async loginDouyin() {
         return { ok: true, response: LOGIN };
       },
       async loginDev() {
@@ -493,7 +502,7 @@ test("HTTP 映射非法、未知、维护和停用游戏状态", async (t) => {
     url: "/v1/games/INVALID/areas",
   });
   assert.equal(invalid.statusCode, 400);
-  assert.equal(invalid.json().code, "INVALID_PAYLOAD");
+  assert.equal(invalid.json().code, "INVALID_REQUEST");
 
   const unknown = await apps.publicApp.inject({
     method: "GET",
@@ -515,6 +524,67 @@ test("HTTP 映射非法、未知、维护和停用游戏状态", async (t) => {
   });
   assert.equal(disabled.statusCode, 403);
   assert.equal(disabled.json().code, "GAME_DISABLED");
+});
+
+test("区服准入拒绝发生在 Provider 请求前并记录规范化审计", async (t) => {
+  const games = await gameRegistry();
+  let providerCalls = 0;
+  const audits: Array<Record<string, unknown>> = [];
+  const apps = buildApps(config(), services(games, {
+    login: {
+      async loginWechat() {
+        providerCalls += 1;
+        return { ok: true, response: LOGIN };
+      },
+      async loginDouyin() {
+        providerCalls += 1;
+        return { ok: true, response: LOGIN };
+      },
+      async loginDev() {
+        providerCalls += 1;
+        return { ok: true, response: LOGIN };
+      },
+      async auditAdmissionDenied(gameId, provider, attempt, reason) {
+        audits.push({
+          gameId,
+          provider,
+          serverId: attempt.serverId,
+          requestId: attempt.requestId,
+          reason,
+        });
+      },
+    },
+  }));
+  t.after(async () => {
+    await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);
+  });
+
+  const denied = await apps.publicApp.inject({
+    method: "POST",
+    url: "/v1/games/game-a/sessions/douyin",
+    payload: {
+      code: "must-not-reach-provider",
+      serverId: 99,
+      deviceId: "admission-device",
+    },
+  });
+  assert.equal(denied.statusCode, 404, denied.body);
+  assert.equal(denied.json().code, "SERVER_NOT_FOUND");
+  assert.equal(providerCalls, 0);
+  assert.equal(audits.length, 1);
+  assert.deepEqual({
+    gameId: audits[0]?.gameId,
+    provider: audits[0]?.provider,
+    serverId: audits[0]?.serverId,
+    reason: audits[0]?.reason,
+    requestIdType: typeof audits[0]?.requestId,
+  }, {
+    gameId: "game-a",
+    provider: "douyin",
+    serverId: 99,
+    reason: "SERVER_NOT_FOUND",
+    requestIdType: "string",
+  });
 });
 
 test("/readyz 将未就绪和检查异常都映射为 503", async (t) => {

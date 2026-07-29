@@ -9,6 +9,12 @@ import type {
 } from "mysql2/promise";
 import type { AreaServer } from "@gono/game-manage-kit-contract";
 import { GameManageKitError } from "../../errors.js";
+import type {
+  AuthExchangeResult,
+  ExternalAuthProvider,
+  IdentityProviderClient,
+  ProviderFailureReason,
+} from "../account/auth-provider.js";
 import {
   MysqlDirectoryProvider,
   type DirectoryProvider,
@@ -17,8 +23,11 @@ import {
   TokenBucketLimiter,
 } from "../../infra/security/security.js";
 import {
+  DouyinClient,
+  type DouyinIdentityClient,
+} from "../../infra/douyin/client.js";
+import {
   WechatClient,
-  type WechatExchangeResult,
   type WechatIdentityClient,
 } from "../../infra/wechat/client.js";
 
@@ -45,6 +54,7 @@ export interface GameContext {
   readonly configurationState: GameConfigurationState;
   readonly directory: DirectoryProvider;
   readonly wechat: WechatIdentityClient;
+  readonly douyin: DouyinIdentityClient;
   readonly sessionTtlSeconds: number;
   readonly loginRate: RateLimitPolicy;
   readonly adminRate: RateLimitPolicy;
@@ -88,7 +98,10 @@ export interface GameRuntimeRegistry {
     identity: ServiceIdentity | AdminIdentity,
     gameId: string,
   ): boolean;
-  invalidate?(gameId: string): void;
+  invalidate?(
+    gameId: string,
+    provider?: ExternalAuthProvider,
+  ): void;
   loadedRevision?(gameId: string): LoadedGameRevision | null;
 }
 
@@ -106,12 +119,6 @@ interface GameConfigurationRow extends RowDataPacket {
   readonly status: string;
   readonly configuration_state: string;
   readonly game_revision: number | string;
-  readonly wechat_app_id: string | null;
-  readonly wechat_secret_configured: number | boolean | string | null;
-  readonly wechat_endpoint: string | null;
-  readonly wechat_timeout_ms: number | string | null;
-  readonly wechat_breaker_threshold: number | string | null;
-  readonly wechat_breaker_open_ms: number | string | null;
   readonly session_ttl_seconds: number | string | null;
   readonly login_rate_capacity: number | string | null;
   readonly login_rate_refill_per_second: number | string | null;
@@ -121,16 +128,18 @@ interface GameConfigurationRow extends RowDataPacket {
   readonly directory_revision: number | string | null;
 }
 
-interface WechatConfigurationRow extends RowDataPacket {
-  readonly wechat_app_id: string | null;
-  readonly wechat_app_secret: string | null;
-  readonly wechat_endpoint: string;
-  readonly wechat_timeout_ms: number | string;
-  readonly wechat_breaker_threshold: number | string;
-  readonly wechat_breaker_open_ms: number | string;
-  readonly wechat_secret_version: number | string;
-  readonly wechat_validation_failed_at: Date | string | null;
-  readonly revision: number | string;
+interface ProviderConfigurationRow extends RowDataPacket {
+  readonly integration_revision: number | string;
+  readonly provider: string | null;
+  readonly enabled: number | boolean | string | null;
+  readonly app_id: string | null;
+  readonly app_secret: string | null;
+  readonly secret_version: number | string | null;
+  readonly endpoint: string | null;
+  readonly timeout_ms: number | string | null;
+  readonly breaker_threshold: number | string | null;
+  readonly breaker_open_ms: number | string | null;
+  readonly validation_state: string | null;
 }
 
 interface MachineAuthenticationRow extends RowDataPacket {
@@ -146,12 +155,19 @@ interface CachedGame {
   expiresAtMs: number;
 }
 
-interface CachedWechat {
-  readonly integrationRevision: number;
+type ProviderAvailability =
+  | "ready"
+  | "unavailable"
+  | "invalid_credentials";
+
+interface CachedProvider {
+  integrationRevision: number;
   readonly secretVersion: number;
-  readonly client: WechatClient;
-  validationFailed: boolean;
-  validationReportExpiresAtMs: number;
+  readonly configurationKey: string;
+  readonly client: IdentityProviderClient | null;
+  availability: ProviderAvailability;
+  validationState: "unvalidated" | "active" | "validation_failed";
+  expiresAtMs: number;
 }
 
 const DEFAULT_CACHE_TTL_MS = 2_000;
@@ -165,14 +181,20 @@ const CONFIGURATION_STATES = new Set<GameConfigurationState>([
   "configured",
 ]);
 const MACHINE_ID_PATTERN = /^[a-z][a-z0-9_.-]{2,63}$/;
+const PROVIDER_VALIDATION_STATES = new Set([
+  "unvalidated",
+  "active",
+  "validation_failed",
+]);
+const OFFICIAL_PROVIDER_ENDPOINTS = Object.freeze({
+  wechat: "https://api.weixin.qq.com/sns/jscode2session",
+  douyin:
+    "https://minigame.zijieapi.com/mgplatform/api/apps/jscode2session",
+} satisfies Record<ExternalAuthProvider, string>);
 
 const SELECT_GAME_CONFIGURATION = `
   SELECT g.game_id, g.name, g.status, g.configuration_state,
          g.revision AS game_revision,
-         i.wechat_app_id,
-         (i.wechat_app_secret IS NOT NULL) AS wechat_secret_configured,
-         i.wechat_endpoint, i.wechat_timeout_ms,
-         i.wechat_breaker_threshold, i.wechat_breaker_open_ms,
          i.session_ttl_seconds, i.login_rate_capacity,
          i.login_rate_refill_per_second, i.admin_rate_capacity,
          i.admin_rate_refill_per_second,
@@ -212,6 +234,7 @@ function revision(value: number | string | null, label: string): number {
 
 function endpoint(
   value: string | null,
+  provider: ExternalAuthProvider,
   production: boolean,
   label: string,
 ): string {
@@ -224,16 +247,23 @@ function endpoint(
   } catch {
     throw new Error(`${label} 数据无效`);
   }
-  if (parsed.username || parsed.password || parsed.hash) {
+  if (
+    parsed.username
+    || parsed.password
+    || parsed.hash
+    || parsed.search
+  ) {
     throw new Error(`${label} 数据无效`);
   }
-  const officialWechatEndpoint = parsed.protocol === "https:"
-    && parsed.hostname === "api.weixin.qq.com"
+  const officialValue = OFFICIAL_PROVIDER_ENDPOINTS[provider];
+  const official = new URL(officialValue);
+  if (
+    parsed.protocol === official.protocol
+    && parsed.hostname === official.hostname
     && parsed.port === ""
-    && parsed.pathname === "/sns/jscode2session"
-    && parsed.search === "";
-  if (officialWechatEndpoint) {
-    return value;
+    && parsed.pathname === official.pathname
+  ) {
+    return officialValue;
   }
   const loopback = parsed.hostname === "localhost"
     || parsed.hostname === "127.0.0.1"
@@ -247,6 +277,50 @@ function endpoint(
     return value;
   }
   throw new Error(`${label} 数据无效`);
+}
+
+function asciiValue(
+  value: unknown,
+  maximumLength: number,
+): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= maximumLength
+    && /^[\x21-\x7e]+$/u.test(value);
+}
+
+function providerCacheKey(
+  gameId: string,
+  provider: ExternalAuthProvider,
+): string {
+  return `${gameId}\u0000${provider}`;
+}
+
+function providerConfigurationKey(
+  row: ProviderConfigurationRow,
+): string {
+  return JSON.stringify([
+    Number(row.enabled),
+    row.app_id,
+    Number(row.secret_version),
+    row.endpoint,
+    Number(row.timeout_ms),
+    Number(row.breaker_threshold),
+    Number(row.breaker_open_ms),
+  ]);
+}
+
+function providerFailure<
+  Provider extends ExternalAuthProvider,
+>(
+  reason: ProviderFailureReason,
+  providerVersion?: number,
+): AuthExchangeResult<Provider> {
+  return providerVersion === undefined
+      || !Number.isSafeInteger(providerVersion)
+      || providerVersion < 1
+    ? { ok: false, reason }
+    : { ok: false, reason, providerVersion };
 }
 
 function sameRevision(
@@ -294,27 +368,23 @@ function assertPublicGame(context: GameContext): GameContext {
   return context;
 }
 
-class LazyWechatClient implements WechatIdentityClient {
+class LazyProviderClient<
+  Provider extends ExternalAuthProvider,
+> implements IdentityProviderClient<Provider> {
   constructor(
     private readonly resolver: GameConfigResolver,
     private readonly gameId: string,
     private readonly integrationRevision: number,
+    readonly provider: Provider,
   ) {}
 
-  async exchange(code: string): Promise<WechatExchangeResult> {
-    const client = await this.resolver.wechatClient(
+  exchange(code: string): Promise<AuthExchangeResult<Provider>> {
+    return this.resolver.exchangeProvider(
       this.gameId,
+      this.provider,
       this.integrationRevision,
-    ).catch(() => null);
-    const resolved: WechatExchangeResult = client
-      ? await client.exchange(code)
-      : { ok: false, reason: "wx_unavailable" };
-    await this.resolver.recordWechatValidation(
-      this.gameId,
-      this.integrationRevision,
-      resolved,
-    ).catch(() => undefined);
-    return resolved;
+      code,
+    );
   }
 }
 
@@ -323,7 +393,11 @@ export class GameConfigResolver implements GameRuntimeRegistry {
   private readonly now: () => number;
   private readonly games = new Map<string, CachedGame>();
   private readonly refreshes = new Map<string, Promise<GameContext>>();
-  private readonly wechatClients = new Map<string, CachedWechat>();
+  private readonly providerClients = new Map<string, CachedProvider>();
+  private readonly providerRefreshes = new Map<
+    string,
+    Promise<CachedProvider | null>
+  >();
   private readonly generations = new Map<string, number>();
   private initialized = false;
 
@@ -383,7 +457,10 @@ export class GameConfigResolver implements GameRuntimeRegistry {
     return assertPublicGame(await this.refresh(gameId, true));
   }
 
-  invalidate(gameId: string): void {
+  invalidate(
+    gameId: string,
+    provider?: ExternalAuthProvider | null,
+  ): void {
     this.generations.set(
       gameId,
       (this.generations.get(gameId) ?? 0) + 1,
@@ -392,7 +469,14 @@ export class GameConfigResolver implements GameRuntimeRegistry {
     if (cached) {
       cached.expiresAtMs = 0;
     }
-    this.wechatClients.delete(gameId);
+    if (provider === null) {
+      return;
+    }
+    if (provider) {
+      this.providerClients.delete(providerCacheKey(gameId, provider));
+    } else {
+      this.clearProviderClients(gameId);
+    }
   }
 
   loadedRevision(gameId: string): LoadedGameRevision | null {
@@ -458,148 +542,319 @@ export class GameConfigResolver implements GameRuntimeRegistry {
     return identity.gameIds.includes(gameId);
   }
 
-  async wechatClient(
+  async exchangeProvider<
+    Provider extends ExternalAuthProvider,
+  >(
     gameId: string,
+    provider: Provider,
     expectedIntegrationRevision: number,
-  ): Promise<WechatClient> {
-    const generation = this.generations.get(gameId) ?? 0;
-    const cached = this.wechatClients.get(gameId);
+    code: string,
+  ): Promise<AuthExchangeResult<Provider>> {
+    const cached = await this.providerClient(
+      gameId,
+      provider,
+      expectedIntegrationRevision,
+    ).catch(() => null);
+    if (!cached) {
+      return providerFailure("unavailable");
+    }
+    if (cached.availability === "unavailable") {
+      return providerFailure("unavailable", cached.secretVersion);
+    }
+    if (cached.availability === "invalid_credentials") {
+      return providerFailure(
+        "invalid_credentials",
+        cached.secretVersion,
+      );
+    }
+    if (!cached.client) {
+      return providerFailure("unavailable", cached.secretVersion);
+    }
+
+    let result: AuthExchangeResult<Provider>;
+    try {
+      result = await (
+        cached.client as IdentityProviderClient<Provider>
+      ).exchange(code);
+    } catch {
+      result = providerFailure("unavailable");
+    }
+    if (result.ok && result.provider !== provider) {
+      return providerFailure(
+        "invalid_response",
+        cached.secretVersion,
+      );
+    }
+    const versionedResult: AuthExchangeResult<Provider> = Object.freeze({
+      ...result,
+      providerVersion: cached.secretVersion,
+    });
+    await this.recordProviderValidation(
+      gameId,
+      provider,
+      expectedIntegrationRevision,
+      cached,
+      versionedResult,
+    ).catch(() => undefined);
+    return versionedResult;
+  }
+
+  private providerClient(
+    gameId: string,
+    provider: ExternalAuthProvider,
+    expectedIntegrationRevision: number,
+  ): Promise<CachedProvider | null> {
+    const loadedIntegrationRevision =
+      this.games.get(gameId)?.context.revision.integration;
+    if (
+      loadedIntegrationRevision !== undefined
+      && loadedIntegrationRevision !== expectedIntegrationRevision
+    ) {
+      return Promise.resolve(null);
+    }
+    const key = providerCacheKey(gameId, provider);
+    const cached = this.providerClients.get(key);
     if (
       cached
       && cached.integrationRevision === expectedIntegrationRevision
+      && this.now() < cached.expiresAtMs
     ) {
-      return cached.client;
+      return Promise.resolve(cached);
     }
-    const [rows] = await this.pool.query<WechatConfigurationRow[]>(
-      `SELECT wechat_app_id, wechat_app_secret, wechat_endpoint,
-              wechat_timeout_ms, wechat_breaker_threshold,
-              wechat_breaker_open_ms, wechat_secret_version,
-              wechat_validation_failed_at, revision
-         FROM game_integrations
-        WHERE game_id = ?
-        LIMIT 1`,
-      [gameId],
-    );
-    if ((this.generations.get(gameId) ?? 0) !== generation) {
-      return this.wechatClient(gameId, expectedIntegrationRevision);
+    const refreshKey = `${key}\u0000${expectedIntegrationRevision}`;
+    const inFlight = this.providerRefreshes.get(refreshKey);
+    if (inFlight) {
+      return inFlight;
     }
-    const row = rows[0];
-    const appId = row?.wechat_app_id;
-    const secret = row?.wechat_app_secret;
-    if (
-      !row
-      || !appId
-      || appId.length > 128
-      || !secret
-      || secret.length > 512
-    ) {
-      throw new Error("微信接入配置不完整");
-    }
-    const integrationRevision = revision(row.revision, "微信接入 revision");
-    const secretVersion = positiveInteger(
-      row.wechat_secret_version,
-      "微信 Secret version",
-      1,
-      Number.MAX_SAFE_INTEGER,
-    );
-    if (
-      cached
-      && cached.integrationRevision === integrationRevision
-      && cached.secretVersion === secretVersion
-    ) {
-      return cached.client;
-    }
-    const client = new WechatClient({
-      appId,
-      secret,
-      endpoint: endpoint(
-        row.wechat_endpoint,
-        this.options.production,
-        "微信 endpoint",
-      ),
-      timeoutMs: positiveInteger(
-        row.wechat_timeout_ms,
-        "微信 timeout",
-        100,
-        30_000,
-      ),
-      breakerThreshold: positiveInteger(
-        row.wechat_breaker_threshold,
-        "微信 breaker threshold",
-        1,
-        1_000,
-      ),
-      breakerOpenMs: positiveInteger(
-        row.wechat_breaker_open_ms,
-        "微信 breaker open",
-        100,
-        600_000,
-      ),
-      ...(this.options.fetchImpl
-        ? { fetchImpl: this.options.fetchImpl }
-        : {}),
-      now: this.now,
+    const refresh = this.loadProviderClient(
+      gameId,
+      provider,
+      expectedIntegrationRevision,
+      this.generations.get(gameId) ?? 0,
+    ).finally(() => {
+      if (this.providerRefreshes.get(refreshKey) === refresh) {
+        this.providerRefreshes.delete(refreshKey);
+      }
     });
-    this.wechatClients.set(gameId, {
-      integrationRevision,
-      secretVersion,
-      client,
-      validationFailed: row.wechat_validation_failed_at !== null,
-      validationReportExpiresAtMs: 0,
-    });
-    return client;
+    this.providerRefreshes.set(refreshKey, refresh);
+    return refresh;
   }
 
-  async recordWechatValidation(
+  private async loadProviderClient(
     gameId: string,
+    provider: ExternalAuthProvider,
     expectedIntegrationRevision: number,
-    result: WechatExchangeResult,
-  ): Promise<void> {
-    const cached = this.wechatClients.get(gameId);
+    generation: number,
+  ): Promise<CachedProvider | null> {
+    const [rows] = await this.pool.query<ProviderConfigurationRow[]>(
+      `SELECT i.revision AS integration_revision,
+              p.provider, p.enabled, p.app_id, p.app_secret,
+              p.secret_version, p.endpoint, p.timeout_ms,
+              p.breaker_threshold, p.breaker_open_ms,
+              p.validation_state
+         FROM game_integrations AS i
+         LEFT JOIN game_identity_providers AS p
+           ON p.game_id = i.game_id AND p.provider = ?
+        WHERE i.game_id = ?
+        LIMIT 1`,
+      [provider, gameId],
+    );
+    if ((this.generations.get(gameId) ?? 0) !== generation) {
+      return this.loadProviderClient(
+        gameId,
+        provider,
+        expectedIntegrationRevision,
+        this.generations.get(gameId) ?? 0,
+      );
+    }
+    const row = rows[0];
+    if (!row) {
+      return null;
+    }
+    const integrationRevision = revision(
+      row.integration_revision,
+      `${provider} 接入 revision`,
+    );
+    if (integrationRevision !== expectedIntegrationRevision) {
+      this.expireGame(gameId);
+      return null;
+    }
+
+    const key = providerCacheKey(gameId, provider);
+    const existing = this.providerClients.get(key);
+    const configurationKey = providerConfigurationKey(row);
+    const rawSecretVersion = Number(row.secret_version ?? 0);
+    const secretVersion = Number.isSafeInteger(rawSecretVersion)
+      && rawSecretVersion >= 0
+      ? rawSecretVersion
+      : 0;
+    const enabled = Number(row.enabled) === 1;
+    const appId = row.app_id;
+    const secret = row.app_secret;
+    const validationState = String(
+      row.validation_state ?? "unvalidated",
+    );
+    const reusableClient = existing?.configurationKey === configurationKey
+      ? existing.client
+      : null;
+
+    let availability: ProviderAvailability = "unavailable";
+    let client: IdentityProviderClient | null = reusableClient;
+    let normalizedValidationState:
+      CachedProvider["validationState"] = "unvalidated";
     if (
-      !cached
+      row.provider === provider
+      && PROVIDER_VALIDATION_STATES.has(validationState)
+    ) {
+      normalizedValidationState =
+        validationState as CachedProvider["validationState"];
+    }
+
+    if (
+      enabled
+      && row.provider === provider
+      && asciiValue(appId, 128)
+      && typeof secret === "string"
+      && secret.length > 0
+      && secret.length <= 512
+      && secretVersion > 0
+      && PROVIDER_VALIDATION_STATES.has(validationState)
+    ) {
+      if (validationState === "validation_failed") {
+        availability = "invalid_credentials";
+      } else {
+        try {
+          if (!client) {
+            const clientOptions = {
+              appId,
+              secret,
+              endpoint: endpoint(
+                row.endpoint,
+                provider,
+                this.options.production,
+                `${provider} endpoint`,
+              ),
+              timeoutMs: positiveInteger(
+                row.timeout_ms,
+                `${provider} timeout`,
+                100,
+                30_000,
+              ),
+              breakerThreshold: positiveInteger(
+                row.breaker_threshold,
+                `${provider} breaker threshold`,
+                1,
+                1_000,
+              ),
+              breakerOpenMs: positiveInteger(
+                row.breaker_open_ms,
+                `${provider} breaker open`,
+                100,
+                600_000,
+              ),
+              ...(this.options.fetchImpl
+                ? { fetchImpl: this.options.fetchImpl }
+                : {}),
+              now: this.now,
+            };
+            client = provider === "wechat"
+              ? new WechatClient(clientOptions)
+              : new DouyinClient(clientOptions);
+          }
+          availability = "ready";
+        } catch {
+          client = null;
+          availability = "unavailable";
+        }
+      }
+    }
+    if (availability !== "ready") {
+      client = null;
+    }
+
+    const cached: CachedProvider = {
+      integrationRevision,
+      secretVersion,
+      configurationKey,
+      client,
+      availability,
+      validationState: normalizedValidationState,
+      expiresAtMs: this.now() + this.cacheTtlMs,
+    };
+    this.providerClients.set(key, cached);
+    return cached;
+  }
+
+  private async recordProviderValidation<
+    Provider extends ExternalAuthProvider,
+  >(
+    gameId: string,
+    provider: Provider,
+    expectedIntegrationRevision: number,
+    cached: CachedProvider,
+    result: AuthExchangeResult<Provider>,
+  ): Promise<void> {
+    const current = this.providerClients.get(
+      providerCacheKey(gameId, provider),
+    );
+    if (
+      current !== cached
       || cached.integrationRevision !== expectedIntegrationRevision
     ) {
       return;
     }
-    const validationFailed = !result.ok
-      && result.reason !== "wx_rate_limited";
+
+    if (result.ok) {
+      if (cached.validationState === "active") {
+        return;
+      }
+      cached.validationState = "active";
+      cached.availability = "ready";
+      await this.pool.execute<ResultSetHeader>(
+        `UPDATE game_identity_providers AS p
+           JOIN game_integrations AS i ON i.game_id = p.game_id
+            SET p.validation_state = 'active',
+                p.validation_failed_at = NULL,
+                p.validation_error_code = NULL
+          WHERE p.game_id = ?
+            AND p.provider = ?
+            AND i.revision = ?
+            AND p.validation_state <> 'active'`,
+        [gameId, provider, expectedIntegrationRevision],
+      );
+      return;
+    }
     if (
-      cached.validationFailed === validationFailed
-      && this.now() < cached.validationReportExpiresAtMs
+      result.reason !== "invalid_credentials"
+      || cached.validationState === "validation_failed"
     ) {
       return;
     }
-    const previous = cached.validationFailed;
-    const previousExpiry = cached.validationReportExpiresAtMs;
-    cached.validationFailed = validationFailed;
-    cached.validationReportExpiresAtMs = this.now() + this.cacheTtlMs;
-    try {
-      if (validationFailed) {
-        await this.pool.execute(
-          `UPDATE game_integrations
-              SET wechat_validation_failed_at = NOW(3)
-            WHERE game_id = ?
-              AND revision = ?
-              AND wechat_validation_failed_at IS NULL`,
-          [gameId, expectedIntegrationRevision],
-        );
-      } else {
-        await this.pool.execute(
-          `UPDATE game_integrations
-              SET wechat_validation_failed_at = NULL
-            WHERE game_id = ?
-              AND revision = ?
-              AND wechat_validation_failed_at IS NOT NULL`,
-          [gameId, expectedIntegrationRevision],
-        );
-      }
-    } catch (error) {
-      if (this.wechatClients.get(gameId) === cached) {
-        cached.validationFailed = previous;
-        cached.validationReportExpiresAtMs = previousExpiry;
-      }
-      throw error;
+    cached.validationState = "validation_failed";
+    cached.availability = "invalid_credentials";
+    await this.pool.execute<ResultSetHeader>(
+      `UPDATE game_identity_providers AS p
+         JOIN game_integrations AS i ON i.game_id = p.game_id
+          SET p.validation_state = 'validation_failed',
+              p.validation_failed_at = NOW(3),
+              p.validation_error_code = 'invalid_credentials'
+        WHERE p.game_id = ?
+          AND p.provider = ?
+          AND i.revision = ?
+          AND p.validation_state <> 'validation_failed'`,
+      [gameId, provider, expectedIntegrationRevision],
+    );
+  }
+
+  private clearProviderClients(gameId: string): void {
+    this.providerClients.delete(providerCacheKey(gameId, "wechat"));
+    this.providerClients.delete(providerCacheKey(gameId, "douyin"));
+  }
+
+  private expireGame(gameId: string): void {
+    const cached = this.games.get(gameId);
+    if (cached) {
+      cached.expiresAtMs = 0;
     }
   }
 
@@ -646,7 +901,7 @@ export class GameConfigResolver implements GameRuntimeRegistry {
     }
     if (!row) {
       this.games.delete(gameId);
-      this.wechatClients.delete(gameId);
+      this.clearProviderClients(gameId);
       if (failIfMissing) {
         throw new GameManageKitError(404, "GAME_NOT_FOUND");
       }
@@ -667,16 +922,6 @@ export class GameConfigResolver implements GameRuntimeRegistry {
       || row.directory_revision === null
     ) {
       throw new Error(`游戏 ${gameId} 缺少运行时配置`);
-    }
-    if (
-      configurationState === "configured"
-      && (
-        !row.wechat_app_id
-        || row.wechat_app_id.length > 128
-        || Number(row.wechat_secret_configured) !== 1
-      )
-    ) {
-      throw new Error(`游戏 ${gameId} 微信接入配置不完整`);
     }
     const loadedRevision = Object.freeze({
       game: revision(row.game_revision, "游戏 revision"),
@@ -716,26 +961,6 @@ export class GameConfigResolver implements GameRuntimeRegistry {
         "管理限流 refill",
       ),
     });
-    // Validate all non-secret WeChat settings when the context is loaded. The
-    // AppSecret itself is intentionally absent from this query.
-    endpoint(
-      row.wechat_endpoint,
-      this.options.production,
-      "微信 endpoint",
-    );
-    positiveInteger(row.wechat_timeout_ms, "微信 timeout", 100, 30_000);
-    positiveInteger(
-      row.wechat_breaker_threshold,
-      "微信 breaker threshold",
-      1,
-      1_000,
-    );
-    positiveInteger(
-      row.wechat_breaker_open_ms,
-      "微信 breaker open",
-      100,
-      600_000,
-    );
     const integrationUnchanged = previous
       && previous.revision.integration === loadedRevision.integration;
     const context: GameContext = Object.freeze({
@@ -751,10 +976,19 @@ export class GameConfigResolver implements GameRuntimeRegistry {
         ),
       wechat: integrationUnchanged
         ? previous.wechat
-        : new LazyWechatClient(
+        : new LazyProviderClient(
             this,
             gameId,
             loadedRevision.integration,
+            "wechat",
+          ),
+      douyin: integrationUnchanged
+        ? previous.douyin
+        : new LazyProviderClient(
+            this,
+            gameId,
+            loadedRevision.integration,
+            "douyin",
           ),
       sessionTtlSeconds: positiveInteger(
         row.session_ttl_seconds,
