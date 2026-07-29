@@ -1579,13 +1579,16 @@ components:
       oneOf:
         - type: object
           additionalProperties: false
-          required: [valid, userId, issuedAtMs]
+          required: [valid, userId, issuedAtMs, expiresAtMs]
           properties:
             valid:
               const: true
             userId:
               type: string
             issuedAtMs:
+              type: integer
+              minimum: 0
+            expiresAtMs:
               type: integer
               minimum: 0
         - type: object

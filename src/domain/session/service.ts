@@ -42,7 +42,12 @@ export function parseAccessToken(accessToken: string): ParsedAccessToken | null 
 }
 
 export type VerifySessionResult =
-  | { valid: true; userId: string; issuedAtMs: number }
+  | {
+      valid: true;
+      userId: string;
+      issuedAtMs: number;
+      expiresAtMs: number;
+    }
   | {
       valid: false;
       reason: "NOT_FOUND" | "MISMATCH" | "BANNED" | "DEREGISTERED" | "EXPIRED";
@@ -51,8 +56,8 @@ export type VerifySessionResult =
 interface VerifyRow extends RowDataPacket {
   token_hash: string | null;
   status: number;
-  age_s: number | null;
   issued_ms: number | null;
+  now_ms: number;
 }
 
 export class SessionService {
@@ -101,8 +106,8 @@ export class SessionService {
     }
     const query = () => this.pool.query<VerifyRow[]>(
       `SELECT s.token_hash, a.status,
-              TIMESTAMPDIFF(SECOND, s.token_issued_at, NOW(3)) AS age_s,
-              ROUND(UNIX_TIMESTAMP(s.token_issued_at) * 1000) AS issued_ms
+              ROUND(UNIX_TIMESTAMP(s.token_issued_at) * 1000) AS issued_ms,
+              ROUND(UNIX_TIMESTAMP(NOW(3)) * 1000) AS now_ms
          FROM accounts a
          LEFT JOIN account_sessions s
            ON s.game_id = a.game_id
@@ -133,13 +138,26 @@ export class SessionService {
     ) {
       return { valid: false, reason: "MISMATCH" };
     }
-    if (account.age_s === null || Number(account.age_s) > ttlSeconds) {
+    const issuedAtMs = Number(account.issued_ms);
+    const nowMs = Number(account.now_ms);
+    const expiresAtMs = issuedAtMs + ttlSeconds * 1_000;
+    if (
+      !Number.isSafeInteger(issuedAtMs)
+      || issuedAtMs <= 0
+      || !Number.isSafeInteger(nowMs)
+      || nowMs <= 0
+      || !Number.isSafeInteger(expiresAtMs)
+    ) {
+      throw new Error("会话时间数据无效");
+    }
+    if (nowMs > expiresAtMs) {
       return { valid: false, reason: "EXPIRED" };
     }
     return {
       valid: true,
       userId: parsed.userId,
-      issuedAtMs: Number(account.issued_ms ?? 0),
+      issuedAtMs,
+      expiresAtMs,
     };
   }
 

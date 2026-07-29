@@ -191,7 +191,12 @@ function services(
     },
     sessions: {
       async verify() {
-        return { valid: true, userId: "u_1", issuedAtMs: 1_700_000_000_000 };
+        return {
+          valid: true,
+          userId: "u_1",
+          issuedAtMs: 1_700_000_000_000,
+          expiresAtMs: 1_700_259_200_000,
+        };
       },
     },
     characters: {

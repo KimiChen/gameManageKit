@@ -128,7 +128,7 @@
     "schemas/UpdateIdentityProviderRequest": "9049c0ffa9bb7e2a6e5b1ad540b5ce5e86df39f81cd331b11288ad1b7193301f",
     "schemas/UpdateMachineIdentityRequest": "2667750610f71a8208fc78858e0cb622c8d901a01ca70ec6b1c4bf55437180ea",
     "schemas/VerifySessionRequest": "3b1f900c2794bf5c5be4ea273f1867bb4b6071a16f5b0f8ea9a5693a6a2e1d6f",
-    "schemas/VerifySessionResponse": "9c7b8352c7058d31fa45963c788b4442355f9015fe579dbb785a212e84352cdf",
+    "schemas/VerifySessionResponse": "43af3bcd098d160773e38ac02689ee16605a53b163a23eea380f4880e3195842",
     "schemas/VersionResponse": "3bd00712605fca9eb612e2935a6f827a07542d35273fcb0f21f4380b4b5449b6",
     "schemas/WxLoginRequest": "93e7173d922c0e5244431781acd2f78bd4ca519ee3adcf299574b9d2a2209c79",
     "securitySchemes/AdminSecret": "ddf2bb31df072c4f20c0247ef835ca97ae17221dbd5eea2bc37d67949d6cd0a5",

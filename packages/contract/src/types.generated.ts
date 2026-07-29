@@ -1018,6 +1018,7 @@ export type components = {
             serverId: number;
         };
         VerifySessionResponse: {
+            expiresAtMs: number;
             issuedAtMs: number;
             userId: string;
             /** @constant */

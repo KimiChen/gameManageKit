@@ -178,6 +178,8 @@ curl --fail http://127.0.0.1:2570/v1/games/example-game/areas
   相互隔离；同一 Provider/AppID/subject 重复登录返回同一账号。
 - 抖音链路完成 `tt.login -> /sessions/douyin -> code2session -> accessToken ->
   session verify`；一次性 code 不做自动重试。
+- Internal Session 校验成功会同时返回 `issuedAtMs` 与权威 `expiresAtMs`；游戏服会话
+  快路径的 TTL 必须取不晚于 `expiresAtMs` 的剩余时间，禁止每次严格校验后重新延长。
 - timeout、熔断、半开恢复按 `gameId + provider` 隔离；微信故障不打开抖音熔断。
 - A 游戏 token 不能在 B 游戏验证。
 - Service 和机器 Admin 不能访问范围外游戏。

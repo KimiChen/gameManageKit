@@ -316,7 +316,8 @@ export const GameManageKitSchemas = {
         "required": [
           "valid",
           "userId",
-          "issuedAtMs"
+          "issuedAtMs",
+          "expiresAtMs"
         ],
         "properties": {
           "valid": {
@@ -326,6 +327,10 @@ export const GameManageKitSchemas = {
             "type": "string"
           },
           "issuedAtMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expiresAtMs": {
             "type": "integer",
             "minimum": 0
           }

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
+import type { Pool } from "mysql2/promise";
 import { loadConfig } from "../../src/config.js";
 import {
   DirectoryService,
@@ -7,8 +9,10 @@ import {
 } from "../../src/domain/directory/service.js";
 import { LoginService } from "../../src/domain/account/login.js";
 import type { GameContext } from "../../src/domain/game/resolver.js";
-import { parseAccessToken } from "../../src/domain/session/service.js";
-import type { SessionService } from "../../src/domain/session/service.js";
+import {
+  parseAccessToken,
+  SessionService,
+} from "../../src/domain/session/service.js";
 import type { Database } from "../../src/infra/mysql/database.js";
 import { MetricsRegistry } from "../../src/infra/observability/metrics.js";
 import {
@@ -150,6 +154,40 @@ test("访问令牌严格绑定 gameId、userId 和 24 字节随机段", () => {
   ]) {
     assert.equal(parseAccessToken(invalid), null, invalid);
   }
+});
+
+test("Session 校验返回权威过期时刻并在毫秒边界后拒绝", async () => {
+  const accessToken = `game-a.u_123.${"ab".repeat(24)}`;
+  const issuedAtMs = 1_700_000_000_000;
+  const ttlSeconds = 300;
+  let nowMs = issuedAtMs + ttlSeconds * 1_000;
+  const pool = {
+    async query() {
+      return [[{
+        token_hash: createHash("sha256").update(accessToken).digest("hex"),
+        status: 0,
+        issued_ms: issuedAtMs,
+        now_ms: nowMs,
+      }], []];
+    },
+  } as unknown as Pool;
+  const sessions = new SessionService(pool);
+
+  assert.deepEqual(
+    await sessions.verify("game-a", ttlSeconds, accessToken, 13),
+    {
+      valid: true,
+      userId: "u_123",
+      issuedAtMs,
+      expiresAtMs: issuedAtMs + ttlSeconds * 1_000,
+    },
+  );
+
+  nowMs += 1;
+  assert.deepEqual(
+    await sessions.verify("game-a", ttlSeconds, accessToken, 13),
+    { valid: false, reason: "EXPIRED" },
+  );
 });
 
 test("指标只允许已登记 gameId 与有限标签并按身份范围过滤", () => {
