@@ -275,6 +275,25 @@ export class GameProjectService {
           [input.gameId],
         );
         await connection.execute(
+          `INSERT INTO game_identity_providers
+             (game_id, provider, enabled, app_id, app_secret,
+              secret_version, endpoint, timeout_ms, breaker_threshold,
+              breaker_open_ms, validation_state, updated_by)
+           VALUES
+             (?, 'wechat', 0, NULL, NULL, 0,
+              'https://api.weixin.qq.com/sns/jscode2session',
+              3000, 5, 10000, 'unvalidated', ?),
+             (?, 'douyin', 0, NULL, NULL, 0,
+              'https://minigame.zijieapi.com/mgplatform/api/apps/jscode2session',
+              3000, 5, 10000, 'unvalidated', ?)`,
+          [
+            input.gameId,
+            authorization.operatorId,
+            input.gameId,
+            authorization.operatorId,
+          ],
+        );
+        await connection.execute(
           `INSERT INTO seq (game_id, name, val)
            VALUES (?, 'user_id', 0)`,
           [input.gameId],

@@ -7,6 +7,14 @@ export const GameManageKitSchemas = {
     "pattern": "^[a-z][a-z0-9-]{1,31}$",
     "$id": "GameId"
   },
+  "IdentityProvider": {
+    "type": "string",
+    "enum": [
+      "wechat",
+      "douyin"
+    ],
+    "$id": "IdentityProvider"
+  },
   "OperationId": {
     "type": "string",
     "minLength": 1,
@@ -42,6 +50,7 @@ export const GameManageKitSchemas = {
     "type": "string",
     "enum": [
       "INVALID_PAYLOAD",
+      "INVALID_REQUEST",
       "AUTH_REQUIRED",
       "ACCOUNT_BANNED",
       "NOT_FOUND",
@@ -60,7 +69,12 @@ export const GameManageKitSchemas = {
       "ORIGIN_FORBIDDEN",
       "GAME_PROJECT_CONFLICT",
       "GAME_SERVER_CONFLICT",
-      "ADMIN_ALREADY_INITIALIZED"
+      "ADMIN_ALREADY_INITIALIZED",
+      "AUTH_CODE_INVALID",
+      "PROVIDER_UNAVAILABLE",
+      "PROVIDER_CONFIGURATION_INVALID",
+      "IDENTITY_CONFLICT",
+      "IDENTITY_PROVIDER_CONFLICT"
     ],
     "$id": "ErrorCode"
   },
@@ -108,6 +122,34 @@ export const GameManageKitSchemas = {
       }
     },
     "$id": "WxLoginRequest"
+  },
+  "DouyinLoginRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "code",
+      "serverId"
+    ],
+    "properties": {
+      "code": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "serverId": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65535
+      },
+      "deviceId": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "maxLength": 64
+      }
+    },
+    "$id": "DouyinLoginRequest"
   },
   "DevLoginRequest": {
     "type": "object",
@@ -993,13 +1035,21 @@ export const GameManageKitSchemas = {
     },
     "$id": "UpdateGameServerRequest"
   },
-  "WechatSecretMetadata": {
+  "IdentityProviderValidationState": {
+    "type": "string",
+    "enum": [
+      "unvalidated",
+      "active",
+      "validation_failed"
+    ],
+    "$id": "IdentityProviderValidationState"
+  },
+  "IdentityProviderSecretMetadata": {
     "type": "object",
     "additionalProperties": false,
     "required": [
       "configured",
       "version",
-      "state",
       "updatedAt"
     ],
     "properties": {
@@ -1010,14 +1060,6 @@ export const GameManageKitSchemas = {
         "type": "integer",
         "minimum": 0
       },
-      "state": {
-        "type": "string",
-        "enum": [
-          "active",
-          "missing",
-          "validation_failed"
-        ]
-      },
       "updatedAt": {
         "type": [
           "string",
@@ -1026,7 +1068,96 @@ export const GameManageKitSchemas = {
         "format": "date-time"
       }
     },
-    "$id": "WechatSecretMetadata"
+    "$id": "IdentityProviderSecretMetadata"
+  },
+  "IdentityProviderConfiguration": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "provider",
+      "enabled",
+      "appId",
+      "secretMetadata",
+      "endpoint",
+      "timeoutMs",
+      "breakerThreshold",
+      "breakerOpenMs",
+      "validationState",
+      "validationFailedAt",
+      "validationErrorCode",
+      "updatedBy",
+      "updatedAt"
+    ],
+    "properties": {
+      "provider": {
+        "$ref": "IdentityProvider#"
+      },
+      "enabled": {
+        "type": "boolean"
+      },
+      "appId": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "secretMetadata": {
+        "$ref": "IdentityProviderSecretMetadata#"
+      },
+      "endpoint": {
+        "type": "string",
+        "format": "uri",
+        "maxLength": 2048
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 30000
+      },
+      "breakerThreshold": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      },
+      "breakerOpenMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 600000
+      },
+      "validationState": {
+        "$ref": "IdentityProviderValidationState#"
+      },
+      "validationFailedAt": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "format": "date-time"
+      },
+      "validationErrorCode": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "maxLength": 64
+      },
+      "updatedBy": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 3,
+        "maxLength": 64,
+        "pattern": "^[a-z][a-z0-9_.-]{2,63}$"
+      },
+      "updatedAt": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "$id": "IdentityProviderConfiguration"
   },
   "GameIntegration": {
     "type": "object",
@@ -1034,12 +1165,7 @@ export const GameManageKitSchemas = {
     "required": [
       "gameId",
       "configurationState",
-      "wechatAppId",
-      "wechatSecret",
-      "wechatEndpoint",
-      "wechatTimeoutMs",
-      "wechatBreakerThreshold",
-      "wechatBreakerOpenMs",
+      "providers",
       "sessionTtlSeconds",
       "loginRateCapacity",
       "loginRateRefillPerSecond",
@@ -1057,36 +1183,14 @@ export const GameManageKitSchemas = {
       "configurationState": {
         "$ref": "GameConfigurationState#"
       },
-      "wechatAppId": {
-        "type": [
-          "string",
-          "null"
-        ],
-        "minLength": 1,
-        "maxLength": 128
-      },
-      "wechatSecret": {
-        "$ref": "WechatSecretMetadata#"
-      },
-      "wechatEndpoint": {
-        "type": "string",
-        "format": "uri",
-        "maxLength": 2048
-      },
-      "wechatTimeoutMs": {
-        "type": "integer",
-        "minimum": 100,
-        "maximum": 30000
-      },
-      "wechatBreakerThreshold": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 1000
-      },
-      "wechatBreakerOpenMs": {
-        "type": "integer",
-        "minimum": 100,
-        "maximum": 600000
+      "providers": {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 2,
+        "uniqueItems": true,
+        "items": {
+          "$ref": "IdentityProviderConfiguration#"
+        }
       },
       "sessionTtlSeconds": {
         "type": "integer",
@@ -1139,11 +1243,6 @@ export const GameManageKitSchemas = {
     "type": "object",
     "additionalProperties": false,
     "required": [
-      "wechatAppId",
-      "wechatEndpoint",
-      "wechatTimeoutMs",
-      "wechatBreakerThreshold",
-      "wechatBreakerOpenMs",
       "sessionTtlSeconds",
       "loginRateCapacity",
       "loginRateRefillPerSecond",
@@ -1152,34 +1251,6 @@ export const GameManageKitSchemas = {
       "revision"
     ],
     "properties": {
-      "wechatAppId": {
-        "type": [
-          "string",
-          "null"
-        ],
-        "minLength": 1,
-        "maxLength": 128
-      },
-      "wechatEndpoint": {
-        "type": "string",
-        "format": "uri",
-        "maxLength": 2048
-      },
-      "wechatTimeoutMs": {
-        "type": "integer",
-        "minimum": 100,
-        "maximum": 30000
-      },
-      "wechatBreakerThreshold": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 1000
-      },
-      "wechatBreakerOpenMs": {
-        "type": "integer",
-        "minimum": 100,
-        "maximum": 600000
-      },
       "sessionTtlSeconds": {
         "type": "integer",
         "minimum": 60,
@@ -1212,16 +1283,67 @@ export const GameManageKitSchemas = {
     },
     "$id": "UpdateGameIntegrationRequest"
   },
-  "ReplaceWechatAppSecretRequest": {
+  "UpdateIdentityProviderRequest": {
     "type": "object",
     "additionalProperties": false,
     "required": [
-      "wechatAppSecret",
+      "enabled",
+      "appId",
+      "endpoint",
+      "timeoutMs",
+      "breakerThreshold",
+      "breakerOpenMs",
+      "revision"
+    ],
+    "properties": {
+      "enabled": {
+        "type": "boolean"
+      },
+      "appId": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "endpoint": {
+        "type": "string",
+        "format": "uri",
+        "maxLength": 2048
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 30000
+      },
+      "breakerThreshold": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      },
+      "breakerOpenMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 600000
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "$id": "UpdateIdentityProviderRequest"
+  },
+  "ReplaceIdentityProviderSecretRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "appSecret",
       "revision",
       "operationId"
     ],
     "properties": {
-      "wechatAppSecret": {
+      "appSecret": {
         "type": "string",
         "minLength": 1,
         "maxLength": 512,
@@ -1235,15 +1357,34 @@ export const GameManageKitSchemas = {
         "$ref": "OperationId#"
       }
     },
-    "$id": "ReplaceWechatAppSecretRequest"
+    "$id": "ReplaceIdentityProviderSecretRequest"
   },
-  "WechatSecretWriteResponse": {
+  "ClearIdentityProviderSecretRequest": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "revision",
+      "operationId"
+    ],
+    "properties": {
+      "revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "operationId": {
+        "$ref": "OperationId#"
+      }
+    },
+    "$id": "ClearIdentityProviderSecretRequest"
+  },
+  "IdentityProviderSecretWriteResponse": {
     "type": "object",
     "additionalProperties": false,
     "required": [
       "gameId",
+      "provider",
       "configurationState",
-      "wechatSecret",
+      "secretMetadata",
       "revision",
       "loadedRevision",
       "replayed"
@@ -1252,11 +1393,14 @@ export const GameManageKitSchemas = {
       "gameId": {
         "$ref": "GameId#"
       },
+      "provider": {
+        "$ref": "IdentityProvider#"
+      },
       "configurationState": {
         "$ref": "GameConfigurationState#"
       },
-      "wechatSecret": {
-        "$ref": "WechatSecretMetadata#"
+      "secretMetadata": {
+        "$ref": "IdentityProviderSecretMetadata#"
       },
       "revision": {
         "type": "integer",
@@ -1273,7 +1417,7 @@ export const GameManageKitSchemas = {
         "type": "boolean"
       }
     },
-    "$id": "WechatSecretWriteResponse"
+    "$id": "IdentityProviderSecretWriteResponse"
   },
   "MachineIdentityType": {
     "type": "string",
@@ -1664,11 +1808,17 @@ export const GameManageKitSchemas = {
       "auditType",
       "operatorId",
       "gameId",
+      "provider",
       "identityId",
       "action",
       "result",
       "oldVersion",
       "newVersion",
+      "revision",
+      "requestId",
+      "operationId",
+      "beforeMetadata",
+      "afterMetadata",
       "createdAt"
     ],
     "properties": {
@@ -1692,6 +1842,16 @@ export const GameManageKitSchemas = {
         "oneOf": [
           {
             "$ref": "GameId#"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "provider": {
+        "oneOf": [
+          {
+            "$ref": "IdentityProvider#"
           },
           {
             "type": "null"
@@ -1729,6 +1889,44 @@ export const GameManageKitSchemas = {
           "null"
         ],
         "minimum": 0
+      },
+      "revision": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 1
+      },
+      "requestId": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "operationId": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9_.:-]+$"
+      },
+      "beforeMetadata": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "additionalProperties": true
+      },
+      "afterMetadata": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "additionalProperties": true
       },
       "createdAt": {
         "type": "string",

@@ -188,6 +188,47 @@ export type paths = {
         patch: operations["updateAdminGameDirectorySettings"];
         trace?: never;
     };
+    "/v1/admin/games/{gameId}/identity-providers/{provider}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+                provider: components["parameters"]["IdentityProvider"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** @description 按 revision 修改白名单 Provider 的启用状态、AppID、端点、超时和熔断参数；必须校验请求 Origin。 */
+        patch: operations["updateAdminIdentityProvider"];
+        trace?: never;
+    };
+    "/v1/admin/games/{gameId}/identity-providers/{provider}/secret": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+                provider: components["parameters"]["IdentityProvider"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** @description 替换白名单 Provider 的 AppSecret；要求 Secret 权限、最近重新认证、Origin、revision 和幂等 operationId。 */
+        put: operations["replaceAdminIdentityProviderSecret"];
+        post?: never;
+        /** @description 清除白名单 Provider 的 AppSecret 并禁用该 Provider；要求 Secret 权限、最近重新认证、Origin、revision 和幂等 operationId。 */
+        delete: operations["clearAdminIdentityProviderSecret"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/games/{gameId}/integration": {
         parameters: {
             query?: never;
@@ -197,34 +238,15 @@ export type paths = {
             };
             cookie?: never;
         };
-        /** @description 返回游戏接入参数、运行时加载 revision 和微信 Secret 元数据；永不返回 Secret 或摘要。 */
+        /** @description 返回共享登录参数、Provider 配置、运行时加载 revision 和 Secret 元数据；永不返回 Secret 或摘要。 */
         get: operations["getAdminGameIntegration"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
         head?: never;
-        /** @description 按 revision 修改不含 Secret 的接入参数；必须校验请求 Origin。 */
+        /** @description 按 revision 修改 Session TTL 与限流等共享参数；不修改 Provider 或 Secret，且必须校验请求 Origin。 */
         patch: operations["updateAdminGameIntegration"];
-        trace?: never;
-    };
-    "/v1/admin/games/{gameId}/secrets/wechat-app-secret": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                gameId: components["parameters"]["GameId"];
-            };
-            cookie?: never;
-        };
-        get?: never;
-        /** @description 替换微信 AppSecret；要求 Secret 权限、最近重新认证、Origin、revision 和幂等 operationId。 */
-        put: operations["replaceAdminWechatAppSecret"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
         trace?: never;
     };
     "/v1/admin/games/{gameId}/servers": {
@@ -513,6 +535,24 @@ export type paths = {
         patch?: never;
         trace?: never;
     };
+    "/v1/games/{gameId}/sessions/douyin": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["douyinLogin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/games/{gameId}/sessions/wechat": {
         parameters: {
             query?: never;
@@ -622,6 +662,10 @@ export type components = {
             /** @enum {string} */
             tag: "normal" | "new" | "full" | "maintenance";
         };
+        ClearIdentityProviderSecretRequest: {
+            operationId: components["schemas"]["OperationId"];
+            revision: number;
+        };
         ClientGameListResponse: {
             games: components["schemas"]["ClientGameSummary"][];
         };
@@ -637,8 +681,14 @@ export type components = {
         };
         ConfigurationAuditRecord: {
             action: string;
+            afterMetadata: {
+                [key: string]: unknown;
+            } | null;
             /** @enum {string} */
             auditType: "game_configuration" | "machine_identity" | "secret";
+            beforeMetadata: {
+                [key: string]: unknown;
+            } | null;
             /** Format: date-time */
             createdAt: string;
             gameId: components["schemas"]["GameId"] | null;
@@ -646,8 +696,12 @@ export type components = {
             identityId: components["schemas"]["MachineIdentityId"] | null;
             newVersion: number | null;
             oldVersion: number | null;
+            operationId: string | null;
             operatorId: string;
+            provider: components["schemas"]["IdentityProvider"] | null;
+            requestId: string | null;
             result: string;
+            revision: number | null;
         };
         CreateGameProjectRequest: {
             description: string;
@@ -682,8 +736,13 @@ export type components = {
             devKey: string;
             serverId: number;
         };
+        DouyinLoginRequest: {
+            code: string;
+            deviceId?: string | null;
+            serverId: number;
+        };
         /** @enum {string} */
-        ErrorCode: "INVALID_PAYLOAD" | "AUTH_REQUIRED" | "ACCOUNT_BANNED" | "NOT_FOUND" | "RATE_LIMITED" | "UPSTREAM_UNAVAILABLE" | "SERVICE_AUTH_REQUIRED" | "SERVICE_FORBIDDEN" | "OPERATION_CONFLICT" | "INTERNAL" | "GAME_NOT_FOUND" | "GAME_DISABLED" | "GAME_ACCESS_DENIED" | "SERVER_NOT_FOUND" | "SERVER_DISABLED" | "ADMIN_AUTH_REQUIRED" | "ORIGIN_FORBIDDEN" | "GAME_PROJECT_CONFLICT" | "GAME_SERVER_CONFLICT" | "ADMIN_ALREADY_INITIALIZED";
+        ErrorCode: "INVALID_PAYLOAD" | "INVALID_REQUEST" | "AUTH_REQUIRED" | "ACCOUNT_BANNED" | "NOT_FOUND" | "RATE_LIMITED" | "UPSTREAM_UNAVAILABLE" | "SERVICE_AUTH_REQUIRED" | "SERVICE_FORBIDDEN" | "OPERATION_CONFLICT" | "INTERNAL" | "GAME_NOT_FOUND" | "GAME_DISABLED" | "GAME_ACCESS_DENIED" | "SERVER_NOT_FOUND" | "SERVER_DISABLED" | "ADMIN_AUTH_REQUIRED" | "ORIGIN_FORBIDDEN" | "GAME_PROJECT_CONFLICT" | "GAME_SERVER_CONFLICT" | "ADMIN_ALREADY_INITIALIZED" | "AUTH_CODE_INVALID" | "PROVIDER_UNAVAILABLE" | "PROVIDER_CONFIGURATION_INVALID" | "IDENTITY_CONFLICT" | "IDENTITY_PROVIDER_CONFLICT";
         ErrorResponse: {
             code: components["schemas"]["ErrorCode"];
             requestId: string;
@@ -710,17 +769,11 @@ export type components = {
             loadedRevision: number | null;
             loginRateCapacity: number;
             loginRateRefillPerSecond: number;
+            providers: components["schemas"]["IdentityProviderConfiguration"][];
             revision: number;
             sessionTtlSeconds: number;
             /** Format: date-time */
             updatedAt: string;
-            wechatAppId: string | null;
-            wechatBreakerOpenMs: number;
-            wechatBreakerThreshold: number;
-            /** Format: uri */
-            wechatEndpoint: string;
-            wechatSecret: components["schemas"]["WechatSecretMetadata"];
-            wechatTimeoutMs: number;
         };
         GameProject: {
             clientVisible: boolean;
@@ -744,6 +797,43 @@ export type components = {
         HasCharacterResponse: {
             exists: boolean;
         };
+        /** @enum {string} */
+        IdentityProvider: "wechat" | "douyin";
+        IdentityProviderConfiguration: {
+            appId: string | null;
+            breakerOpenMs: number;
+            breakerThreshold: number;
+            enabled: boolean;
+            /** Format: uri */
+            endpoint: string;
+            provider: components["schemas"]["IdentityProvider"];
+            secretMetadata: components["schemas"]["IdentityProviderSecretMetadata"];
+            timeoutMs: number;
+            /** Format: date-time */
+            updatedAt: string;
+            updatedBy: string | null;
+            validationErrorCode: string | null;
+            /** Format: date-time */
+            validationFailedAt: string | null;
+            validationState: components["schemas"]["IdentityProviderValidationState"];
+        };
+        IdentityProviderSecretMetadata: {
+            configured: boolean;
+            /** Format: date-time */
+            updatedAt: string | null;
+            version: number;
+        };
+        IdentityProviderSecretWriteResponse: {
+            configurationState: components["schemas"]["GameConfigurationState"];
+            gameId: components["schemas"]["GameId"];
+            loadedRevision: number | null;
+            provider: components["schemas"]["IdentityProvider"];
+            replayed: boolean;
+            revision: number;
+            secretMetadata: components["schemas"]["IdentityProviderSecretMetadata"];
+        };
+        /** @enum {string} */
+        IdentityProviderValidationState: "unvalidated" | "active" | "validation_failed";
         LiveResponse: {
             /** @constant */
             ok: true;
@@ -856,10 +946,10 @@ export type components = {
             /** @constant */
             registered: true;
         };
-        ReplaceWechatAppSecretRequest: {
+        ReplaceIdentityProviderSecretRequest: {
+            appSecret: string;
             operationId: components["schemas"]["OperationId"];
             revision: number;
-            wechatAppSecret: string;
         };
         RevokeMachineSecretRequest: {
             operationId: components["schemas"]["OperationId"];
@@ -882,12 +972,6 @@ export type components = {
             loginRateRefillPerSecond: number;
             revision: number;
             sessionTtlSeconds: number;
-            wechatAppId: string | null;
-            wechatBreakerOpenMs: number;
-            wechatBreakerThreshold: number;
-            /** Format: uri */
-            wechatEndpoint: string;
-            wechatTimeoutMs: number;
         };
         UpdateGameProjectRequest: {
             clientVisible: boolean;
@@ -912,6 +996,16 @@ export type components = {
             status: "smooth" | "busy" | "maintenance";
             /** @enum {string} */
             tag: "normal" | "new" | "full" | "maintenance";
+        };
+        UpdateIdentityProviderRequest: {
+            appId: string | null;
+            breakerOpenMs: number;
+            breakerThreshold: number;
+            enabled: boolean;
+            /** Format: uri */
+            endpoint: string;
+            revision: number;
+            timeoutMs: number;
         };
         UpdateMachineIdentityRequest: {
             displayName: string;
@@ -941,22 +1035,6 @@ export type components = {
             /** @constant */
             service: "game-manage-kit";
             serviceVersion: string;
-        };
-        WechatSecretMetadata: {
-            configured: boolean;
-            /** @enum {string} */
-            state: "active" | "missing" | "validation_failed";
-            /** Format: date-time */
-            updatedAt: string | null;
-            version: number;
-        };
-        WechatSecretWriteResponse: {
-            configurationState: components["schemas"]["GameConfigurationState"];
-            gameId: components["schemas"]["GameId"];
-            loadedRevision: number | null;
-            replayed: boolean;
-            revision: number;
-            wechatSecret: components["schemas"]["WechatSecretMetadata"];
         };
         WxLoginRequest: {
             code: string;
@@ -1048,7 +1126,7 @@ export type components = {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
-        /** @description 微信上游不可用，或游戏处于维护状态 */
+        /** @description 身份 Provider 不可用、未配置、熔断，或游戏处于维护状态 */
         Unavailable: {
             headers: {
                 [name: string]: unknown;
@@ -1063,6 +1141,7 @@ export type components = {
         AuditLimit: number;
         GameId: components["schemas"]["GameId"];
         IdentityId: components["schemas"]["MachineIdentityId"];
+        IdentityProvider: components["schemas"]["IdentityProvider"];
         OperationId: components["schemas"]["OperationId"];
         SecretVersion: number;
         ServerId: number;
@@ -1476,6 +1555,113 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    updateAdminIdentityProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+                provider: components["parameters"]["IdentityProvider"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateIdentityProviderRequest"];
+            };
+        };
+        responses: {
+            /** @description Provider 配置已保存 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GameIntegration"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["AdminUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    replaceAdminIdentityProviderSecret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+                provider: components["parameters"]["IdentityProvider"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplaceIdentityProviderSecretRequest"];
+            };
+        };
+        responses: {
+            /** @description Provider AppSecret 已保存；响应不回显明文 */
+            200: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityProviderSecretWriteResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["AdminUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    clearAdminIdentityProviderSecret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+                provider: components["parameters"]["IdentityProvider"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClearIdentityProviderSecretRequest"];
+            };
+        };
+        responses: {
+            /** @description Provider AppSecret 已清除；响应不回显明文 */
+            200: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityProviderSecretWriteResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["AdminUnauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     getAdminGameIntegration: {
         parameters: {
             query?: never;
@@ -1526,41 +1712,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GameIntegration"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["AdminUnauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            429: components["responses"]["RateLimited"];
-            500: components["responses"]["Internal"];
-            503: components["responses"]["Unavailable"];
-        };
-    };
-    replaceAdminWechatAppSecret: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                gameId: components["parameters"]["GameId"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ReplaceWechatAppSecretRequest"];
-            };
-        };
-        responses: {
-            /** @description 微信 AppSecret 已保存；响应不回显明文 */
-            200: {
-                headers: {
-                    "Cache-Control"?: "no-store";
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WechatSecretWriteResponse"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -2133,6 +2284,40 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    douyinLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                gameId: components["parameters"]["GameId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DouyinLoginRequest"];
+            };
+        };
+        responses: {
+            /** @description 登录成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["Internal"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     wxLogin: {
         parameters: {
             query?: never;
@@ -2161,6 +2346,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["Internal"];
             503: components["responses"]["Unavailable"];

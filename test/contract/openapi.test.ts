@@ -26,7 +26,18 @@ const EXPECTED_OPERATIONS = new Map([
   ["PATCH /v1/admin/games/{gameId}/servers/{serverId}", "Admin"],
   ["GET /v1/admin/games/{gameId}/integration", "Admin"],
   ["PATCH /v1/admin/games/{gameId}/integration", "Admin"],
-  ["PUT /v1/admin/games/{gameId}/secrets/wechat-app-secret", "Admin"],
+  [
+    "PATCH /v1/admin/games/{gameId}/identity-providers/{provider}",
+    "Admin",
+  ],
+  [
+    "PUT /v1/admin/games/{gameId}/identity-providers/{provider}/secret",
+    "Admin",
+  ],
+  [
+    "DELETE /v1/admin/games/{gameId}/identity-providers/{provider}/secret",
+    "Admin",
+  ],
   ["GET /v1/admin/machine-identities", "Admin"],
   ["POST /v1/admin/machine-identities", "Admin"],
   ["PATCH /v1/admin/machine-identities/{identityId}", "Admin"],
@@ -42,6 +53,7 @@ const EXPECTED_OPERATIONS = new Map([
   ["GET /v1/admin/config-audit", "Admin"],
   ["GET /v1/games", "Public"],
   ["POST /v1/games/{gameId}/sessions/wechat", "Public"],
+  ["POST /v1/games/{gameId}/sessions/douyin", "Public"],
   ["POST /v1/games/{gameId}/sessions/dev", "Public"],
   ["GET /v1/games/{gameId}/areas", "Public"],
   ["POST /v1/games/{gameId}/internal/sessions/verify", "Internal"],
@@ -132,6 +144,16 @@ test("OpenAPI 仅保留多游戏业务路径，并为每个业务 operation 声�
             `${method.toUpperCase()} ${path} 缺少统一 IdentityId path parameter`,
           );
         }
+        if (path.includes("{provider}")) {
+          assert.equal(
+            parameters?.some((parameter) => (
+              parameter.$ref
+                === "#/components/parameters/IdentityProvider"
+            )),
+            true,
+            `${method.toUpperCase()} ${path} 缺少统一 IdentityProvider path parameter`,
+          );
+        }
         if (path.includes("{version}")) {
           assert.equal(
             parameters?.some((parameter) => (
@@ -202,7 +224,18 @@ test("管理员网页契约使用 Cookie 会话且保留机器管理员身份", 
     ["/v1/admin/games/{gameId}/servers/{serverId}", "patch"],
     ["/v1/admin/games/{gameId}/integration", "get"],
     ["/v1/admin/games/{gameId}/integration", "patch"],
-    ["/v1/admin/games/{gameId}/secrets/wechat-app-secret", "put"],
+    [
+      "/v1/admin/games/{gameId}/identity-providers/{provider}",
+      "patch",
+    ],
+    [
+      "/v1/admin/games/{gameId}/identity-providers/{provider}/secret",
+      "put",
+    ],
+    [
+      "/v1/admin/games/{gameId}/identity-providers/{provider}/secret",
+      "delete",
+    ],
     ["/v1/admin/machine-identities", "get"],
     ["/v1/admin/machine-identities", "post"],
     ["/v1/admin/machine-identities/{identityId}", "patch"],
@@ -243,7 +276,7 @@ test("管理员网页契约使用 Cookie 会话且保留机器管理员身份", 
 
 test("游戏项目管理契约固定权限、生命周期、乐观锁与客户端展示字段", async () => {
   const document = record(YAML.parse(await readFile("openapi/openapi.yaml", "utf8")));
-  assert.equal(record(document.info).version, "2.0.0");
+  assert.equal(record(document.info).version, "3.0.0");
   const schemas = record(record(document.components).schemas);
 
   assert.deepEqual(schemas.GameConfigurationState, {
@@ -677,12 +710,7 @@ test("目录、接入和 Secret 契约固定乐观锁、幂等与不回显边界
   assert.deepEqual(Object.keys(integrationProperties), [
     "gameId",
     "configurationState",
-    "wechatAppId",
-    "wechatSecret",
-    "wechatEndpoint",
-    "wechatTimeoutMs",
-    "wechatBreakerThreshold",
-    "wechatBreakerOpenMs",
+    "providers",
     "sessionTtlSeconds",
     "loginRateCapacity",
     "loginRateRefillPerSecond",
@@ -694,40 +722,120 @@ test("目录、接入和 Secret 契约固定乐观锁、幂等与不回显边界
     "updatedAt",
   ]);
   assert.equal(JSON.stringify(integration).includes("digest"), false);
-  assert.equal(JSON.stringify(integration).includes("wechatAppSecret"), false);
+  assert.equal(JSON.stringify(integration).includes("appSecret"), false);
   assert.deepEqual(
-    record(record(schemas.WechatSecretMetadata).properties).state,
+    record(integrationProperties.providers),
+    {
+      type: "array",
+      minItems: 2,
+      maxItems: 2,
+      uniqueItems: true,
+      items: {
+        $ref: "#/components/schemas/IdentityProviderConfiguration",
+      },
+    },
+  );
+  assert.deepEqual(
+    schemas.IdentityProvider,
     {
       type: "string",
-      enum: ["active", "missing", "validation_failed"],
+      enum: ["wechat", "douyin"],
+    },
+  );
+  assert.deepEqual(
+    schemas.IdentityProviderValidationState,
+    {
+      type: "string",
+      enum: ["unvalidated", "active", "validation_failed"],
     },
   );
 
-  const secretRequest = record(schemas.ReplaceWechatAppSecretRequest);
+  const provider = record(schemas.IdentityProviderConfiguration);
+  assert.deepEqual(Object.keys(record(provider.properties)), [
+    "provider",
+    "enabled",
+    "appId",
+    "secretMetadata",
+    "endpoint",
+    "timeoutMs",
+    "breakerThreshold",
+    "breakerOpenMs",
+    "validationState",
+    "validationFailedAt",
+    "validationErrorCode",
+    "updatedBy",
+    "updatedAt",
+  ]);
+  assert.equal(JSON.stringify(provider).includes("appSecret"), false);
+
+  const sharedUpdate = record(schemas.UpdateGameIntegrationRequest);
+  assert.deepEqual(Object.keys(record(sharedUpdate.properties)), [
+    "sessionTtlSeconds",
+    "loginRateCapacity",
+    "loginRateRefillPerSecond",
+    "adminRateCapacity",
+    "adminRateRefillPerSecond",
+    "revision",
+  ]);
+  assert.equal(JSON.stringify(sharedUpdate).includes("appId"), false);
+  assert.equal(JSON.stringify(sharedUpdate).includes("endpoint"), false);
+
+  const providerUpdate = record(schemas.UpdateIdentityProviderRequest);
+  assert.deepEqual(providerUpdate.required, [
+    "enabled",
+    "appId",
+    "endpoint",
+    "timeoutMs",
+    "breakerThreshold",
+    "breakerOpenMs",
+    "revision",
+  ]);
+
+  const secretRequest = record(
+    schemas.ReplaceIdentityProviderSecretRequest,
+  );
   assert.deepEqual(secretRequest.required, [
-    "wechatAppSecret",
+    "appSecret",
     "revision",
     "operationId",
   ]);
   assert.equal(
-    record(record(secretRequest.properties).wechatAppSecret).writeOnly,
+    record(record(secretRequest.properties).appSecret).writeOnly,
     true,
   );
-  const secretResponse = record(schemas.WechatSecretWriteResponse);
-  assert.equal(JSON.stringify(secretResponse).includes("wechatAppSecret"), false);
+  assert.deepEqual(
+    record(schemas.ClearIdentityProviderSecretRequest).required,
+    ["revision", "operationId"],
+  );
+  const secretResponse = record(
+    schemas.IdentityProviderSecretWriteResponse,
+  );
+  assert.equal(JSON.stringify(secretResponse).includes("appSecret"), false);
   assert.equal(JSON.stringify(secretResponse).includes("digest"), false);
 
-  const secretWrite = record(
-    record(paths["/v1/admin/games/{gameId}/secrets/wechat-app-secret"]).put,
+  const providerPath = record(
+    paths["/v1/admin/games/{gameId}/identity-providers/{provider}"],
   );
-  assert.deepEqual(
-    record(record(secretWrite.responses)["200"]).headers,
-    {
-      "Cache-Control": {
-        schema: { type: "string", const: "no-store" },
+  assert.deepEqual(providerPath.parameters, [
+    { $ref: "#/components/parameters/GameId" },
+    { $ref: "#/components/parameters/IdentityProvider" },
+  ]);
+  const secretPath = record(
+    paths[
+      "/v1/admin/games/{gameId}/identity-providers/{provider}/secret"
+    ],
+  );
+  for (const method of ["put", "delete"]) {
+    const operation = record(secretPath[method]);
+    assert.deepEqual(
+      record(record(operation.responses)["200"]).headers,
+      {
+        "Cache-Control": {
+          schema: { type: "string", const: "no-store" },
+        },
       },
-    },
-  );
+    );
+  }
 });
 
 test("机器身份契约只公开版本元数据，一次性 Secret 不可重放恢复", async () => {
@@ -779,11 +887,17 @@ test("机器身份契约只公开版本元数据，一次性 Secret 不可重放
     "auditType",
     "operatorId",
     "gameId",
+    "provider",
     "identityId",
     "action",
     "result",
     "oldVersion",
     "newVersion",
+    "revision",
+    "requestId",
+    "operationId",
+    "beforeMetadata",
+    "afterMetadata",
     "createdAt",
   ]);
   assert.deepEqual(record(record(audit.properties).auditType).enum, [
@@ -811,10 +925,44 @@ test("OpenAPI 固定 gameId、游戏状态和租户错误码", async () => {
   for (const code of REQUIRED_TENANT_ERROR_CODES) {
     assert.equal(errorCodes.includes(code), true, `ErrorCode 缺少 ${code}`);
   }
+  for (const code of [
+    "INVALID_REQUEST",
+    "AUTH_CODE_INVALID",
+    "PROVIDER_UNAVAILABLE",
+    "PROVIDER_CONFIGURATION_INVALID",
+    "IDENTITY_CONFLICT",
+    "IDENTITY_PROVIDER_CONFLICT",
+  ]) {
+    assert.equal(errorCodes.includes(code), true, `ErrorCode 缺少 ${code}`);
+  }
   assert.deepEqual(
     record(record(schemas.ErrorResponse).properties).code,
     { $ref: "#/components/schemas/ErrorCode" },
   );
+
+  assert.deepEqual(
+    schemas.DouyinLoginRequest,
+    schemas.WxLoginRequest,
+  );
+  const paths = record(document.paths);
+  for (const path of [
+    "/v1/games/{gameId}/sessions/wechat",
+    "/v1/games/{gameId}/sessions/douyin",
+  ]) {
+    const operation = record(record(paths[path]).post);
+    assert.deepEqual(record(operation.responses)["401"], {
+      $ref: "#/components/responses/Unauthorized",
+    });
+    assert.deepEqual(record(operation.responses)["409"], {
+      $ref: "#/components/responses/Conflict",
+    });
+    assert.deepEqual(record(operation.responses)["429"], {
+      $ref: "#/components/responses/RateLimited",
+    });
+    assert.deepEqual(record(operation.responses)["503"], {
+      $ref: "#/components/responses/Unavailable",
+    });
+  }
 });
 
 test("metrics 是仅使用 Service 身份的全局文本端点", async () => {

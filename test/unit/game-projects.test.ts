@@ -153,6 +153,7 @@ class FakeProjectDatabase implements GameProjectDatabase {
     if (
       sql.startsWith("INSERT INTO game_directory_settings")
       || sql.startsWith("INSERT INTO game_integrations")
+      || sql.startsWith("INSERT INTO game_identity_providers")
       || sql.startsWith("INSERT INTO seq")
     ) {
       this.companionInserts.push(sql);
@@ -234,10 +235,14 @@ test("创建游戏项目固定为不下发的维护中草稿并记录审计", as
   });
   assert.equal(database.audits.length, 1);
   assert.equal(database.audits[0]?.[0], "new-game");
-  assert.equal(database.companionInserts.length, 3);
+  assert.equal(database.companionInserts.length, 4);
   assert.match(database.companionInserts[0] ?? "", /game_directory_settings/u);
   assert.match(database.companionInserts[1] ?? "", /game_integrations/u);
-  assert.match(database.companionInserts[2] ?? "", /INSERT INTO seq/u);
+  assert.match(
+    database.companionInserts[2] ?? "",
+    /game_identity_providers/u,
+  );
+  assert.match(database.companionInserts[3] ?? "", /INSERT INTO seq/u);
 
   await assert.rejects(
     service.create({

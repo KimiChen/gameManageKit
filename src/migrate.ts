@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -26,6 +27,10 @@ export async function runMigrations(
     uri: mysqlUrl,
     multipleStatements: true,
   });
+  const migrationLockName = `game-manage-kit:migrate:${
+    createHash("sha256").update(database).digest("hex").slice(0, 32)
+  }`;
+  let migrationLockAcquired = false;
   try {
     if (requireTls) {
       const [tls] = await connection.query<RowDataPacket[]>(
@@ -38,6 +43,14 @@ export async function runMigrations(
         throw new Error("生产 MySQL TLS 未协商成功");
       }
     }
+    const [lockRows] = await connection.query<RowDataPacket[]>(
+      "SELECT GET_LOCK(?, 30) AS acquired",
+      [migrationLockName],
+    );
+    if (Number(lockRows[0]?.acquired) !== 1) {
+      throw new Error("无法取得数据库 migration 排他锁");
+    }
+    migrationLockAcquired = true;
     await connection.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         version    INT UNSIGNED NOT NULL,
@@ -72,6 +85,12 @@ export async function runMigrations(
       console.log(`[migrate] applied ${name}`);
     }
   } finally {
+    if (migrationLockAcquired) {
+      await connection.query(
+        "SELECT RELEASE_LOCK(?)",
+        [migrationLockName],
+      ).catch(() => undefined);
+    }
     await connection.end();
   }
 }

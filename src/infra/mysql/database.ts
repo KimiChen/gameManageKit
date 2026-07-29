@@ -22,8 +22,11 @@ const REQUIRED_SCHEMA_TABLES = Object.freeze([
   "admin_sessions",
   "admin_auth_audit",
   "accounts",
+  "account_identities",
+  "schema_v5_identity_migration_state",
   "account_sessions",
   "char_registry",
+  "game_identity_providers",
   "login_audit",
   "seq",
 ]);

@@ -9,6 +9,8 @@ export type GameStatus = components["schemas"]["GameStatus"];
 export type GameManageKitErrorCode = components["schemas"]["ErrorCode"];
 export type ErrorResponse = components["schemas"]["ErrorResponse"];
 export type WxLoginRequest = components["schemas"]["WxLoginRequest"];
+export type DouyinLoginRequest =
+  components["schemas"]["DouyinLoginRequest"];
 export type DevLoginRequest = components["schemas"]["DevLoginRequest"];
 export type LoginResponse = components["schemas"]["LoginResponse"];
 export type AreaServer = components["schemas"]["AreaServer"];
@@ -52,15 +54,25 @@ export type CreateGameServerRequest =
   components["schemas"]["CreateGameServerRequest"];
 export type UpdateGameServerRequest =
   components["schemas"]["UpdateGameServerRequest"];
-export type WechatSecretMetadata =
-  components["schemas"]["WechatSecretMetadata"];
+export type IdentityProvider =
+  components["schemas"]["IdentityProvider"];
+export type IdentityProviderValidationState =
+  components["schemas"]["IdentityProviderValidationState"];
+export type IdentityProviderSecretMetadata =
+  components["schemas"]["IdentityProviderSecretMetadata"];
+export type IdentityProviderConfiguration =
+  components["schemas"]["IdentityProviderConfiguration"];
 export type GameIntegration = components["schemas"]["GameIntegration"];
 export type UpdateGameIntegrationRequest =
   components["schemas"]["UpdateGameIntegrationRequest"];
-export type ReplaceWechatAppSecretRequest =
-  components["schemas"]["ReplaceWechatAppSecretRequest"];
-export type WechatSecretWriteResponse =
-  components["schemas"]["WechatSecretWriteResponse"];
+export type UpdateIdentityProviderRequest =
+  components["schemas"]["UpdateIdentityProviderRequest"];
+export type ReplaceIdentityProviderSecretRequest =
+  components["schemas"]["ReplaceIdentityProviderSecretRequest"];
+export type ClearIdentityProviderSecretRequest =
+  components["schemas"]["ClearIdentityProviderSecretRequest"];
+export type IdentityProviderSecretWriteResponse =
+  components["schemas"]["IdentityProviderSecretWriteResponse"];
 export type MachineIdentityType =
   components["schemas"]["MachineIdentityType"];
 export type MachineIdentityStatus =

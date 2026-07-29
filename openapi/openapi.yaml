@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: gameManageKit API
-  version: 2.0.0
+  version: 3.0.0
   description: 多游戏、HTTP-only、MySQL-only 的账号门户服务。
 servers:
   - url: https://portal.example.com
@@ -407,7 +407,7 @@ paths:
       - $ref: '#/components/parameters/GameId'
     get:
       operationId: getAdminGameIntegration
-      description: 返回游戏接入参数、运行时加载 revision 和微信 Secret 元数据；永不返回 Secret 或摘要。
+      description: 返回共享登录参数、Provider 配置、运行时加载 revision 和 Secret 元数据；永不返回 Secret 或摘要。
       tags: [Admin]
       security:
         - AdminSession: []
@@ -432,7 +432,7 @@ paths:
           $ref: '#/components/responses/Unavailable'
     patch:
       operationId: updateAdminGameIntegration
-      description: 按 revision 修改不含 Secret 的接入参数；必须校验请求 Origin。
+      description: 按 revision 修改 Session TTL 与限流等共享参数；不修改 Provider 或 Secret，且必须校验请求 Origin。
       tags: [Admin]
       security:
         - AdminSession: []
@@ -465,12 +465,13 @@ paths:
           $ref: '#/components/responses/Internal'
         '503':
           $ref: '#/components/responses/Unavailable'
-  /v1/admin/games/{gameId}/secrets/wechat-app-secret:
+  /v1/admin/games/{gameId}/identity-providers/{provider}:
     parameters:
       - $ref: '#/components/parameters/GameId'
-    put:
-      operationId: replaceAdminWechatAppSecret
-      description: 替换微信 AppSecret；要求 Secret 权限、最近重新认证、Origin、revision 和幂等 operationId。
+      - $ref: '#/components/parameters/IdentityProvider'
+    patch:
+      operationId: updateAdminIdentityProvider
+      description: 按 revision 修改白名单 Provider 的启用状态、AppID、端点、超时和熔断参数；必须校验请求 Origin。
       tags: [Admin]
       security:
         - AdminSession: []
@@ -479,10 +480,49 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ReplaceWechatAppSecretRequest'
+              $ref: '#/components/schemas/UpdateIdentityProviderRequest'
       responses:
         '200':
-          description: 微信 AppSecret 已保存；响应不回显明文
+          description: Provider 配置已保存
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameIntegration'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/admin/games/{gameId}/identity-providers/{provider}/secret:
+    parameters:
+      - $ref: '#/components/parameters/GameId'
+      - $ref: '#/components/parameters/IdentityProvider'
+    put:
+      operationId: replaceAdminIdentityProviderSecret
+      description: 替换白名单 Provider 的 AppSecret；要求 Secret 权限、最近重新认证、Origin、revision 和幂等 operationId。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceIdentityProviderSecretRequest'
+      responses:
+        '200':
+          description: Provider AppSecret 已保存；响应不回显明文
           headers:
             Cache-Control:
               schema:
@@ -491,7 +531,47 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WechatSecretWriteResponse'
+                $ref: '#/components/schemas/IdentityProviderSecretWriteResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/AdminUnauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    delete:
+      operationId: clearAdminIdentityProviderSecret
+      description: 清除白名单 Provider 的 AppSecret 并禁用该 Provider；要求 Secret 权限、最近重新认证、Origin、revision 和幂等 operationId。
+      tags: [Admin]
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClearIdentityProviderSecretRequest'
+      responses:
+        '200':
+          description: Provider AppSecret 已清除；响应不回显明文
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityProviderSecretWriteResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -790,6 +870,43 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/games/{gameId}/sessions/douyin:
+    parameters:
+      - $ref: '#/components/parameters/GameId'
+    post:
+      operationId: douyinLogin
+      tags: [Public]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DouyinLoginRequest'
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -1147,6 +1264,12 @@ components:
       required: true
       schema:
         $ref: '#/components/schemas/GameId'
+    IdentityProvider:
+      name: provider
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/IdentityProvider'
     UserId:
       name: userId
       in: path
@@ -1260,7 +1383,7 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
     Unavailable:
-      description: 微信上游不可用，或游戏处于维护状态
+      description: 身份 Provider 不可用、未配置、熔断，或游戏处于维护状态
       content:
         application/json:
           schema:
@@ -1271,6 +1394,9 @@ components:
       minLength: 2
       maxLength: 32
       pattern: '^[a-z][a-z0-9-]{1,31}$'
+    IdentityProvider:
+      type: string
+      enum: [wechat, douyin]
     OperationId:
       type: string
       minLength: 1
@@ -1291,6 +1417,7 @@ components:
       type: string
       enum:
         - INVALID_PAYLOAD
+        - INVALID_REQUEST
         - AUTH_REQUIRED
         - ACCOUNT_BANNED
         - NOT_FOUND
@@ -1310,6 +1437,11 @@ components:
         - GAME_PROJECT_CONFLICT
         - GAME_SERVER_CONFLICT
         - ADMIN_ALREADY_INITIALIZED
+        - AUTH_CODE_INVALID
+        - PROVIDER_UNAVAILABLE
+        - PROVIDER_CONFIGURATION_INVALID
+        - IDENTITY_CONFLICT
+        - IDENTITY_PROVIDER_CONFLICT
     ErrorResponse:
       type: object
       additionalProperties: false
@@ -1320,6 +1452,24 @@ components:
         requestId:
           type: string
     WxLoginRequest:
+      type: object
+      additionalProperties: false
+      required: [code, serverId]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 128
+        serverId:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        deviceId:
+          type:
+            - string
+            - 'null'
+          maxLength: 64
+    DouyinLoginRequest:
       type: object
       additionalProperties: false
       required: [code, serverId]
@@ -1883,23 +2033,91 @@ components:
         revision:
           type: integer
           minimum: 1
-    WechatSecretMetadata:
+    IdentityProviderValidationState:
+      type: string
+      enum: [unvalidated, active, validation_failed]
+    IdentityProviderSecretMetadata:
       type: object
       additionalProperties: false
-      required: [configured, version, state, updatedAt]
+      required: [configured, version, updatedAt]
       properties:
         configured:
           type: boolean
         version:
           type: integer
           minimum: 0
-        state:
-          type: string
-          enum: [active, missing, validation_failed]
         updatedAt:
           type:
             - string
             - 'null'
+          format: date-time
+    IdentityProviderConfiguration:
+      type: object
+      additionalProperties: false
+      required:
+        - provider
+        - enabled
+        - appId
+        - secretMetadata
+        - endpoint
+        - timeoutMs
+        - breakerThreshold
+        - breakerOpenMs
+        - validationState
+        - validationFailedAt
+        - validationErrorCode
+        - updatedBy
+        - updatedAt
+      properties:
+        provider:
+          $ref: '#/components/schemas/IdentityProvider'
+        enabled:
+          type: boolean
+        appId:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 128
+        secretMetadata:
+          $ref: '#/components/schemas/IdentityProviderSecretMetadata'
+        endpoint:
+          type: string
+          format: uri
+          maxLength: 2048
+        timeoutMs:
+          type: integer
+          minimum: 100
+          maximum: 30000
+        breakerThreshold:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        breakerOpenMs:
+          type: integer
+          minimum: 100
+          maximum: 600000
+        validationState:
+          $ref: '#/components/schemas/IdentityProviderValidationState'
+        validationFailedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        validationErrorCode:
+          type:
+            - string
+            - 'null'
+          maxLength: 64
+        updatedBy:
+          type:
+            - string
+            - 'null'
+          minLength: 3
+          maxLength: 64
+          pattern: '^[a-z][a-z0-9_.-]{2,63}$'
+        updatedAt:
+          type: string
           format: date-time
     GameIntegration:
       type: object
@@ -1907,12 +2125,7 @@ components:
       required:
         - gameId
         - configurationState
-        - wechatAppId
-        - wechatSecret
-        - wechatEndpoint
-        - wechatTimeoutMs
-        - wechatBreakerThreshold
-        - wechatBreakerOpenMs
+        - providers
         - sessionTtlSeconds
         - loginRateCapacity
         - loginRateRefillPerSecond
@@ -1927,30 +2140,13 @@ components:
           $ref: '#/components/schemas/GameId'
         configurationState:
           $ref: '#/components/schemas/GameConfigurationState'
-        wechatAppId:
-          type:
-            - string
-            - 'null'
-          minLength: 1
-          maxLength: 128
-        wechatSecret:
-          $ref: '#/components/schemas/WechatSecretMetadata'
-        wechatEndpoint:
-          type: string
-          format: uri
-          maxLength: 2048
-        wechatTimeoutMs:
-          type: integer
-          minimum: 100
-          maximum: 30000
-        wechatBreakerThreshold:
-          type: integer
-          minimum: 1
-          maximum: 1000
-        wechatBreakerOpenMs:
-          type: integer
-          minimum: 100
-          maximum: 600000
+        providers:
+          type: array
+          minItems: 2
+          maxItems: 2
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/IdentityProviderConfiguration'
         sessionTtlSeconds:
           type: integer
           minimum: 60
@@ -1989,11 +2185,6 @@ components:
       type: object
       additionalProperties: false
       required:
-        - wechatAppId
-        - wechatEndpoint
-        - wechatTimeoutMs
-        - wechatBreakerThreshold
-        - wechatBreakerOpenMs
         - sessionTtlSeconds
         - loginRateCapacity
         - loginRateRefillPerSecond
@@ -2001,28 +2192,6 @@ components:
         - adminRateRefillPerSecond
         - revision
       properties:
-        wechatAppId:
-          type:
-            - string
-            - 'null'
-          minLength: 1
-          maxLength: 128
-        wechatEndpoint:
-          type: string
-          format: uri
-          maxLength: 2048
-        wechatTimeoutMs:
-          type: integer
-          minimum: 100
-          maximum: 30000
-        wechatBreakerThreshold:
-          type: integer
-          minimum: 1
-          maximum: 1000
-        wechatBreakerOpenMs:
-          type: integer
-          minimum: 100
-          maximum: 600000
         sessionTtlSeconds:
           type: integer
           minimum: 60
@@ -2046,12 +2215,51 @@ components:
         revision:
           type: integer
           minimum: 1
-    ReplaceWechatAppSecretRequest:
+    UpdateIdentityProviderRequest:
       type: object
       additionalProperties: false
-      required: [wechatAppSecret, revision, operationId]
+      required:
+        - enabled
+        - appId
+        - endpoint
+        - timeoutMs
+        - breakerThreshold
+        - breakerOpenMs
+        - revision
       properties:
-        wechatAppSecret:
+        enabled:
+          type: boolean
+        appId:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 128
+        endpoint:
+          type: string
+          format: uri
+          maxLength: 2048
+        timeoutMs:
+          type: integer
+          minimum: 100
+          maximum: 30000
+        breakerThreshold:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        breakerOpenMs:
+          type: integer
+          minimum: 100
+          maximum: 600000
+        revision:
+          type: integer
+          minimum: 1
+    ReplaceIdentityProviderSecretRequest:
+      type: object
+      additionalProperties: false
+      required: [appSecret, revision, operationId]
+      properties:
+        appSecret:
           type: string
           minLength: 1
           maxLength: 512
@@ -2061,23 +2269,36 @@ components:
           minimum: 1
         operationId:
           $ref: '#/components/schemas/OperationId'
-    WechatSecretWriteResponse:
+    ClearIdentityProviderSecretRequest:
+      type: object
+      additionalProperties: false
+      required: [revision, operationId]
+      properties:
+        revision:
+          type: integer
+          minimum: 1
+        operationId:
+          $ref: '#/components/schemas/OperationId'
+    IdentityProviderSecretWriteResponse:
       type: object
       additionalProperties: false
       required:
         - gameId
+        - provider
         - configurationState
-        - wechatSecret
+        - secretMetadata
         - revision
         - loadedRevision
         - replayed
       properties:
         gameId:
           $ref: '#/components/schemas/GameId'
+        provider:
+          $ref: '#/components/schemas/IdentityProvider'
         configurationState:
           $ref: '#/components/schemas/GameConfigurationState'
-        wechatSecret:
-          $ref: '#/components/schemas/WechatSecretMetadata'
+        secretMetadata:
+          $ref: '#/components/schemas/IdentityProviderSecretMetadata'
         revision:
           type: integer
           minimum: 1
@@ -2338,11 +2559,17 @@ components:
         - auditType
         - operatorId
         - gameId
+        - provider
         - identityId
         - action
         - result
         - oldVersion
         - newVersion
+        - revision
+        - requestId
+        - operationId
+        - beforeMetadata
+        - afterMetadata
         - createdAt
       properties:
         id:
@@ -2357,6 +2584,10 @@ components:
         gameId:
           oneOf:
             - $ref: '#/components/schemas/GameId'
+            - type: 'null'
+        provider:
+          oneOf:
+            - $ref: '#/components/schemas/IdentityProvider'
             - type: 'null'
         identityId:
           oneOf:
@@ -2378,6 +2609,34 @@ components:
             - integer
             - 'null'
           minimum: 0
+        revision:
+          type:
+            - integer
+            - 'null'
+          minimum: 1
+        requestId:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 64
+        operationId:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Za-z0-9_.:-]+$'
+        beforeMetadata:
+          type:
+            - object
+            - 'null'
+          additionalProperties: true
+        afterMetadata:
+          type:
+            - object
+            - 'null'
+          additionalProperties: true
         createdAt:
           type: string
           format: date-time
