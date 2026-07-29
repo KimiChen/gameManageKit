@@ -2,6 +2,7 @@ import type {
   AuthExchangeResult,
   IdentityProviderClient,
   ProviderFailureReason,
+  ProviderRequestDurationRecorder,
 } from "../../domain/account/auth-provider.js";
 import {
   CircuitBreaker,
@@ -57,6 +58,18 @@ function integer(value: unknown): number | null {
     : null;
 }
 
+function elapsedMilliseconds(started: bigint): number {
+  return Math.min(
+    2_147_483_647,
+    Math.max(
+      0,
+      Math.round(
+        Number(process.hrtime.bigint() - started) / 1_000_000,
+      ),
+    ),
+  );
+}
+
 function failure(reason: ProviderFailureReason): WechatExchangeResult {
   return { ok: false, reason };
 }
@@ -98,7 +111,10 @@ export class WechatClient implements WechatIdentityClient {
     });
   }
 
-  async exchange(code: string): Promise<WechatExchangeResult> {
+  async exchange(
+    code: string,
+    recordRequestDuration?: ProviderRequestDurationRecorder,
+  ): Promise<WechatExchangeResult> {
     if (!this.validConfiguration()) {
       return failure("invalid_credentials");
     }
@@ -111,10 +127,17 @@ export class WechatClient implements WechatIdentityClient {
     }
 
     let current: WechatAttempt;
+    let started: bigint | undefined;
     try {
-      current = await this.request(code);
+      current = await this.request(code, () => {
+        started = process.hrtime.bigint();
+      });
     } catch {
       current = attempt(failure("unavailable"));
+    } finally {
+      if (started !== undefined) {
+        recordRequestDuration?.(elapsedMilliseconds(started));
+      }
     }
     this.settle(permit, current);
     return current.result;
@@ -124,7 +147,10 @@ export class WechatClient implements WechatIdentityClient {
     this.breaker.reset();
   }
 
-  private async request(code: string): Promise<WechatAttempt> {
+  private async request(
+    code: string,
+    requestStarted: () => void,
+  ): Promise<WechatAttempt> {
     let url: URL;
     try {
       url = new URL(this.options.endpoint);
@@ -138,6 +164,7 @@ export class WechatClient implements WechatIdentityClient {
 
     const signal = AbortSignal.timeout(this.options.timeoutMs);
     let response: Response;
+    requestStarted();
     try {
       response = await this.fetchImpl(url, {
         headers: { accept: "application/json" },

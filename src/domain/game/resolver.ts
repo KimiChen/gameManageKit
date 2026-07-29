@@ -559,35 +559,58 @@ export class GameConfigResolver implements GameRuntimeRegistry {
       return providerFailure("unavailable");
     }
     if (cached.availability === "unavailable") {
-      return providerFailure("unavailable", cached.secretVersion);
+      return providerFailure(
+        "unavailable",
+        cached.integrationRevision,
+      );
     }
     if (cached.availability === "invalid_credentials") {
       return providerFailure(
         "invalid_credentials",
-        cached.secretVersion,
+        cached.integrationRevision,
       );
     }
     if (!cached.client) {
-      return providerFailure("unavailable", cached.secretVersion);
+      return providerFailure(
+        "unavailable",
+        cached.integrationRevision,
+      );
     }
 
+    let providerLatencyMs: number | undefined;
     let result: AuthExchangeResult<Provider>;
     try {
       result = await (
         cached.client as IdentityProviderClient<Provider>
-      ).exchange(code);
+      ).exchange(code, (durationMs) => {
+        if (
+          Number.isSafeInteger(durationMs)
+          && durationMs >= 0
+          && durationMs <= 2_147_483_647
+        ) {
+          providerLatencyMs = durationMs;
+        }
+      });
     } catch {
       result = providerFailure("unavailable");
     }
     if (result.ok && result.provider !== provider) {
-      return providerFailure(
-        "invalid_response",
-        cached.secretVersion,
-      );
+      return Object.freeze({
+        ...providerFailure<Provider>(
+          "invalid_response",
+          cached.integrationRevision,
+        ),
+        ...(providerLatencyMs === undefined
+          ? {}
+          : { providerLatencyMs }),
+      });
     }
     const versionedResult: AuthExchangeResult<Provider> = Object.freeze({
       ...result,
-      providerVersion: cached.secretVersion,
+      providerVersion: cached.integrationRevision,
+      ...(providerLatencyMs === undefined
+        ? {}
+        : { providerLatencyMs }),
     });
     await this.recordProviderValidation(
       gameId,

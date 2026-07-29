@@ -25,6 +25,10 @@ export const PROVIDER_FAILURE_REASONS = [
 export type ProviderFailureReason =
   typeof PROVIDER_FAILURE_REASONS[number];
 
+export type ProviderRequestDurationRecorder = (
+  durationMs: number,
+) => void;
+
 export type AuthExchangeResult<
   Provider extends ExternalAuthProvider = ExternalAuthProvider,
 > =
@@ -36,16 +40,21 @@ export type AuthExchangeResult<
       readonly unionSubject: string | null;
       readonly sessionKey?: string;
       readonly providerVersion?: number;
+      readonly providerLatencyMs?: number;
     }
   | {
       readonly ok: false;
       readonly reason: ProviderFailureReason;
       readonly providerVersion?: number;
+      readonly providerLatencyMs?: number;
     };
 
 export interface IdentityProviderClient<
   Provider extends ExternalAuthProvider = ExternalAuthProvider,
 > {
   readonly provider: Provider;
-  exchange(code: string): Promise<AuthExchangeResult<Provider>>;
+  exchange(
+    code: string,
+    recordRequestDuration?: ProviderRequestDurationRecorder,
+  ): Promise<AuthExchangeResult<Provider>>;
 }

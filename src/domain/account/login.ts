@@ -254,7 +254,7 @@ export class LoginService {
         unionSubject: null,
       },
       attempt,
-      0,
+      null,
     );
   }
 
@@ -284,24 +284,20 @@ export class LoginService {
       return { ok: false, reason: "rate_limited" };
     }
 
-    const started = process.hrtime.bigint();
     let identity: AuthExchangeResult;
     try {
       identity = await client.exchange(code);
     } catch {
       identity = { ok: false, reason: "unavailable" };
     }
-    const latencySeconds =
-      Number(process.hrtime.bigint() - started) / 1_000_000_000;
-    const latencyMs = Math.min(
-      2_147_483_647,
-      Math.max(0, Math.round(latencySeconds * 1_000)),
-    );
-    this.metrics?.recordIdentityProviderDuration(
-      game.gameId,
-      provider,
-      latencySeconds,
-    );
+    const providerLatencyMs = identity.providerLatencyMs ?? null;
+    if (providerLatencyMs !== null) {
+      this.metrics?.recordIdentityProviderDuration(
+        game.gameId,
+        provider,
+        providerLatencyMs / 1_000,
+      );
+    }
     this.metrics?.recordIdentityProvider(
       game.gameId,
       provider,
@@ -323,7 +319,7 @@ export class LoginService {
         providerVersion: identity.providerVersion ?? null,
         requestId: attempt.requestId,
         serverId: attempt.serverId,
-        providerLatencyMs: latencyMs,
+        providerLatencyMs,
         ip: attempt.ip,
         deviceId: attempt.deviceId,
         caller: "public",
@@ -340,7 +336,7 @@ export class LoginService {
         provider,
         identity.providerVersion ?? null,
         attempt,
-        latencyMs,
+        providerLatencyMs,
       );
       throw new Error("Provider 返回的身份命名空间不一致");
     }
@@ -355,7 +351,7 @@ export class LoginService {
         unionSubject: identity.unionSubject,
       },
       attempt,
-      latencyMs,
+      providerLatencyMs,
     );
   }
 
@@ -363,7 +359,7 @@ export class LoginService {
     gameId: string,
     namespace: IdentityNamespace,
     attempt: LoginAttempt,
-    providerLatencyMs: number,
+    providerLatencyMs: number | null,
   ): Promise<LoginResult> {
     const execute = async (): Promise<LoginResult> => {
       let lastError: unknown;
@@ -414,7 +410,7 @@ export class LoginService {
     gameId: string,
     namespace: IdentityNamespace,
     attempt: LoginAttempt,
-    providerLatencyMs: number,
+    providerLatencyMs: number | null,
   ): Promise<LoginResult> {
     if (!await lockCurrentProviderNamespace(
       connection,
@@ -661,7 +657,7 @@ export class LoginService {
     provider: AuthProvider,
     providerVersion: number | null,
     attempt: LoginAttempt,
-    providerLatencyMs: number,
+    providerLatencyMs: number | null,
   ): Promise<void> {
     await this.audit(this.database.pool, {
       gameId,

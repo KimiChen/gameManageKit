@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import type { Pool } from "mysql2/promise";
 import { loadConfig } from "../../src/config.js";
 import {
@@ -230,6 +231,60 @@ test("指标只允许已登记 gameId 与有限标签并按身份范围过滤", 
     ),
     /指标拒绝未定义 label 值/,
   );
+});
+
+test("Provider 登录审计仅使用上游请求耗时元数据", async () => {
+  let auditParameters: readonly unknown[] | undefined;
+  const database = {
+    pool: {
+      async execute(
+        sql: string,
+        parameters: readonly unknown[],
+      ) {
+        assert.match(sql, /INSERT INTO login_audit/u);
+        auditParameters = parameters;
+        return [{ affectedRows: 1 }, []];
+      },
+    },
+  } as unknown as Database;
+  const login = new LoginService(
+    database,
+    {} as SessionService,
+  );
+  const game = {
+    gameId: "game-a",
+    loginLimiter: { allow: () => true },
+    wechat: {
+      provider: "wechat",
+      async exchange() {
+        await delay(40);
+        return {
+          ok: false,
+          reason: "invalid_code",
+          providerVersion: 4,
+          providerLatencyMs: 7,
+        } as const;
+      },
+    },
+  } as unknown as GameContext;
+
+  const started = process.hrtime.bigint();
+  assert.deepEqual(
+    await login.loginWechat(game, "code", {
+      rateKey: "rate-key",
+      ip: null,
+      deviceId: null,
+      requestId: "request-id",
+      serverId: 1,
+    }),
+    { ok: false, reason: "invalid_code" },
+  );
+  const totalMs =
+    Number(process.hrtime.bigint() - started) / 1_000_000;
+
+  assert.ok(totalMs >= 30);
+  assert.equal(auditParameters?.[14], 7);
+  assert.equal(auditParameters?.[15], 4);
 });
 
 test("DirectoryService 使用当前游戏 TTL 并过滤目录外角色足迹", async () => {

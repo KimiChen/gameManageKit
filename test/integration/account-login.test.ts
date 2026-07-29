@@ -121,10 +121,8 @@ test("身份事务隔离 Provider/AppID、补绑 unionid 并收敛并发首次�
           'https://minigame.zijieapi.com/mgplatform/api/apps/jscode2session')`,
     );
 
-    const login = new LoginService(
-      database,
-      new SessionService(database.pool),
-    );
+    const sessions = new SessionService(database.pool);
+    const login = new LoginService(database, sessions);
 
     const sameWechat = gameContext(
       providerClient("wechat", "wx-app-a", "same-subject"),
@@ -150,6 +148,37 @@ test("身份事务隔离 Provider/AppID、补绑 unionid 并收敛并发首次�
         attempt("douyin-same"),
       ),
     );
+    for (const providerSession of [repeated, douyin]) {
+      const verified = await sessions.verify(
+        "identity-game",
+        300,
+        providerSession.accessToken,
+        13,
+      );
+      assert.equal(verified.valid, true);
+      if (verified.valid) {
+        assert.equal(verified.userId, providerSession.userId);
+        assert.ok(verified.expiresAtMs > verified.issuedAtMs);
+      }
+      assert.deepEqual(
+        await sessions.verify(
+          "other-game",
+          300,
+          providerSession.accessToken,
+          13,
+        ),
+        { valid: false, reason: "MISMATCH" },
+      );
+      assert.deepEqual(
+        await sessions.verify(
+          "identity-game",
+          300,
+          providerSession.accessToken,
+          14,
+        ),
+        { valid: false, reason: "MISMATCH" },
+      );
+    }
     await database.pool.query(
       `UPDATE game_identity_providers
           SET app_id = 'wx-app-b'

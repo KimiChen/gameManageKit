@@ -2,6 +2,7 @@ import type {
   AuthExchangeResult,
   IdentityProviderClient,
   ProviderFailureReason,
+  ProviderRequestDurationRecorder,
 } from "../../domain/account/auth-provider.js";
 import {
   CircuitBreaker,
@@ -56,6 +57,18 @@ function integer(value: unknown): number | null {
     : null;
 }
 
+function elapsedMilliseconds(started: bigint): number {
+  return Math.min(
+    2_147_483_647,
+    Math.max(
+      0,
+      Math.round(
+        Number(process.hrtime.bigint() - started) / 1_000_000,
+      ),
+    ),
+  );
+}
+
 function failure(reason: ProviderFailureReason): DouyinExchangeResult {
   return { ok: false, reason };
 }
@@ -97,7 +110,10 @@ export class DouyinClient implements DouyinIdentityClient {
     });
   }
 
-  async exchange(code: string): Promise<DouyinExchangeResult> {
+  async exchange(
+    code: string,
+    recordRequestDuration?: ProviderRequestDurationRecorder,
+  ): Promise<DouyinExchangeResult> {
     if (!this.validConfiguration()) {
       return failure("invalid_credentials");
     }
@@ -110,10 +126,17 @@ export class DouyinClient implements DouyinIdentityClient {
     }
 
     let current: DouyinAttempt;
+    let started: bigint | undefined;
     try {
-      current = await this.request(code);
+      current = await this.request(code, () => {
+        started = process.hrtime.bigint();
+      });
     } catch {
       current = attempt(failure("unavailable"));
+    } finally {
+      if (started !== undefined) {
+        recordRequestDuration?.(elapsedMilliseconds(started));
+      }
     }
     this.settle(permit, current);
     return current.result;
@@ -123,7 +146,10 @@ export class DouyinClient implements DouyinIdentityClient {
     this.breaker.reset();
   }
 
-  private async request(code: string): Promise<DouyinAttempt> {
+  private async request(
+    code: string,
+    requestStarted: () => void,
+  ): Promise<DouyinAttempt> {
     let url: URL;
     try {
       url = new URL(this.options.endpoint);
@@ -136,6 +162,7 @@ export class DouyinClient implements DouyinIdentityClient {
 
     const signal = AbortSignal.timeout(this.options.timeoutMs);
     let response: Response;
+    requestStarted();
     try {
       response = await this.fetchImpl(url, {
         headers: {

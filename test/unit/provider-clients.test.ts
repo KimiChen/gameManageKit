@@ -188,7 +188,31 @@ test("抖音 Client 校验 HTTP 状态、重定向及响应结构", async () => 
       { ok: false, reason: "invalid_response" },
     ],
     [
+      new Response("", { status: 200 }),
+      { ok: false, reason: "invalid_response" },
+    ],
+    [
       jsonResponse({ error: 0, session_key: "missing-openid" }),
+      { ok: false, reason: "invalid_response" },
+    ],
+    [
+      jsonResponse({ error: 0, openid: "openid" }),
+      { ok: false, reason: "invalid_response" },
+    ],
+    [
+      jsonResponse({
+        error: 0,
+        openid: "openid",
+        session_key: "",
+      }),
+      { ok: false, reason: "invalid_response" },
+    ],
+    [
+      jsonResponse({
+        error: 0,
+        openid: "openid",
+        session_key: 7,
+      }),
       { ok: false, reason: "invalid_response" },
     ],
     [
@@ -231,17 +255,25 @@ test("抖音 Client 区分网络错误与超时且不泄露敏感值", async () 
   const code = "code-sensitive-canary";
   const secret = "secret-sensitive-canary";
   let calls = 0;
-  const networkResult = await douyinClient(async (input) => {
-    calls += 1;
-    throw new Error(`network failed: ${String(input)}`);
-  }, {
-    secret,
-  }).exchange(code);
-  assert.deepEqual(networkResult, {
-    ok: false,
-    reason: "unavailable",
-  });
-  assert.equal(calls, 1);
+  const networkResults: AuthExchangeResult[] = [];
+  for (const causeCode of ["ENOTFOUND", "ECONNREFUSED"]) {
+    const result = await douyinClient(async (input) => {
+      calls += 1;
+      throw new TypeError(`network failed: ${String(input)}`, {
+        cause: Object.assign(new Error("socket failure"), {
+          code: causeCode,
+        }),
+      });
+    }, {
+      secret,
+    }).exchange(code);
+    assert.deepEqual(result, {
+      ok: false,
+      reason: "unavailable",
+    });
+    networkResults.push(result);
+  }
+  assert.equal(calls, 2);
 
   const timeoutResult = await douyinClient(
     async (_input, init) => new Promise<Response>((_resolve, reject) => {
@@ -275,7 +307,7 @@ test("抖音 Client 区分网络错误与超时且不泄露敏感值", async () 
   });
 
   const serialized = JSON.stringify([
-    networkResult,
+    networkResults,
     timeoutResult,
     bodyTimeoutResult,
   ]);

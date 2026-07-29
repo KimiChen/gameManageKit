@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import type { Pool } from "mysql2/promise";
 import {
   GameConfigResolver,
@@ -180,6 +181,59 @@ test("Resolver 延迟读取两个 Provider Secret 并附加安全版本", async 
   assert.equal(validationUpdates.length, 2);
 });
 
+test("Provider 延迟仅统计上游请求，不包含配置读取和验证写入", async () => {
+  const databaseDelayMs = 80;
+  const upstreamDelayMs = 50;
+  const pool = {
+    async query(rawSql: string, values: readonly unknown[] = []) {
+      const sql = compact(rawSql);
+      if (sql.startsWith("SELECT game_id FROM games")) {
+        return [[{ game_id: "game-a" }], []];
+      }
+      if (sql.includes("FROM games g")) {
+        return [[configuredRow()], []];
+      }
+      if (sql.includes("game_identity_providers")) {
+        assert.deepEqual(values, ["wechat", "game-a"]);
+        await delay(databaseDelayMs);
+        return [[providerRow("wechat")], []];
+      }
+      throw new Error(`未实现 query: ${sql}`);
+    },
+    async execute() {
+      await delay(databaseDelayMs);
+      return [{ affectedRows: 1 }, []];
+    },
+  } as unknown as Pool;
+  const resolver = new GameConfigResolver(pool, {
+    production: true,
+    fetchImpl: async () => {
+      await delay(upstreamDelayMs);
+      return new Response(JSON.stringify({
+        openid: "wechat-openid",
+        session_key: "wechat-session",
+      }));
+    },
+  });
+  await resolver.initialize();
+  const game = await resolver.resolve("game-a");
+
+  const started = process.hrtime.bigint();
+  const result = await game.wechat.exchange("wechat-code");
+  const totalMs =
+    Number(process.hrtime.bigint() - started) / 1_000_000;
+
+  assert.equal(result.ok, true);
+  assert.equal(typeof result.providerLatencyMs, "number");
+  assert.ok(
+    (result.providerLatencyMs ?? 0) >= upstreamDelayMs - 10,
+  );
+  assert.ok(
+    totalMs - (result.providerLatencyMs ?? totalMs)
+      >= databaseDelayMs * 1.5,
+  );
+});
+
 test("禁用、缺失或不完整 Provider 快速返回 unavailable", async () => {
   let fetchCalls = 0;
   const providerReads: string[] = [];
@@ -220,6 +274,7 @@ test("禁用、缺失或不完整 Provider 快速返回 unavailable", async () =
   assert.deepEqual(await game.douyin.exchange("code"), {
     ok: false,
     reason: "unavailable",
+    providerVersion: 1,
   });
   assert.equal(fetchCalls, 0);
   assert.deepEqual(providerReads.sort(), ["douyin", "wechat"]);
@@ -289,11 +344,17 @@ test("只有 invalid_credentials 标记失败，成功激活且 invalid_code 不
   await resolver.initialize();
   const game = await resolver.resolve("game-a");
 
-  assert.deepEqual(await game.wechat.exchange("invalid-code"), {
+  const invalidCode = await game.wechat.exchange("invalid-code");
+  assert.deepEqual({
+    ok: invalidCode.ok,
+    reason: invalidCode.ok ? undefined : invalidCode.reason,
+    providerVersion: invalidCode.providerVersion,
+  }, {
     ok: false,
     reason: "invalid_code",
     providerVersion: 1,
   });
+  assert.equal(typeof invalidCode.providerLatencyMs, "number");
   assert.deepEqual(validationUpdates, []);
 
   wechatSuccess = true;
@@ -304,11 +365,17 @@ test("只有 invalid_credentials 标记失败，成功激活且 invalid_code 不
     state: "active",
   }]);
 
-  assert.deepEqual(await game.douyin.exchange("bad-credentials"), {
+  const badCredentials = await game.douyin.exchange("bad-credentials");
+  assert.deepEqual({
+    ok: badCredentials.ok,
+    reason: badCredentials.ok ? undefined : badCredentials.reason,
+    providerVersion: badCredentials.providerVersion,
+  }, {
     ok: false,
     reason: "invalid_credentials",
     providerVersion: 1,
   });
+  assert.equal(typeof badCredentials.providerLatencyMs, "number");
   assert.deepEqual(await game.douyin.exchange("fast-failure"), {
     ok: false,
     reason: "invalid_credentials",
@@ -422,9 +489,11 @@ test("Provider 缓存 TTL 发现其他实例写入的 validation_failed", async 
   assert.equal(fetchCalls, 1);
 });
 
-test("本地仅失效变更 Provider，另一 Provider 的熔断状态保持隔离", async () => {
+test("Provider 配置更新重置自身熔断并保留另一 Provider 状态", async () => {
   let integrationRevision = 1;
-  let douyinVersion = 1;
+  let douyinAppVersion = 1;
+  let douyinSecret = "douyin-secret-stable";
+  let douyinSecretVersion = 9;
   let wechatCalls = 0;
   const douyinSecrets: string[] = [];
   const pool = {
@@ -449,10 +518,11 @@ test("本地仅失效变更 Provider，另一 Provider 的熔断状态保持隔�
             })], []]
           : [[providerRow("douyin", {
               integration_revision: integrationRevision,
-              app_id: `tt-app-v${douyinVersion}`,
-              app_secret: `douyin-secret-v${douyinVersion}`,
-              secret_version: douyinVersion,
+              app_id: `tt-app-v${douyinAppVersion}`,
+              app_secret: douyinSecret,
+              secret_version: douyinSecretVersion,
               validation_state: "active",
+              breaker_threshold: 1,
             })], []];
       }
       throw new Error(`未实现 query: ${sql}`);
@@ -467,6 +537,12 @@ test("本地仅失效变更 Provider，另一 Provider 的熔断状态保持隔�
         throw new Error("微信故障");
       }
       douyinSecrets.push(url.searchParams.get("secret") ?? "");
+      if (
+        url.searchParams.get("appid") === "tt-app-v1"
+        || url.searchParams.get("code") === "open-before-secret"
+      ) {
+        throw new Error("抖音旧配置故障");
+      }
       return new Response(JSON.stringify({
         error: 0,
         openid: "douyin-openid",
@@ -476,15 +552,35 @@ test("本地仅失效变更 Provider，另一 Provider 的熔断状态保持隔�
   });
   await resolver.initialize();
   const first = await resolver.resolve("game-a");
-  assert.deepEqual(await first.wechat.exchange("fault"), {
+  const wechatFailure = await first.wechat.exchange("fault");
+  assert.deepEqual({
+    ok: wechatFailure.ok,
+    reason: wechatFailure.ok ? undefined : wechatFailure.reason,
+    providerVersion: wechatFailure.providerVersion,
+  }, {
     ok: false,
     reason: "unavailable",
     providerVersion: 1,
   });
-  assert.equal((await first.douyin.exchange("v1")).ok, true);
+  assert.equal(typeof wechatFailure.providerLatencyMs, "number");
+  const firstDouyin = await first.douyin.exchange("v1");
+  assert.deepEqual({
+    ok: firstDouyin.ok,
+    reason: firstDouyin.ok ? undefined : firstDouyin.reason,
+    providerVersion: firstDouyin.providerVersion,
+  }, {
+    ok: false,
+    reason: "unavailable",
+    providerVersion: 1,
+  });
+  assert.deepEqual(await first.douyin.exchange("old-circuit-open"), {
+    ok: false,
+    reason: "circuit_open",
+    providerVersion: 1,
+  });
 
   integrationRevision = 2;
-  douyinVersion = 2;
+  douyinAppVersion = 2;
   resolver.invalidate("game-a", "douyin");
   const second = await resolver.resolve("game-a");
   assert.deepEqual(resolver.loadedRevision("game-a"), {
@@ -495,20 +591,195 @@ test("本地仅失效变更 Provider，另一 Provider 的熔断状态保持隔�
   assert.deepEqual(await second.wechat.exchange("still-open"), {
     ok: false,
     reason: "circuit_open",
-    providerVersion: 1,
+    providerVersion: 2,
   });
   const douyin = await second.douyin.exchange("v2");
   assert.equal(douyin.ok && douyin.providerAppId, "tt-app-v2");
   assert.equal(douyin.ok && douyin.providerVersion, 2);
+  const beforeSecret = await second.douyin.exchange(
+    "open-before-secret",
+  );
+  assert.equal(
+    !beforeSecret.ok && beforeSecret.reason,
+    "unavailable",
+  );
+  assert.deepEqual(
+    await second.douyin.exchange("old-secret-circuit-open"),
+    {
+      ok: false,
+      reason: "circuit_open",
+      providerVersion: 2,
+    },
+  );
+
+  integrationRevision = 3;
+  douyinSecret = "douyin-secret-rotated";
+  douyinSecretVersion = 10;
+  resolver.invalidate("game-a", "douyin");
+  const third = await resolver.resolve("game-a");
+  assert.deepEqual(await third.wechat.exchange("still-open-again"), {
+    ok: false,
+    reason: "circuit_open",
+    providerVersion: 3,
+  });
+  const rotated = await third.douyin.exchange("rotated-secret");
+  assert.equal(rotated.ok && rotated.providerAppId, "tt-app-v2");
+  assert.equal(rotated.ok && rotated.providerVersion, 3);
   assert.equal(wechatCalls, 1);
   assert.deepEqual(douyinSecrets, [
-    "douyin-secret-v1",
-    "douyin-secret-v2",
+    "douyin-secret-stable",
+    "douyin-secret-stable",
+    "douyin-secret-stable",
+    "douyin-secret-rotated",
   ]);
   assert.deepEqual(await first.douyin.exchange("stale-context"), {
     ok: false,
     reason: "unavailable",
   });
+});
+
+test("其他实例通过缓存 TTL 热加载 Provider 配置和 Secret", async () => {
+  let nowMs = 1_000;
+  let integrationRevision = 1;
+  let appId = "tt-app-v1";
+  let secret = "douyin-secret-v1";
+  let secretVersion = 1;
+  const requests: Array<Readonly<{
+    instance: string;
+    appId: string | null;
+    secret: string | null;
+  }>> = [];
+  const pool = {
+    async query(rawSql: string, values: readonly unknown[] = []) {
+      const sql = compact(rawSql);
+      if (sql.startsWith("SELECT game_id FROM games")) {
+        return [[{ game_id: "game-a" }], []];
+      }
+      if (sql.includes("FROM games g")) {
+        return [[configuredRow({
+          integration_revision: integrationRevision,
+        })], []];
+      }
+      if (sql.includes("game_identity_providers")) {
+        assert.deepEqual(values, ["douyin", "game-a"]);
+        return [[providerRow("douyin", {
+          integration_revision: integrationRevision,
+          app_id: appId,
+          app_secret: secret,
+          secret_version: secretVersion,
+          validation_state: "active",
+        })], []];
+      }
+      throw new Error(`未实现 query: ${sql}`);
+    },
+  } as unknown as Pool;
+  const createResolver = (instance: string) => new GameConfigResolver(
+    pool,
+    {
+      production: true,
+      cacheTtlMs: 100,
+      now: () => nowMs,
+      fetchImpl: async (input) => {
+        const url = new URL(String(input));
+        requests.push(Object.freeze({
+          instance,
+          appId: url.searchParams.get("appid"),
+          secret: url.searchParams.get("secret"),
+        }));
+        return new Response(JSON.stringify({
+          error: 0,
+          openid: `douyin-openid-${instance}`,
+          session_key: "douyin-session",
+        }));
+      },
+    },
+  );
+  const writer = createResolver("writer");
+  const follower = createResolver("follower");
+  await Promise.all([writer.initialize(), follower.initialize()]);
+
+  const followerV1 = await follower.resolve("game-a");
+  assert.equal((await followerV1.douyin.exchange("v1")).ok, true);
+
+  integrationRevision = 2;
+  appId = "tt-app-v2";
+  writer.invalidate("game-a", "douyin");
+  assert.equal(
+    (
+      await (await writer.resolve("game-a")).douyin.exchange(
+        "writer-config-v2",
+      )
+    ).ok,
+    true,
+  );
+  assert.equal(
+    (await followerV1.douyin.exchange("before-config-ttl")).ok,
+    true,
+  );
+
+  nowMs += 101;
+  const followerV2 = await follower.resolve("game-a");
+  assert.equal((await followerV2.douyin.exchange("config-v2")).ok, true);
+  assert.equal(followerV2.revision.integration, 2);
+
+  integrationRevision = 3;
+  secret = "douyin-secret-v2";
+  secretVersion = 2;
+  writer.invalidate("game-a", "douyin");
+  assert.equal(
+    (
+      await (await writer.resolve("game-a")).douyin.exchange(
+        "writer-secret-v2",
+      )
+    ).ok,
+    true,
+  );
+  assert.equal(
+    (await followerV2.douyin.exchange("before-secret-ttl")).ok,
+    true,
+  );
+
+  nowMs += 101;
+  const followerV3 = await follower.resolve("game-a");
+  assert.equal((await followerV3.douyin.exchange("secret-v2")).ok, true);
+  assert.equal(followerV3.revision.integration, 3);
+  assert.deepEqual(requests, [
+    {
+      instance: "follower",
+      appId: "tt-app-v1",
+      secret: "douyin-secret-v1",
+    },
+    {
+      instance: "writer",
+      appId: "tt-app-v2",
+      secret: "douyin-secret-v1",
+    },
+    {
+      instance: "follower",
+      appId: "tt-app-v1",
+      secret: "douyin-secret-v1",
+    },
+    {
+      instance: "follower",
+      appId: "tt-app-v2",
+      secret: "douyin-secret-v1",
+    },
+    {
+      instance: "writer",
+      appId: "tt-app-v2",
+      secret: "douyin-secret-v2",
+    },
+    {
+      instance: "follower",
+      appId: "tt-app-v2",
+      secret: "douyin-secret-v1",
+    },
+    {
+      instance: "follower",
+      appId: "tt-app-v2",
+      secret: "douyin-secret-v2",
+    },
+  ]);
 });
 
 test("生产仅允许对应官方 endpoint，开发额外允许 loopback", async () => {

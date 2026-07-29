@@ -843,6 +843,122 @@ test("v5 将旧身份与微信配置迁入显式 Provider 命名空间", async (
   }
 });
 
+test("v5 预检精确报告重复身份与历史冲突错误码", async () => {
+  const adminUrl = process.env.GAME_MANAGE_KIT_TEST_MYSQL_ADMIN_URL
+    ?? "mysql://root@127.0.0.1:3316/mysql";
+  const databaseName =
+    `game_manage_kit_v5_conflict_${process.pid}_${Date.now()}`;
+  assert.match(databaseName, /^[a-z0-9_]+$/u);
+
+  const admin = await mysql.createConnection(adminUrl);
+  const mysqlUrl = databaseUrl(adminUrl, databaseName);
+  const v4Migrations = await mkdtemp(
+    join(tmpdir(), "game-manage-kit-v4-conflict-"),
+  );
+  let connection: Connection | undefined;
+  try {
+    await admin.query(
+      `CREATE DATABASE \`${databaseName}\`
+       CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci`,
+    );
+    await copyMigrations(v4Migrations, [
+      "0001_initial.sql",
+      "0002_game_servers.sql",
+      "0003_admin_managed_config.sql",
+      "0004_admin_bootstrap.sql",
+    ]);
+    await runMigrations(mysqlUrl, v4Migrations);
+    connection = await mysql.createConnection(mysqlUrl);
+    await connection.query(
+      `INSERT INTO games (game_id, name)
+       VALUES ('conflict-game', 'Conflict Game')`,
+    );
+    await connection.query(
+      `INSERT INTO game_integrations (game_id, wechat_app_id)
+       VALUES ('conflict-game', 'wx-conflict')`,
+    );
+
+    // A healthy v4 schema prevents these rows. Dropping only the legacy
+    // indexes models a damaged/imported database so v5's explicit preflight
+    // diagnostics run before any destructive DDL.
+    await connection.query(
+      `ALTER TABLE accounts
+         DROP INDEX uk_openid,
+         DROP INDEX uk_unionid`,
+    );
+    await connection.query(
+      `INSERT INTO accounts (game_id, user_id, openid, unionid)
+       VALUES
+         ('conflict-game', 'u_dup_open_a',
+          'duplicate-openid', 'unique-union-a'),
+         ('conflict-game', 'u_dup_open_b',
+          'duplicate-openid', 'unique-union-b'),
+         ('conflict-game', 'u_dup_union_a',
+          'unique-open-a', 'duplicate-unionid'),
+         ('conflict-game', 'u_dup_union_b',
+          'unique-open-b', 'duplicate-unionid')`,
+    );
+    await connection.query(
+      `INSERT INTO login_audit (game_id, user_id, event)
+       VALUES ('conflict-game', 'u_dup_open_a', 'login_dual_account')`,
+    );
+
+    await assert.rejects(
+      runMigrations(mysqlUrl),
+      hasMysqlErrno(3819),
+    );
+    const [version] = await connection.query<RowDataPacket[]>(
+      "SELECT MAX(version) AS version FROM schema_migrations",
+    );
+    assert.equal(Number(version[0]?.version), 4);
+    const [errors] = await connection.query<RowDataPacket[]>(
+      `SELECT user_id, error_code
+         FROM schema_v5_identity_migration_errors
+        ORDER BY error_code, user_id`,
+    );
+    assert.deepEqual(errors.map((row) => ({
+      userId: String(row.user_id),
+      errorCode: String(row.error_code),
+    })), [
+      {
+        userId: "u_dup_open_a",
+        errorCode: "DUPLICATE_WECHAT_OPENID",
+      },
+      {
+        userId: "u_dup_open_b",
+        errorCode: "DUPLICATE_WECHAT_OPENID",
+      },
+      {
+        userId: "u_dup_union_a",
+        errorCode: "DUPLICATE_WECHAT_UNIONID",
+      },
+      {
+        userId: "u_dup_union_b",
+        errorCode: "DUPLICATE_WECHAT_UNIONID",
+      },
+      {
+        userId: "u_dup_open_a",
+        errorCode: "LEGACY_IDENTITY_CONFLICT",
+      },
+    ]);
+    const [targetTables] = await connection.query<RowDataPacket[]>(
+      `SELECT table_name
+         FROM information_schema.tables
+        WHERE table_schema = DATABASE()
+          AND table_name IN (
+            'account_identities',
+            'game_identity_providers'
+          )`,
+    );
+    assert.deepEqual(targetTables, []);
+  } finally {
+    await connection?.end();
+    await rm(v4Migrations, { recursive: true, force: true });
+    await admin.query(`DROP DATABASE IF EXISTS \`${databaseName}\``);
+    await admin.end();
+  }
+});
+
 test("v5 预检与晚期失败均保留数据，修复后可安全重跑", async () => {
   const adminUrl = process.env.GAME_MANAGE_KIT_TEST_MYSQL_ADMIN_URL
     ?? "mysql://root@127.0.0.1:3316/mysql";
