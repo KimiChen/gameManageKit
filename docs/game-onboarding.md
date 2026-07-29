@@ -115,6 +115,35 @@ AppID 是身份命名空间，不是普通展示字段。该 Provider 已产生�
 [抖音小游戏 code2Session 官方文档](https://developer.open-douyin.com/docs/resource/zh-CN/mini-game/develop/server/log-in/code-2-session/)
 为准，不接收 `anonymous_code`，也不会自动重试一次性 code。
 
+### 真实抖音登录验收
+
+先在管理端完成游戏、目标区服、抖音 Provider 和 `service` 机器身份配置，并启动
+Public/Internal 双监听。真实验收命令只接收非敏感参数；Service Secret 与 fresh
+`tt.login` code 均在运行过程中通过隐藏 TTY 输入，不得写入命令行、环境文件、CI
+配置或仓库：
+
+```bash
+npm run verify:douyin:live -- \
+  --game-id <gameId> \
+  --server-id <serverId> \
+  --service-id <serviceIdentityId> \
+  --public-url http://127.0.0.1:2570 \
+  --internal-url http://127.0.0.1:2571
+```
+
+脚本在要求 fresh code 前先完成双监听 readiness、公开区服目录以及 Service 身份和
+游戏范围预检，避免因网络、区服或 Service scope 错误浪费一次性 code。Public API
+不会公开 Provider 配置，因此操作者仍须在管理端确认测试 Provider 已启用且
+AppID/Secret 正确。随后只调用一次
+`/sessions/douyin`，并将返回的完整 token 原样交给 Internal
+`/sessions/verify`；验收结果仅输出 gameId、serverId、userId、是否新账号以及权威
+签发/过期时间和两个可信 `x-request-id`，不输出 code、token 或 Secret。任何网络结果
+不确定时，都必须重新执行 `tt.login` 获取新 code，不得重放旧 code。远程 Public 和
+Internal origin 强制使用 HTTPS，只有 loopback 本地联调允许 HTTP。
+
+完整的测试 game 启用顺序、生产门禁、观察项和回滚边界见
+[抖音发布与回滚手册](douyin-release.md)。
+
 ## 4. 创建机器身份
 
 接入配置页可以创建两类身份：

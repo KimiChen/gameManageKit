@@ -21,6 +21,7 @@
     "test:int": "npm run build && node --env-file=.env --import tsx --test --test-concurrency=1 test/integration/*.test.ts",
     "generate:contract": "tsx scripts/generate-contract.ts",
     "verify:contract": "tsx scripts/generate-contract.ts --check",
+    "verify:douyin:live": "tsx scripts/verify-live-douyin.ts",
     "check:contract-breaking": "tsx scripts/check-contract-breaking.ts",
     "migrate": "tsx --env-file=.env src/migrate.ts",
     "migrate:prod": "node --env-file=.env dist/migrate.js",

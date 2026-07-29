@@ -56,6 +56,8 @@ mTLS、VPN 与访问控制。`Origin` 校验是 CSRF 防护，不是首个操作
 6. 游戏变为 `configured` 后，再按需要切换为 `enabled` 并允许客户端发现。
 
 完整流程见[游戏接入指南](docs/game-onboarding.md)。
+抖音从测试应用验证到生产启用的顺序、证据和回滚边界见
+[抖音发布与回滚手册](docs/douyin-release.md)。
 
 ### 系统级环境变量
 
@@ -214,6 +216,10 @@ docker run --rm --env-file .env.production \
 禁用对应 Provider。Service 与机器 Admin Secret 由服务端生成，数据库只保存 SHA-256
 摘要，明文仅在创建或轮换响应中显示一次。这两类 Secret 都不会通过 GET API 回显。
 
+生产启用抖音前，发布负责人必须在发布记录中明确数据库透明加密、磁盘/快照/备份加密
+是否满足 AppSecret 静态存储要求。若不满足，应先建立 KMS/信封加密及轮换方案，不能用
+未经密钥管理的自制加密替代。该环境级结论不写入包含凭据的仓库文件。
+
 ## 接口与运行规则
 
 客户端发现可下发游戏：
@@ -251,13 +257,15 @@ Internal/Admin 的 `/metrics` 提供，并要求数据库中已启用且具备�
 Service 身份：
 
 ```bash
-curl --fail \
-  -H "x-service-id: ${SERVICE_ID}" \
-  -H "x-service-secret: ${SERVICE_SECRET}" \
-  http://127.0.0.1:2571/metrics
+curl --fail --config - http://127.0.0.1:2571/metrics <<EOF
+header = "x-service-id: ${SERVICE_ID}"
+header = "x-service-secret: ${SERVICE_SECRET}"
+EOF
 ```
 
 `SERVICE_SECRET` 应从受控 Secret Manager 注入调用进程，不要写入仓库或普通日志。
+这里通过 curl 的标准输入提供 Header，Secret 不进入 curl 进程参数；运行时仍须关闭
+shell tracing，并在命令结束后清除临时环境。
 指标只使用有界标签，并按 `game_id + provider + outcome` 观察上游请求；AppID、subject
 和 code 永不作为标签。请求日志会关联 `gameId`、`serviceId` 或 `operatorId`，并脱敏
 Authorization、Token、Cookie、密码、登录身份值和全部 Secret 字段。
