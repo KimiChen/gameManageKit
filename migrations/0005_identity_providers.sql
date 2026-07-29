@@ -1248,6 +1248,138 @@ IF v_schema_count <> 23 THEN
     SET MESSAGE_TEXT = 'v5 required constraints are incomplete';
 END IF;
 
+-- CREATE TABLE IF NOT EXISTS is required for a safe late-failure rerun, but
+-- it must not allow a pre-existing lookalike table to bypass the identity
+-- isolation keys. Verify every critical key by type, ordered local columns,
+-- ordered referenced columns and referential action before marking v5
+-- complete.
+SELECT COUNT(*)
+  INTO v_schema_count
+  FROM (
+    SELECT
+      tc.table_name,
+      tc.constraint_name,
+      tc.constraint_type,
+      GROUP_CONCAT(
+        kcu.column_name
+        ORDER BY kcu.ordinal_position
+        SEPARATOR ','
+      ) AS local_columns,
+      GROUP_CONCAT(
+        COALESCE(
+          CONCAT(
+            kcu.referenced_table_schema,
+            '.',
+            kcu.referenced_table_name,
+            '.',
+            kcu.referenced_column_name
+          ),
+          ''
+        )
+        ORDER BY kcu.ordinal_position
+        SEPARATOR ','
+      ) AS referenced_columns,
+      MAX(rc.update_rule) AS update_rule,
+      MAX(rc.delete_rule) AS delete_rule
+    FROM information_schema.table_constraints AS tc
+    JOIN information_schema.key_column_usage AS kcu
+      ON kcu.constraint_schema = tc.constraint_schema
+     AND kcu.table_name = tc.table_name
+     AND kcu.constraint_name = tc.constraint_name
+    LEFT JOIN information_schema.referential_constraints AS rc
+      ON rc.constraint_schema = tc.constraint_schema
+     AND rc.table_name = tc.table_name
+     AND rc.constraint_name = tc.constraint_name
+   WHERE tc.constraint_schema = DATABASE()
+     AND (
+       (
+         tc.table_name = 'account_identities'
+         AND tc.constraint_name IN (
+           'PRIMARY',
+           'uk_account_identities_namespace',
+           'fk_account_identities_account'
+         )
+       )
+       OR (
+         tc.table_name = 'game_identity_providers'
+         AND tc.constraint_name IN (
+           'PRIMARY',
+           'fk_game_identity_providers_game',
+           'fk_game_identity_providers_operator'
+         )
+       )
+     )
+   GROUP BY
+     tc.table_name,
+     tc.constraint_name,
+     tc.constraint_type
+  ) AS identity_key
+ WHERE (
+         identity_key.table_name = 'account_identities'
+         AND identity_key.constraint_name = 'PRIMARY'
+         AND identity_key.constraint_type = 'PRIMARY KEY'
+         AND identity_key.local_columns = 'id'
+       )
+    OR (
+         identity_key.table_name = 'account_identities'
+         AND identity_key.constraint_name =
+           'uk_account_identities_namespace'
+         AND identity_key.constraint_type = 'UNIQUE'
+         AND identity_key.local_columns =
+           'game_id,provider,provider_app_id,subject_type,subject'
+       )
+    OR (
+         identity_key.table_name = 'account_identities'
+         AND identity_key.constraint_name =
+           'fk_account_identities_account'
+         AND identity_key.constraint_type = 'FOREIGN KEY'
+         AND identity_key.local_columns = 'game_id,user_id'
+         AND identity_key.referenced_columns = CONCAT(
+           DATABASE(),
+           '.accounts.game_id,',
+           DATABASE(),
+           '.accounts.user_id'
+         )
+         AND identity_key.update_rule = 'RESTRICT'
+         AND identity_key.delete_rule = 'RESTRICT'
+       )
+    OR (
+         identity_key.table_name = 'game_identity_providers'
+         AND identity_key.constraint_name = 'PRIMARY'
+         AND identity_key.constraint_type = 'PRIMARY KEY'
+         AND identity_key.local_columns = 'game_id,provider'
+       )
+    OR (
+         identity_key.table_name = 'game_identity_providers'
+         AND identity_key.constraint_name =
+           'fk_game_identity_providers_game'
+         AND identity_key.constraint_type = 'FOREIGN KEY'
+         AND identity_key.local_columns = 'game_id'
+         AND identity_key.referenced_columns = CONCAT(
+           DATABASE(),
+           '.games.game_id'
+         )
+         AND identity_key.update_rule = 'RESTRICT'
+         AND identity_key.delete_rule = 'RESTRICT'
+       )
+    OR (
+         identity_key.table_name = 'game_identity_providers'
+         AND identity_key.constraint_name =
+           'fk_game_identity_providers_operator'
+         AND identity_key.constraint_type = 'FOREIGN KEY'
+         AND identity_key.local_columns = 'updated_by'
+         AND identity_key.referenced_columns = CONCAT(
+           DATABASE(),
+           '.admin_operators.operator_id'
+         )
+         AND identity_key.update_rule = 'RESTRICT'
+         AND identity_key.delete_rule = 'RESTRICT'
+       );
+IF v_schema_count <> 6 THEN
+  SIGNAL SQLSTATE '45000'
+    SET MESSAGE_TEXT = 'v5 identity key constraints are incomplete';
+END IF;
+
 SELECT COUNT(*)
   INTO v_invalid_count
   FROM accounts AS account

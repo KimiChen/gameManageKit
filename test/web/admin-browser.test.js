@@ -88,6 +88,7 @@ async function createAdminFixtureServer({
   let nextOperationGate = null;
   let nextServerListGate = null;
   let nextServerConflict = false;
+  let nextProviderSecretDeleteConflict = false;
   const errors = [];
   const bootstrapMutations = [];
   const operations = [];
@@ -677,6 +678,39 @@ async function createAdminFixtureServer({
           (candidate) => candidate.provider === providerName,
         );
         assert.equal(body.revision, gameIntegration.revision);
+        if (
+          nextProviderSecretDeleteConflict
+          && providerName === "douyin"
+        ) {
+          nextProviderSecretDeleteConflict = false;
+          Object.assign(provider, {
+            appId: "tt-game-a-external",
+            enabled: true,
+            timeoutMs: 4_321,
+            secretMetadata: {
+              configured: true,
+              version: provider.secretMetadata.version + 1,
+              updatedAt: "2026-07-28T11:22:30.000Z",
+            },
+            validationState: "unvalidated",
+            validationFailedAt: null,
+            validationErrorCode: null,
+            updatedBy: "ops_external",
+            updatedAt: "2026-07-28T11:22:30.000Z",
+          });
+          gameIntegration.revision += 1;
+          gameIntegration.updatedAt = "2026-07-28T11:22:30.000Z";
+          integrationMutations.push({
+            method: "DELETE_PROVIDER_SECRET_CONFLICT",
+            provider: providerName,
+            body,
+          });
+          json(reply, 409, {
+            code: "GAME_PROJECT_CONFLICT",
+            message: "revision conflict",
+          });
+          return;
+        }
         Object.assign(provider, {
           enabled: false,
           secretMetadata: {
@@ -1027,6 +1061,9 @@ async function createAdminFixtureServer({
     },
     conflictNextServerUpdate() {
       nextServerConflict = true;
+    },
+    conflictNextProviderSecretDelete() {
+      nextProviderSecretDeleteConflict = true;
     },
     errors,
     gameMutations,
@@ -1776,6 +1813,81 @@ test("真实 Chrome 可用键盘完成管理员登录、查询和确认操作", 
       + " && !document.querySelector('#provider-secret-clear').hidden",
     "打开已配置的抖音 Secret 窗口",
   );
+  fixture.conflictNextProviderSecretDelete();
+  await evaluate(client, `(() => {
+    const input = document.querySelector("#provider-secret-input");
+    input.value = "stale-sensitive-douyin-secret";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector("#provider-secret-clear").focus();
+  })()`);
+  await pressKey(client, "Enter");
+  await waitFor(
+    client,
+    "!document.querySelector('#provider-secret-dialog').open"
+      + " && document.querySelector('#provider-douyin-secret-badge')"
+      + ".textContent === '已配置 · v2'"
+      + " && document.querySelector('#provider-douyin-appId').value"
+      + " === 'tt-game-a-external'"
+      + " && document.querySelector('#provider-douyin-timeoutMs').value"
+      + " === '4321'"
+      + " && document.querySelector('#toast-region').textContent"
+      + ".includes('配置版本或操作标识发生冲突，页面已加载最新状态；请核对后重新操作。')",
+    "revision 冲突后加载抖音 Provider 最新状态",
+  );
+  assert.deepEqual(
+    await evaluate(client, `({
+      activeElement: document.activeElement?.id,
+      dialogOpen: document.querySelector("#provider-secret-dialog").open,
+      inlineErrorHidden:
+        document.querySelector("#provider-secret-error").hidden,
+      inlineErrorMessage:
+        document.querySelector("#provider-secret-error-message").textContent,
+      inputType: document.querySelector("#provider-secret-input").type,
+      inputValue: document.querySelector("#provider-secret-input").value,
+      pageClean:
+        !document.body.textContent.includes("stale-sensitive-douyin-secret"),
+      warningToast: [...document.querySelectorAll(".wsk-toast")]
+        .some((toast) => (
+          toast.matches(".wsk-warning[role='status']")
+          && toast.textContent.includes(
+            "配置版本或操作标识发生冲突，页面已加载最新状态；请核对后重新操作。",
+          )
+        )),
+    })`),
+    {
+      activeElement: "provider-douyin-secret",
+      dialogOpen: false,
+      inlineErrorHidden: true,
+      inlineErrorMessage: "",
+      inputType: "password",
+      inputValue: "",
+      pageClean: true,
+      warningToast: true,
+    },
+  );
+  const douyinDeleteConflict = fixture.integrationMutations.find(
+    (mutation) => (
+      mutation.method === "DELETE_PROVIDER_SECRET_CONFLICT"
+      && mutation.provider === "douyin"
+    ),
+  );
+  assert.equal(douyinDeleteConflict.body.revision, 5);
+  assert.equal(
+    Object.hasOwn(douyinDeleteConflict.body, "appSecret"),
+    false,
+  );
+
+  await evaluate(
+    client,
+    "document.querySelector('#provider-douyin-secret').focus()",
+  );
+  await pressKey(client, "Enter");
+  await waitFor(
+    client,
+    "document.querySelector('#provider-secret-dialog').open"
+      + " && !document.querySelector('#provider-secret-clear').hidden",
+    "使用最新 revision 重新打开抖音 Secret 窗口",
+  );
   await evaluate(
     client,
     "document.querySelector('#provider-secret-clear').focus()",
@@ -1787,17 +1899,15 @@ test("真实 Chrome 可用键盘完成管理员登录、查询和确认操作", 
       + " && document.querySelector('#provider-douyin-secret-badge')"
       + ".textContent === '未配置'"
       + " && !document.querySelector('#provider-douyin-enabled').checked",
-    "清除抖音 Secret 并停用 Provider",
+    "使用最新 revision 清除抖音 Secret 并停用 Provider",
   );
-  assert.equal(
-    fixture.integrationMutations.filter(
-      (mutation) => (
-        mutation.method === "DELETE_PROVIDER_SECRET"
-        && mutation.provider === "douyin"
-      ),
-    ).length,
-    1,
+  const douyinDelete = fixture.integrationMutations.find(
+    (mutation) => (
+      mutation.method === "DELETE_PROVIDER_SECRET"
+      && mutation.provider === "douyin"
+    ),
   );
+  assert.equal(douyinDelete.body.revision, 6);
 
   await evaluate(
     client,

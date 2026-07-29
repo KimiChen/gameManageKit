@@ -46,6 +46,16 @@ interface GameParams {
   gameId: string;
 }
 
+interface LoginHttpRequest {
+  readonly id: string;
+  readonly ip: string;
+  readonly params: GameParams;
+  readonly body: {
+    readonly deviceId?: string | null;
+    readonly serverId: number;
+  };
+}
+
 function loginResponse(result: LoginResult): LoginResponse {
   if (result.ok) {
     return result.response;
@@ -80,6 +90,17 @@ function bearerToken(authorization: string | null): string | null {
   return token || null;
 }
 
+function loginAttempt(request: LoginHttpRequest): LoginAttempt {
+  const ip = normalizeIp(request.ip);
+  return {
+    rateKey: ip ?? request.ip,
+    ip,
+    deviceId: request.body.deviceId ?? null,
+    requestId: request.id,
+    serverId: request.body.serverId,
+  };
+}
+
 async function requireLoginServer(
   services: PublicRouteServices,
   game: Parameters<GameRuntimeRegistry["requireServer"]>[0],
@@ -112,6 +133,29 @@ export function registerPublicRoutes(
   const preHandler = async (request: Parameters<typeof resolveGameContext>[0]): Promise<void> => {
     await resolveGameContext(request, services.gameProjects);
   };
+  const loginPreHandler = async (
+    request: Parameters<typeof resolveGameContext>[0] & LoginHttpRequest,
+    provider: AuthProvider,
+  ): Promise<void> => {
+    try {
+      await resolveGameContext(request, services.gameProjects);
+    } catch (error) {
+      // GAME_DISABLED is only emitted after resolving a real, configured game.
+      // Unknown, malformed, and draft gameIds stay on the read-only 400/404 path.
+      if (
+        error instanceof GameManageKitError
+        && error.code === "GAME_DISABLED"
+      ) {
+        await services.login.auditAdmissionDenied?.(
+          request.params.gameId,
+          provider,
+          loginAttempt(request),
+          error.code,
+        ).catch(() => undefined);
+      }
+      throw error;
+    }
+  };
 
   app.get(
     GameManageKitPath.ListClientGames,
@@ -132,7 +176,9 @@ export function registerPublicRoutes(
   app.post<{ Params: GameParams; Body: WxLoginRequest }>(
     fastifyPath(GameManageKitPath.WxLogin),
     {
-      preHandler,
+      preHandler: async (request): Promise<void> => {
+        await loginPreHandler(request, "wechat");
+      },
       schema: {
         params: gameParamsSchema,
         body: schemaRef("WxLoginRequest"),
@@ -144,14 +190,7 @@ export function registerPublicRoutes(
     },
     async (request): Promise<LoginResponse> => {
       const game = request.gameContext!;
-      const ip = normalizeIp(request.ip);
-      const attempt = {
-        rateKey: ip ?? request.ip,
-        ip,
-        deviceId: request.body.deviceId ?? null,
-        requestId: request.id,
-        serverId: request.body.serverId,
-      };
+      const attempt = loginAttempt(request);
       await requireLoginServer(services, game, "wechat", attempt);
       return loginResponse(
         await services.login.loginWechat(game, request.body.code, attempt),
@@ -162,7 +201,9 @@ export function registerPublicRoutes(
   app.post<{ Params: GameParams; Body: DouyinLoginRequest }>(
     fastifyPath(GameManageKitPath.DouyinLogin),
     {
-      preHandler,
+      preHandler: async (request): Promise<void> => {
+        await loginPreHandler(request, "douyin");
+      },
       schema: {
         params: gameParamsSchema,
         body: schemaRef("DouyinLoginRequest"),
@@ -174,14 +215,7 @@ export function registerPublicRoutes(
     },
     async (request): Promise<LoginResponse> => {
       const game = request.gameContext!;
-      const ip = normalizeIp(request.ip);
-      const attempt = {
-        rateKey: ip ?? request.ip,
-        ip,
-        deviceId: request.body.deviceId ?? null,
-        requestId: request.id,
-        serverId: request.body.serverId,
-      };
+      const attempt = loginAttempt(request);
       await requireLoginServer(services, game, "douyin", attempt);
       return loginResponse(
         await services.login.loginDouyin(game, request.body.code, attempt),
@@ -197,7 +231,9 @@ export function registerPublicRoutes(
           throw new GameManageKitError(404, "NOT_FOUND");
         }
       },
-      preHandler,
+      preHandler: async (request): Promise<void> => {
+        await loginPreHandler(request, "dev");
+      },
       schema: {
         params: gameParamsSchema,
         body: schemaRef("DevLoginRequest"),
@@ -209,14 +245,7 @@ export function registerPublicRoutes(
     },
     async (request): Promise<LoginResponse> => {
       const game = request.gameContext!;
-      const ip = normalizeIp(request.ip);
-      const attempt = {
-        rateKey: ip ?? request.ip,
-        ip,
-        deviceId: request.body.deviceId ?? null,
-        requestId: request.id,
-        serverId: request.body.serverId,
-      };
+      const attempt = loginAttempt(request);
       await requireLoginServer(services, game, "dev", attempt);
       return loginResponse(
         await services.login.loginDev(game, request.body.devKey, attempt),

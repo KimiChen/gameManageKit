@@ -3,7 +3,11 @@ import test from "node:test";
 import type { AreaListResponse, LoginResponse } from "@gono/game-manage-kit-contract";
 import { buildApps, type GameManageKitServices } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
-import type { LoginResult } from "../../src/domain/account/login.js";
+import {
+  LoginService,
+  type LoginResult,
+} from "../../src/domain/account/login.js";
+import type { SessionService } from "../../src/domain/session/service.js";
 import type { GameRuntimeRegistry } from "../../src/domain/game/resolver.js";
 import {
   authorizeAdminGame,
@@ -12,6 +16,7 @@ import {
   listRegisteredRoutes,
   resolveGameContext,
 } from "../../src/http/common.js";
+import type { Database } from "../../src/infra/mysql/database.js";
 import { MetricsRegistry } from "../../src/infra/observability/metrics.js";
 import {
   createTestRuntimeRegistry,
@@ -591,6 +596,121 @@ test("区服准入拒绝发生在 Provider 请求前并记录规范化审计", a
     reason: "SERVER_NOT_FOUND",
     requestIdType: "string",
   });
+});
+
+test("维护和停用游戏登录在 Provider 前记录 admission_denied，未知 gameId 不写审计", async (t) => {
+  const games = registryWithStatuses();
+  let providerCalls = 0;
+  const auditParameters: Array<readonly unknown[]> = [];
+  const auditLogin = new LoginService(
+    {
+      pool: {
+        async execute(sql: string, parameters: readonly unknown[]) {
+          assert.match(sql, /INSERT INTO login_audit/u);
+          auditParameters.push(parameters);
+          return [{ affectedRows: 1 }, []];
+        },
+      },
+    } as unknown as Database,
+    {} as SessionService,
+  );
+  const apps = buildApps(config(), services(games, {
+    login: {
+      async loginWechat() {
+        providerCalls += 1;
+        return { ok: true, response: LOGIN };
+      },
+      async loginDouyin() {
+        providerCalls += 1;
+        return { ok: true, response: LOGIN };
+      },
+      async loginDev() {
+        providerCalls += 1;
+        return { ok: true, response: LOGIN };
+      },
+      auditAdmissionDenied:
+        auditLogin.auditAdmissionDenied.bind(auditLogin),
+    },
+  }));
+  t.after(async () => {
+    await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);
+  });
+
+  const deniedCases = [
+    {
+      provider: "douyin",
+      gameId: "game-a",
+      serverId: 13,
+      deviceId: "douyin-device",
+      statusCode: 503,
+    },
+    {
+      provider: "wechat",
+      gameId: "game-b",
+      serverId: 7,
+      deviceId: "wechat-device",
+      statusCode: 403,
+    },
+  ] as const;
+  const requestIds: string[] = [];
+  for (const current of deniedCases) {
+    const response = await apps.publicApp.inject({
+      method: "POST",
+      url:
+        `/v1/games/${current.gameId}/sessions/${current.provider}`,
+      payload: {
+        code: `${current.provider}-code`,
+        serverId: current.serverId,
+        deviceId: current.deviceId,
+      },
+    });
+    assert.equal(response.statusCode, current.statusCode, response.body);
+    assert.equal(response.json().code, "GAME_DISABLED");
+    assert.equal(typeof response.json().requestId, "string");
+    requestIds.push(response.json().requestId);
+  }
+
+  for (const gameId of ["missing-game", "INVALID"]) {
+    const response = await apps.publicApp.inject({
+      method: "POST",
+      url: `/v1/games/${gameId}/sessions/douyin`,
+      payload: { code: "must-not-audit", serverId: 1 },
+    });
+    assert.equal(
+      response.statusCode,
+      gameId === "INVALID" ? 400 : 404,
+      response.body,
+    );
+  }
+
+  assert.equal(providerCalls, 0);
+  assert.equal(auditParameters.length, deniedCases.length);
+  assert.deepEqual(
+    auditParameters.map((parameters) => ({
+      gameId: parameters[0],
+      userId: parameters[2],
+      event: parameters[3],
+      caller: parameters[5],
+      reason: parameters[7],
+      deviceId: parameters[9],
+      provider: parameters[10],
+      requestId: parameters[11],
+      serverId: parameters[12],
+      outcome: parameters[13],
+    })),
+    deniedCases.map((current, index) => ({
+      gameId: current.gameId,
+      userId: null,
+      event: "login",
+      caller: "public",
+      reason: "admission:GAME_DISABLED",
+      deviceId: current.deviceId,
+      provider: current.provider,
+      requestId: requestIds[index],
+      serverId: current.serverId,
+      outcome: "admission_denied",
+    })),
+  );
 });
 
 test("公开登录故障矩阵稳定映射 400/401/403/404/429/503", async (t) => {

@@ -4661,7 +4661,7 @@ export function bootstrapAdminConsole({
   async function handleConfigurationWriteError(
     error,
     context,
-    { close = null, unknownStatusFirst = false } = {},
+    { close = null, focus = null, unknownStatusFirst = false } = {},
   ) {
     if (error instanceof AdminApiError && error.status === 401) {
       clearSensitiveState();
@@ -4682,6 +4682,7 @@ export function bootstrapAdminConsole({
       close?.();
       await loadConfiguration();
       toast(describeApiError(error, context), "warning");
+      focus?.();
       return true;
     }
     if (
@@ -4696,6 +4697,7 @@ export function bootstrapAdminConsole({
         "结果暂时未知，已先刷新服务器状态；请核对后再决定是否重试。",
         "warning",
       );
+      focus?.();
       return true;
     }
     return false;
@@ -5108,7 +5110,13 @@ export function bootstrapAdminConsole({
         await handleConfigurationWriteError(
           error,
           "provider-secret",
-          { close: closeProviderSecretDialog },
+          {
+            close: closeProviderSecretDialog,
+            focus: () => (
+              document.getElementById(`provider-${providerName}-secret`)
+                ?.focus()
+            ),
+          },
         )
       ) {
         return;

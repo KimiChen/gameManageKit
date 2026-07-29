@@ -843,6 +843,167 @@ test("v5 将旧身份与微信配置迁入显式 Provider 命名空间", async (
   }
 });
 
+test("v5 拒绝缺失关键身份键的保留目标表且修复后可安全重跑", async () => {
+  const adminUrl = process.env.GAME_MANAGE_KIT_TEST_MYSQL_ADMIN_URL
+    ?? "mysql://root@127.0.0.1:3316/mysql";
+  const databaseName =
+    `game_manage_kit_v5_identity_keys_${process.pid}_${Date.now()}`;
+  assert.match(databaseName, /^[a-z0-9_]+$/u);
+
+  const admin = await mysql.createConnection(adminUrl);
+  const mysqlUrl = databaseUrl(adminUrl, databaseName);
+  const v4Migrations = await mkdtemp(
+    join(tmpdir(), "game-manage-kit-v4-identity-keys-"),
+  );
+  let connection: Connection | undefined;
+  try {
+    await admin.query(
+      `CREATE DATABASE \`${databaseName}\`
+       CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci`,
+    );
+    await copyMigrations(v4Migrations, [
+      "0001_initial.sql",
+      "0002_game_servers.sql",
+      "0003_admin_managed_config.sql",
+      "0004_admin_bootstrap.sql",
+    ]);
+    await runMigrations(mysqlUrl, v4Migrations);
+    connection = await mysql.createConnection(mysqlUrl);
+
+    const v5Name = "0005_identity_providers.sql";
+    const v5Sql = await readFile(join("migrations", v5Name), "utf8");
+    const lateFailureMarker =
+      "-- The first late ALTER is durable here.";
+    assert.equal(v5Sql.includes(lateFailureMarker), true);
+    await writeFile(
+      join(v4Migrations, v5Name),
+      v5Sql.replace(
+        lateFailureMarker,
+        `SIGNAL SQLSTATE '45000'\n`
+          + `  SET MESSAGE_TEXT = 'fixture preserved target tables';\n\n`
+          + lateFailureMarker,
+      ),
+      "utf8",
+    );
+    await assert.rejects(
+      runMigrations(mysqlUrl, v4Migrations),
+      hasMysqlErrno(1644),
+    );
+
+    // Model a malformed target schema left by an interrupted/manual import.
+    // Keep the columns and CHECK constraints so CREATE TABLE IF NOT EXISTS
+    // cannot repair it, but remove every critical identity PK/UNIQUE/FK.
+    await connection.query(
+      `ALTER TABLE account_identities
+         ADD KEY idx_fixture_identity_id (id)`,
+    );
+    await connection.query(
+      `ALTER TABLE account_identities
+         DROP FOREIGN KEY fk_account_identities_account,
+         DROP INDEX uk_account_identities_namespace,
+         DROP PRIMARY KEY`,
+    );
+    await connection.query(
+      `ALTER TABLE game_identity_providers
+         DROP FOREIGN KEY fk_game_identity_providers_game,
+         DROP FOREIGN KEY fk_game_identity_providers_operator,
+         DROP PRIMARY KEY`,
+    );
+
+    await writeFile(join(v4Migrations, v5Name), v5Sql, "utf8");
+    await assert.rejects(
+      runMigrations(mysqlUrl, v4Migrations),
+      (error: unknown): boolean => (
+        hasMysqlErrno(1644)(error)
+        && String(
+          (error as { sqlMessage?: unknown }).sqlMessage ?? "",
+        ).includes("v5 identity key constraints are incomplete")
+      ),
+    );
+
+    const [failedVersion] = await connection.query<RowDataPacket[]>(
+      "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 5",
+    );
+    assert.equal(Number(failedVersion[0]?.count), 0);
+    const [failedCheckpoint] = await connection.query<RowDataPacket[]>(
+      `SELECT phase
+         FROM schema_v5_identity_migration_state
+        WHERE singleton = 1`,
+    );
+    assert.equal(
+      String(failedCheckpoint[0]?.phase),
+      "backfill_verified",
+    );
+    const [removedLegacyColumns] =
+      await connection.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS count
+           FROM information_schema.columns
+          WHERE table_schema = DATABASE()
+            AND (
+              (
+                table_name = 'accounts'
+                AND column_name IN ('openid', 'unionid')
+              )
+              OR (
+                table_name = 'game_integrations'
+                AND column_name LIKE 'wechat\\_%'
+              )
+            )`,
+      );
+    assert.equal(Number(removedLegacyColumns[0]?.count), 0);
+
+    await connection.query(
+      `ALTER TABLE account_identities
+         ADD PRIMARY KEY (id),
+         ADD UNIQUE KEY uk_account_identities_namespace
+           (game_id, provider, provider_app_id, subject_type, subject),
+         ADD CONSTRAINT fk_account_identities_account
+           FOREIGN KEY (game_id, user_id)
+           REFERENCES accounts (game_id, user_id)
+           ON UPDATE RESTRICT ON DELETE RESTRICT`,
+    );
+    await connection.query(
+      `ALTER TABLE account_identities
+         DROP INDEX idx_fixture_identity_id`,
+    );
+    await connection.query(
+      `ALTER TABLE game_identity_providers
+         ADD PRIMARY KEY (game_id, provider),
+         ADD CONSTRAINT fk_game_identity_providers_game
+           FOREIGN KEY (game_id) REFERENCES games (game_id)
+           ON UPDATE RESTRICT ON DELETE RESTRICT,
+         ADD CONSTRAINT fk_game_identity_providers_operator
+           FOREIGN KEY (updated_by)
+           REFERENCES admin_operators (operator_id)
+           ON UPDATE RESTRICT ON DELETE RESTRICT`,
+    );
+
+    await runMigrations(mysqlUrl, v4Migrations);
+    const [completedVersion] = await connection.query<RowDataPacket[]>(
+      "SELECT name FROM schema_migrations WHERE version = 5",
+    );
+    assert.equal(
+      String(completedVersion[0]?.name),
+      "0005_identity_providers.sql",
+    );
+    const [completedCheckpoint] =
+      await connection.query<RowDataPacket[]>(
+        `SELECT phase
+           FROM schema_v5_identity_migration_state
+          WHERE singleton = 1`,
+      );
+    assert.equal(
+      String(completedCheckpoint[0]?.phase),
+      "complete",
+    );
+  } finally {
+    await connection?.end();
+    await rm(v4Migrations, { recursive: true, force: true });
+    await admin.query(`DROP DATABASE IF EXISTS \`${databaseName}\``);
+    await admin.end();
+  }
+});
+
 test("v5 预检精确报告重复身份与历史冲突错误码", async () => {
   const adminUrl = process.env.GAME_MANAGE_KIT_TEST_MYSQL_ADMIN_URL
     ?? "mysql://root@127.0.0.1:3316/mysql";

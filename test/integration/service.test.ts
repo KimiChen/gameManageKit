@@ -932,6 +932,201 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
         .validationState,
       "active",
     );
+    const originalDouyinUserId = String(douyinLogin.json().userId);
+    assert.equal(recoveredDouyin.json().userId, originalDouyinUserId);
+    const [douyinIdentitiesBeforeDisable] =
+      await runtime.database.pool.query<RowDataPacket[]>(
+        `SELECT subject_type, subject, user_id
+           FROM account_identities
+          WHERE game_id = 'game-a'
+            AND provider = 'douyin'
+            AND provider_app_id = ?
+          ORDER BY subject_type, subject`,
+        [providerAppId("game-a", "douyin")],
+      );
+    const normalizedDouyinIdentities = (rows: RowDataPacket[]) => (
+      rows.map((row) => ({
+        subjectType: String(row.subject_type),
+        subject: String(row.subject),
+        userId: String(row.user_id),
+      }))
+    );
+    assert.deepEqual(
+      normalizedDouyinIdentities(douyinIdentitiesBeforeDisable),
+      [
+        {
+          subjectType: "openid",
+          subject: "douyin-openid-a",
+          userId: originalDouyinUserId,
+        },
+        {
+          subjectType: "unionid",
+          subject: "douyin-union-a",
+          userId: originalDouyinUserId,
+        },
+      ],
+    );
+
+    const disableDouyin = await mutate(
+      "PATCH",
+      "/v1/admin/games/game-a/identity-providers/douyin",
+      {
+        enabled: false,
+        appId: providerAppId("game-a", "douyin"),
+        endpoint: providerEndpoint("douyin"),
+        timeoutMs: 2_000,
+        breakerThreshold: 4,
+        breakerOpenMs: 5_000,
+        revision: 9,
+      },
+      limitedCookie,
+    );
+    assert.equal(disableDouyin.statusCode, 200, disableDouyin.body);
+    assert.equal(disableDouyin.json().revision, 10);
+    assert.equal(disableDouyin.json().configurationState, "configured");
+    const disabledDouyinProvider = disableDouyin
+      .json()
+      .providers
+      .find((provider: { provider: string }) => (
+        provider.provider === "douyin"
+      ));
+    assert.ok(disabledDouyinProvider);
+    assert.equal(disabledDouyinProvider.enabled, false);
+    assert.equal(disabledDouyinProvider.secretMetadata.version, 2);
+
+    const [douyinIdentitiesAfterDisable] =
+      await runtime.database.pool.query<RowDataPacket[]>(
+        `SELECT subject_type, subject, user_id
+           FROM account_identities
+          WHERE game_id = 'game-a'
+            AND provider = 'douyin'
+            AND provider_app_id = ?
+          ORDER BY subject_type, subject`,
+        [providerAppId("game-a", "douyin")],
+      );
+    assert.deepEqual(
+      normalizedDouyinIdentities(douyinIdentitiesAfterDisable),
+      normalizedDouyinIdentities(douyinIdentitiesBeforeDisable),
+    );
+    const [disabledDouyinRows] =
+      await runtime.database.pool.query<RowDataPacket[]>(
+        `SELECT enabled, secret_version,
+                app_secret = ? AS secret_preserved
+           FROM game_identity_providers
+          WHERE game_id = 'game-a' AND provider = 'douyin'`,
+        [rotatedGameADouyinSecret],
+      );
+    assert.equal(disabledDouyinRows.length, 1);
+    assert.deepEqual({
+      enabled: Number(disabledDouyinRows[0]!.enabled) === 1,
+      secretVersion: Number(disabledDouyinRows[0]!.secret_version),
+      secretPreserved: Number(disabledDouyinRows[0]!.secret_preserved) === 1,
+    }, {
+      enabled: false,
+      secretVersion: 2,
+      secretPreserved: true,
+    });
+    const [disableDouyinAudits] =
+      await runtime.database.pool.query<RowDataPacket[]>(
+        `SELECT action, result, revision,
+                request_id IS NOT NULL AS has_request_id,
+                JSON_UNQUOTE(
+                  JSON_EXTRACT(before_data, '$.enabled')
+                ) AS before_enabled,
+                JSON_UNQUOTE(
+                  JSON_EXTRACT(after_data, '$.enabled')
+                ) AS after_enabled
+           FROM admin_game_audit
+          WHERE game_id = 'game-a'
+            AND provider = 'douyin'
+            AND action = 'identity_provider_disable'
+          ORDER BY id DESC`,
+      );
+    assert.equal(disableDouyinAudits.length, 1);
+    assert.deepEqual({
+      action: String(disableDouyinAudits[0]!.action),
+      result: String(disableDouyinAudits[0]!.result),
+      revision: Number(disableDouyinAudits[0]!.revision),
+      hasRequestId:
+        Number(disableDouyinAudits[0]!.has_request_id) === 1,
+      beforeEnabled: String(disableDouyinAudits[0]!.before_enabled),
+      afterEnabled: String(disableDouyinAudits[0]!.after_enabled),
+    }, {
+      action: "identity_provider_disable",
+      result: "succeeded",
+      revision: 10,
+      hasRequestId: true,
+      beforeEnabled: "true",
+      afterEnabled: "false",
+    });
+
+    const wechatWhileDouyinDisabled = await loginProvider(
+      "wechat",
+      "wechat-success-a",
+    );
+    assert.equal(
+      wechatWhileDouyinDisabled.statusCode,
+      200,
+      wechatWhileDouyinDisabled.body,
+    );
+    assert.equal(
+      wechatWhileDouyinDisabled.json().userId,
+      wechatLoginA.json().userId,
+    );
+    assert.equal(wechatWhileDouyinDisabled.json().isNewAccount, false);
+    const fetchCountBeforeDisabledDouyin = providerFetches.length;
+    const loginWhileDouyinDisabled = await loginProvider(
+      "douyin",
+      "douyin-success-a",
+    );
+    assert.equal(
+      loginWhileDouyinDisabled.statusCode,
+      503,
+      loginWhileDouyinDisabled.body,
+    );
+    assert.equal(
+      loginWhileDouyinDisabled.json().code,
+      "PROVIDER_UNAVAILABLE",
+    );
+    assert.equal(providerFetches.length, fetchCountBeforeDisabledDouyin);
+
+    const reenableDouyin = await mutate(
+      "PATCH",
+      "/v1/admin/games/game-a/identity-providers/douyin",
+      {
+        enabled: true,
+        appId: providerAppId("game-a", "douyin"),
+        endpoint: providerEndpoint("douyin"),
+        timeoutMs: 2_000,
+        breakerThreshold: 4,
+        breakerOpenMs: 5_000,
+        revision: 10,
+      },
+      limitedCookie,
+    );
+    assert.equal(reenableDouyin.statusCode, 200, reenableDouyin.body);
+    assert.equal(reenableDouyin.json().revision, 11);
+    assert.equal(reenableDouyin.json().configurationState, "configured");
+    const reenabledDouyinProvider = reenableDouyin
+      .json()
+      .providers
+      .find((provider: { provider: string }) => (
+        provider.provider === "douyin"
+      ));
+    assert.ok(reenabledDouyinProvider);
+    assert.equal(reenabledDouyinProvider.enabled, true);
+    assert.equal(reenabledDouyinProvider.secretMetadata.version, 2);
+    const douyinAfterReenable = await loginProvider(
+      "douyin",
+      "douyin-success-a",
+    );
+    assert.equal(
+      douyinAfterReenable.statusCode,
+      200,
+      douyinAfterReenable.body,
+    );
+    assert.equal(douyinAfterReenable.json().userId, originalDouyinUserId);
+    assert.equal(douyinAfterReenable.json().isNewAccount, false);
     assert.deepEqual(credentialMismatches, []);
 
     await configureGame("game-b", 20);
