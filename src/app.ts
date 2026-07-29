@@ -148,7 +148,11 @@ export async function createRuntime(
     for (const game of games.list()) {
       metrics.registerGame(game.gameId);
     }
-    const gameProjects = new GameProjectService(database, games);
+    const gameProjects = new GameProjectService(
+      database,
+      games,
+      (gameId) => metrics.registerGame(gameId),
+    );
     const gameServers = new GameServerService(
       database,
       config.nodeEnv === "production",

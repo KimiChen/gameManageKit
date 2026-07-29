@@ -13,6 +13,7 @@ import {
   type IdentityProvider,
 } from "../../src/domain/game/integrations.js";
 import { GameManageKitError } from "../../src/errors.js";
+import { MetricsRegistry } from "../../src/infra/observability/metrics.js";
 
 interface StoredIntegration {
   game_id: string;
@@ -81,6 +82,7 @@ class FakeIntegrationDatabase implements GameIntegrationDatabase {
   readonly identities = new Set<string>();
   readonly gameAudits: Array<readonly unknown[]> = [];
   readonly secretAudits: Array<readonly unknown[]> = [];
+  nextGameAuditFailure: Error | null = null;
   private tick = 0;
 
   readonly pool = {} as Pool;
@@ -345,6 +347,11 @@ class FakeIntegrationDatabase implements GameIntegrationDatabase {
       return [{ affectedRows: 1 }, []];
     }
     if (sql.startsWith("INSERT INTO admin_game_audit")) {
+      const failure = this.nextGameAuditFailure;
+      this.nextGameAuditFailure = null;
+      if (failure) {
+        throw failure;
+      }
       this.gameAudits.push([...values]);
       return [{ affectedRows: 1 }, []];
     }
@@ -458,6 +465,39 @@ test("Provider 配置只返回 Secret 元数据，并用共享 revision 记录�
     provider: null,
   }]);
   assert.deepEqual(kinds, ["read", "write"]);
+});
+
+test("已登记游戏的配置审计故障保留原错误并记录指标", async () => {
+  const database = new FakeIntegrationDatabase();
+  database.seed();
+  const metrics = new MetricsRegistry();
+  metrics.registerGame("game-a");
+  const service = new GameIntegrationService(
+    database,
+    new FakeRuntime(),
+    false,
+    metrics,
+  );
+  const auditFailure = new Error("fixture configuration audit unavailable");
+  database.nextGameAuditFailure = auditFailure;
+
+  await assert.rejects(
+    service.updateShared("game-a", {
+      sessionTtlSeconds: 172_800,
+      loginRateCapacity: 25,
+      loginRateRefillPerSecond: 3,
+      adminRateCapacity: 12,
+      adminRateRefillPerSecond: 2,
+      revision: 1,
+    }, authorization()),
+    (error) => error === auditFailure,
+  );
+
+  assert.match(
+    metrics.renderPrometheus(["game-a"]),
+    /game_manage_kit_audit_write_failures_total\{game_id="game-a",audit_type="admin"\} 1/u,
+  );
+  assert.equal(database.gameAudits.length, 1);
 });
 
 test("Provider 白名单、官方端点、启用完整性和已有身份 AppID 锁均在写入前拒绝", async () => {

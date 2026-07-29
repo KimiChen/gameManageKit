@@ -208,6 +208,7 @@ export class GameProjectService {
   constructor(
     private readonly database: GameProjectDatabase,
     private readonly registry: GameRuntimeRegistry,
+    private readonly onCreated?: (gameId: string) => void,
   ) {}
 
   async list(
@@ -254,8 +255,9 @@ export class GameProjectService {
     }
     const name = normalizedName(input.name);
     const description = normalizedDescription(input.description);
+    let project: GameProject;
     try {
-      return await this.database.transaction(async (connection) => {
+      project = await this.database.transaction(async (connection) => {
         await authorization.authorize(connection);
         await connection.execute(
           `INSERT INTO games
@@ -317,6 +319,8 @@ export class GameProjectService {
       }
       throw error;
     }
+    this.onCreated?.(project.gameId);
+    return project;
   }
 
   async update(

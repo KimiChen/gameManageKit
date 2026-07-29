@@ -15,6 +15,7 @@ import type {
   GameRuntimeRegistry,
 } from "../../src/domain/game/resolver.js";
 import { GameManageKitError } from "../../src/errors.js";
+import { MetricsRegistry } from "../../src/infra/observability/metrics.js";
 
 interface StoredProject {
   game_id: string;
@@ -206,7 +207,12 @@ function runtime(
 
 test("创建游戏项目固定为不下发的维护中草稿并记录审计", async () => {
   const database = new FakeProjectDatabase();
-  const service = new GameProjectService(database, runtime());
+  const metrics = new MetricsRegistry();
+  const registeredGameIds: string[] = [];
+  const service = new GameProjectService(database, runtime(), (gameId) => {
+    registeredGameIds.push(gameId);
+    metrics.registerGame(gameId);
+  });
 
   const created = await service.create({
     gameId: "new-game",
@@ -235,6 +241,12 @@ test("创建游戏项目固定为不下发的维护中草稿并记录审计", as
   });
   assert.equal(database.audits.length, 1);
   assert.equal(database.audits[0]?.[0], "new-game");
+  assert.deepEqual(registeredGameIds, ["new-game"]);
+  metrics.recordAuditWriteFailure("new-game", "admin");
+  assert.match(
+    metrics.renderPrometheus(["new-game"]),
+    /game_manage_kit_audit_write_failures_total\{game_id="new-game",audit_type="admin"\} 1/u,
+  );
   assert.equal(database.companionInserts.length, 4);
   assert.match(database.companionInserts[0] ?? "", /game_directory_settings/u);
   assert.match(database.companionInserts[1] ?? "", /game_integrations/u);
@@ -252,6 +264,7 @@ test("创建游戏项目固定为不下发的维护中草稿并记录审计", as
     }, authorization()),
     gameError(409, "GAME_PROJECT_CONFLICT"),
   );
+  assert.deepEqual(registeredGameIds, ["new-game"]);
 });
 
 test("编辑使用 revision 乐观锁并阻止草稿启用、误下发和 disabled 恢复", async () => {

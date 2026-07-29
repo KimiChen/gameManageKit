@@ -1170,6 +1170,15 @@ export function canPublishGameToClient(game, status = game?.status) {
   );
 }
 
+export function isIdentityProviderAvailable(provider) {
+  return Boolean(
+    provider?.enabled
+    && provider.appId
+    && provider.secretMetadata?.configured
+    && provider.validationState !== "validation_failed",
+  );
+}
+
 export function normalizeAccount(payload, expectedUserId = null) {
   if (!isRecord(payload)) {
     throw new InvalidApiPayloadError("账号响应无效");
@@ -2836,8 +2845,8 @@ export function bootstrapAdminConsole({
         };
       }),
       {
-        label: "至少一个身份 Provider 已启用且凭据完整",
-        complete: [...providers.values()].some(providerIsStructurallyReady),
+        label: "至少一个身份 Provider 已启用且可用",
+        complete: [...providers.values()].some(isIdentityProviderAvailable),
       },
       {
         label: "至少一个区服",

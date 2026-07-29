@@ -152,9 +152,9 @@ async function createAdminFixtureServer({
         timeoutMs: 2_000,
         breakerThreshold: 4,
         breakerOpenMs: 5_000,
-        validationState: "active",
-        validationFailedAt: null,
-        validationErrorCode: null,
+        validationState: "validation_failed",
+        validationFailedAt: "2026-07-28T10:05:00.000Z",
+        validationErrorCode: "invalid_credentials",
         updatedBy: "ops_kimi",
         updatedAt: "2026-07-28T10:00:00.000Z",
       },
@@ -1626,6 +1626,10 @@ test("真实 Chrome 可用键盘完成管理员登录、查询和确认操作", 
         !document.querySelector("#configuration-audit-section").hidden,
       completeness:
         document.querySelector("#configuration-completeness-score").textContent,
+      providerAvailable:
+        [...document.querySelectorAll("#configuration-check-list li")]
+          .find((item) => item.textContent.includes("至少一个身份 Provider"))
+          ?.dataset.complete,
       machineVisible:
         !document.querySelector("#machine-identities-section").hidden,
       noSecretInPage:
@@ -1641,13 +1645,14 @@ test("真实 Chrome 可用键盘完成管理员登录、查询和确认操作", 
     })`),
     {
       auditVisible: true,
-      completeness: "5 / 5",
+      completeness: "4 / 5",
       douyinValidation: "尚未验证",
       machineVisible: true,
       noSecretInPage: true,
+      providerAvailable: "false",
       providerCards: 2,
       selectedGame: "game-a",
-      wechatValidation: "验证正常",
+      wechatValidation: "验证失败",
     },
   );
 

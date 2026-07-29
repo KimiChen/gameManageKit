@@ -24,6 +24,7 @@ import {
   gameServerPath,
   isSessionExpired,
   isCompletedLogout,
+  isIdentityProviderAvailable,
   isValidAdminDisplayNameInput,
   isValidAdminPasswordInput,
   isValidUserId,
@@ -192,6 +193,42 @@ const validMachineIdentity = (overrides = {}) => ({
   createdAt: "2026-07-27T10:00:00.000Z",
   updatedAt: "2026-07-28T10:00:00.000Z",
   ...overrides,
+});
+
+test("Provider 整体可用性排除验证失败和不完整配置", () => {
+  assert.equal(isIdentityProviderAvailable(validProvider("wechat")), true);
+  assert.equal(
+    isIdentityProviderAvailable(validProvider("wechat", {
+      validationState: "unvalidated",
+    })),
+    true,
+  );
+  assert.equal(
+    isIdentityProviderAvailable(validProvider("wechat", {
+      validationState: "validation_failed",
+      validationFailedAt: "2026-07-28T10:05:00.000Z",
+      validationErrorCode: "invalid_credentials",
+    })),
+    false,
+  );
+  assert.equal(
+    isIdentityProviderAvailable(validProvider("wechat", { enabled: false })),
+    false,
+  );
+  assert.equal(
+    isIdentityProviderAvailable(validProvider("wechat", { appId: null })),
+    false,
+  );
+  assert.equal(
+    isIdentityProviderAvailable(validProvider("wechat", {
+      secretMetadata: {
+        configured: false,
+        version: 0,
+        updatedAt: null,
+      },
+    })),
+    false,
+  );
 });
 
 test("管理员页面只引用本地资源且不包含共享 Secret", async () => {
