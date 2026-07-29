@@ -36,7 +36,7 @@ VPN 和严格访问控制。精确 `Origin` 校验只能阻止浏览器跨站请
 首个管理员固定拥有以下相互独立的全局能力：
 
 - 游戏管理：创建/编辑游戏、目录设置和区服。
-- 接入管理：查看和编辑微信及运行参数。
+- 接入管理：查看和编辑微信、抖音及共享运行参数。
 - Secret 轮换：替换或轮换 Secret；还必须具备对应资源管理权限。
 - 机器身份管理：查看、创建和编辑 Service/机器 Admin 身份与范围。
 
@@ -49,7 +49,7 @@ VPN 和严格访问控制。精确 `Origin` 校验只能阻止浏览器跨站请
 普通游戏、区服和非 Secret 接入参数编辑不要求提升会话。以下操作要求管理员在最近
 5 分钟通过当前密码重新认证：
 
-- 替换微信 AppSecret。
+- 替换或清除微信/抖音 AppSecret。
 - 创建或轮换 Service/机器 Admin Secret。
 - 撤销 current 或 previous Secret。
 - 修改机器身份的游戏授权范围。
@@ -68,9 +68,10 @@ Secret 操作还会在事务内重新读取管理员状态、`auth_version`、�
 1. 在“游戏项目”创建项目。新项目固定为 `draft + maintenance`，不向客户端下发。
 2. 配置目录 `isOps` 和全部区服。空区服是合法状态；`serverId` 创建后不可修改或
    删除。
-3. 在独立“接入配置”页面保存微信 AppID、endpoint、会话 TTL、超时、熔断和限流参数。
-4. 重新认证并替换微信 AppSecret。AppID 与 AppSecret 都存在后，项目自动变为
-   `configured`。
+3. 在独立“接入配置”页面保存共享会话/限流参数，并分别配置微信与抖音的 AppID、
+   endpoint、超时和熔断参数。
+4. 重新认证并替换目标 Provider 的 AppSecret，再显式启用至少一个完整 Provider。
+   至少一个启用 Provider 同时具备 AppID 与 AppSecret 后，项目自动变为 `configured`。
 5. 创建 Service 与机器 Admin 身份，选择最小游戏范围，并安全保存只显示一次的
    Secret。
 6. 最后把项目切换为 `enabled`，并按需开启客户端可见性。
@@ -80,8 +81,9 @@ Secret 操作还会在事务内重新读取管理员状态、`auth_version`、�
 立即失效缓存，其他实例通过短 TTL 和数据库 revision 自动刷新。页面中的
 `loadedRevision` 只表示当前请求实例的加载版本，不能解读为全部实例已生效。
 
-`disabled` 是游戏不可逆终态。AppID 或 AppSecret 变为不完整时，服务会把项目降回
-`draft + maintenance` 并取消客户端可见性。
+`disabled` 是游戏不可逆终态。所有 Provider 都被禁用或不完整时，服务会把项目降回
+`draft + maintenance` 并取消客户端可见性。单个 Provider 的故障、熔断和禁用不应
+影响另一个 Provider。
 
 ### 区服准入
 
@@ -97,9 +99,14 @@ Secret 操作还会在事务内重新读取管理员状态、`auth_version`、�
 
 ## Secret 运维
 
-微信 AppSecret 由管理员输入，并在单个事务中覆盖 MySQL 中的旧明文、递增版本和写入
-不含 Secret 的审计。GET API 和网页只显示“未配置/已生效”、版本与更新时间，不提供
-查看、复制或历史值。保存成功表示 gameManageKit 已持久化，不表示微信侧已经验证。
+微信和抖音 AppSecret 由管理员输入，并在单个事务中覆盖 MySQL 中对应 Provider 的旧
+明文、递增版本和写入不含 Secret 的审计。GET API 和网页只显示配置状态、版本与更新
+时间，不提供查看、复制或历史值。清除 Secret 会同时禁用该 Provider。
+
+Provider 卡片独立展示启用、AppID、endpoint、timeout、熔断参数、Secret 元数据和
+validation 状态。普通玩家无效 code 不改变 validation 状态；只有上游明确确认
+AppID/Secret 错误时才进入 `validation_failed`。已有外部身份后，AppID 编辑会返回
+HTTP 409，管理员不能在普通表单中绕过身份命名空间锁。
 
 Service 和机器 Admin Secret 由服务端生成 32 字节随机值并编码为 Base64URL；MySQL
 只保存 SHA-256 摘要。明文仅在创建或轮换的首次成功响应中显示一次：
@@ -112,9 +119,12 @@ Service 和机器 Admin Secret 由服务端生成 32 字节随机值并编码为
 - 撤销或 previous 到期后，旧值立即拒绝。
 
 Secret 写入请求携带唯一 `operationId`。网络超时或 HTTP 5xx 代表结果未知，网页先查
-操作状态，绝不自动再次 POST。页面还必须按以下规则清理敏感状态：
+操作状态，绝不自动再次 POST。同一 `operationId` 只接受与首次完全相同的目标、revision
+和操作内容；合法重放返回首次提交时保存的 revision、Secret 版本与更新时间，即使之后
+又发生普通配置编辑或 Secret 轮换也不会改写历史结果。页面还必须按以下规则清理敏感
+状态：
 
-- `401`：清空密码、AppSecret 输入和一次性 Secret，返回登录页。
+- `401`：清空密码、所有 Provider AppSecret 输入和一次性 Secret，返回登录页。
 - `403`：关闭表单并刷新权限。
 - `404`：目标不存在，返回列表。
 - `409`：清空 Secret 并重新加载 revision。
@@ -148,7 +158,7 @@ Cookie 名称，不能把降级方式带入生产。
 
 ## 数据库和备份边界
 
-微信 AppSecret 以明文存入 MySQL，因此数据库本身属于生产 Secret 边界：
+Provider AppSecret 以明文存入 MySQL，因此数据库本身属于生产 Secret 边界：
 
 - 应用与 MySQL 必须强制 TLS。
 - 生产 `GAME_MANAGE_KIT_MYSQL_URL` 必须提供启用证书校验的 `ssl` 参数；启动与
@@ -159,8 +169,8 @@ Cookie 名称，不能把降级方式带入生产。
 - 数据盘、快照和备份必须加密，限制下载、记录访问并设置保留期限。
 - 测试/开发不得直接恢复生产备份；脱敏副本必须删除 AppSecret。
 - 在隔离且受控的生产等价环境定期演练恢复。
-- 备份泄露或恢复环境失控后，立即替换微信 AppSecret，并轮换 Service 和机器 Admin
-  Secret。
+- 备份泄露或恢复环境失控后，立即替换所有受影响 Provider AppSecret，并轮换 Service
+  和机器 Admin Secret。
 
 这些保护由数据库和部署平台强制实施，不能通过管理员网页关闭。恢复后应检查 Secret
 版本状态，确保已撤销或过期版本没有被复活。
@@ -172,23 +182,35 @@ Cookie 名称，不能把降级方式带入生产。
 `admin_secret_audit`，记录类型、动作、版本、操作者、结果和请求元数据，不记录明文、
 完整摘要、请求体或请求头。
 
-应对以下事件告警：Secret 轮换和撤销、重新认证失败、撤销或过期 Secret 仍被使用、
-微信凭据验证失败以及重复轮换冲突。
+配置审计列表会返回 Provider、revision、requestId、operationId，以及经过字段白名单
+过滤的操作前后非敏感元数据。Provider 普通更新、启用和禁用分别记录为
+`identity_provider_update`、`identity_provider_enable` 和
+`identity_provider_disable`；Secret 轮换与清除分别保留独立动作和 Secret 版本。
+失败尝试只记录规范化错误码，不保存上游错误原文或请求内容。
+
+应对以下事件告警：Secret 轮换/清除和撤销、重新认证失败、撤销或过期 Secret 仍被
+使用、任一 Provider 凭据验证失败、timeout/circuit_open 激增以及重复轮换冲突。
 
 机器鉴权命中已撤销或过期版本时仍会拒绝请求，并更新该版本的最后使用时间，供告警
 规则识别撤销后的继续使用。
 
-运行时首次调用微信失败时会记录连接验证失败状态；后续调用成功会自动清除。管理员页
-只展示该状态，不展示上游错误原文或任何 Secret。
+运行时仅在上游明确返回凭据错误时记录对应 Provider 的验证失败；成功调用会自动清除。
+管理员页只展示规范化状态；验证错误不拼接 AppID，也不展示上游错误原文、身份原文或
+任何 Secret。
 
 ## Schema 升级
 
-动态配置主体使用 schema v3，首管一次性引导锁存器由 schema v4 提供；当前服务要求
-schema v4。升级现有开发库直接执行：
+Provider 身份体系和动态配置使用 schema v5；当前服务要求 schema v5。v5 新增
+`game_identity_providers` 与 `account_identities`，将旧微信和 dev 身份一次性迁移到
+显式命名空间，并移除 `accounts.openid/unionid`。升级现有数据库直接执行：
 
 ```bash
 npm run migrate
 ```
 
-启动会核对全部必需表和 migration 版本。生产不得使用删库重建升级；部署前先备份并在
-等价环境验证 migration 和恢复流程。
+这是离线破坏性升级：migration 前必须摘流、停止全部 schema v4 写实例并完成备份。
+执行 v5 的数据库账号需要临时 `CREATE ROUTINE` 权限；过程使用
+`SQL SECURITY INVOKER`，成功后删除临时 procedure。启动会核对全部必需表和 migration
+版本。生产不得使用删库重建升级；部署前先在等价环境验证 migration 和恢复流程。晚期
+DDL 失败时已回填的新表和不含身份原文或 Secret 的阶段检查点会被保留；修复失败原因后
+重新执行同一 migration，它会根据实际结构安全续跑，不得删除已回填的新表。

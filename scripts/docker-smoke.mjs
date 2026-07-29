@@ -288,25 +288,41 @@ await adminRequest(
   { password: adminPassword },
 );
 
-const wechatSecrets = new Map([
+const providerSecrets = new Map([
   [gameA, randomBytes(32).toString("base64url")],
   [gameB, randomBytes(32).toString("base64url")],
 ]);
+function requireProvider(integration, provider) {
+  assert.ok(
+    Array.isArray(integration?.providers),
+    "integration did not return identity providers",
+  );
+  const configuration = integration.providers.find(
+    (candidate) => candidate.provider === provider,
+  );
+  assert.ok(configuration, `integration did not return ${provider}`);
+  return configuration;
+}
+
 for (const gameId of [gameA, gameB]) {
   const current = await adminRequest(
     `/v1/admin/games/${gameId}/integration`,
     200,
   );
-  const updated = await adminRequest(
+  assert.deepEqual(
+    current.body.providers.map(({ provider }) => provider),
+    ["wechat", "douyin"],
+  );
+  assert.ok(
+    current.body.providers.every(
+      ({ secretMetadata }) => secretMetadata.configured === false,
+    ),
+  );
+  const shared = await adminRequest(
     `/v1/admin/games/${gameId}/integration`,
     200,
     "PATCH",
     {
-      wechatAppId: `wx-${gameId}`,
-      wechatEndpoint: "https://api.weixin.qq.com/sns/jscode2session",
-      wechatTimeoutMs: 3000,
-      wechatBreakerThreshold: 5,
-      wechatBreakerOpenMs: 10000,
       sessionTtlSeconds: 259200,
       loginRateCapacity: 50,
       loginRateRefillPerSecond: 10,
@@ -315,30 +331,105 @@ for (const gameId of [gameA, gameB]) {
       revision: current.body.revision,
     },
   );
+  const wechatDraft = await adminRequest(
+    `/v1/admin/games/${gameId}/identity-providers/wechat`,
+    200,
+    "PATCH",
+    {
+      enabled: false,
+      appId: `wx-${gameId}`,
+      endpoint: "https://api.weixin.qq.com/sns/jscode2session",
+      timeoutMs: 3000,
+      breakerThreshold: 5,
+      breakerOpenMs: 10000,
+      revision: shared.body.revision,
+    },
+  );
+  const wechatBeforeSecret = requireProvider(wechatDraft.body, "wechat");
+  assert.equal(wechatBeforeSecret.enabled, false);
+  assert.equal(wechatBeforeSecret.appId, `wx-${gameId}`);
+  assert.equal(wechatBeforeSecret.secretMetadata.configured, false);
   const written = await adminRequest(
-    `/v1/admin/games/${gameId}/secrets/wechat-app-secret`,
+    `/v1/admin/games/${gameId}/identity-providers/wechat/secret`,
     200,
     "PUT",
     {
-      wechatAppSecret: wechatSecrets.get(gameId),
-      revision: updated.body.revision,
+      appSecret: providerSecrets.get(gameId),
+      revision: wechatDraft.body.revision,
       operationId: `wx-set-${gameId}`,
     },
   );
-  assert.equal(written.body.configurationState, "configured");
-  assert.equal(written.body.wechatSecret.configured, true);
+  assert.equal(written.body.provider, "wechat");
+  assert.equal(written.body.configurationState, "draft");
+  assert.equal(written.body.secretMetadata.configured, true);
+  assert.equal(written.body.secretMetadata.version, 1);
   assert.equal(
-    JSON.stringify(written.body).includes(wechatSecrets.get(gameId)),
+    JSON.stringify(written.body).includes(providerSecrets.get(gameId)),
     false,
   );
+  assert.equal(
+    JSON.stringify(written.body).toLowerCase().includes("digest"),
+    false,
+  );
+
+  const wechatEnabled = await adminRequest(
+    `/v1/admin/games/${gameId}/identity-providers/wechat`,
+    200,
+    "PATCH",
+    {
+      enabled: true,
+      appId: `wx-${gameId}`,
+      endpoint: "https://api.weixin.qq.com/sns/jscode2session",
+      timeoutMs: 3000,
+      breakerThreshold: 5,
+      breakerOpenMs: 10000,
+      revision: written.body.revision,
+    },
+  );
+  assert.equal(wechatEnabled.body.configurationState, "configured");
+  const configuredWechat = requireProvider(wechatEnabled.body, "wechat");
+  assert.equal(configuredWechat.enabled, true);
+  assert.equal(configuredWechat.secretMetadata.configured, true);
+
+  const douyinUpdated = await adminRequest(
+    `/v1/admin/games/${gameId}/identity-providers/douyin`,
+    200,
+    "PATCH",
+    {
+      enabled: false,
+      appId: `tt-${gameId}`,
+      endpoint:
+        "https://minigame.zijieapi.com/mgplatform/api/apps/jscode2session",
+      timeoutMs: 3000,
+      breakerThreshold: 5,
+      breakerOpenMs: 10000,
+      revision: wechatEnabled.body.revision,
+    },
+  );
+  assert.equal(douyinUpdated.body.configurationState, "configured");
+  const configuredDouyin = requireProvider(douyinUpdated.body, "douyin");
+  assert.equal(configuredDouyin.enabled, false);
+  assert.equal(configuredDouyin.appId, `tt-${gameId}`);
+  assert.deepEqual(configuredDouyin.secretMetadata, {
+    configured: false,
+    version: 0,
+    updatedAt: null,
+  });
+
   const readBack = await adminRequest(
     `/v1/admin/games/${gameId}/integration`,
     200,
   );
   assert.equal(
-    JSON.stringify(readBack.body).includes(wechatSecrets.get(gameId)),
+    JSON.stringify(readBack.body).includes(providerSecrets.get(gameId)),
     false,
   );
+  assert.equal(
+    JSON.stringify(readBack.body).toLowerCase().includes("digest"),
+    false,
+  );
+  assert.equal(requireProvider(readBack.body, "wechat").enabled, true);
+  assert.equal(requireProvider(readBack.body, "douyin").enabled, false);
 }
 
 const serviceAId = `service-a-${suffix}`;
@@ -545,33 +636,75 @@ assert.equal(
   true,
 );
 
-const [accounts] = await connection.execute(
-  `SELECT game_id, user_id
-     FROM accounts
-    WHERE openid = ?
+const [devIdentities] = await connection.execute(
+  `SELECT game_id, user_id, provider, provider_app_id,
+          subject_type, subject
+     FROM account_identities
+    WHERE provider = 'dev'
+      AND provider_app_id = 'local'
+      AND subject_type = 'dev_key'
+      AND subject = ?
       AND game_id IN (?, ?)
     ORDER BY game_id`,
-  [`dev_${devKey}`, gameA, gameB],
+  [devKey, gameA, gameB],
 );
 assert.deepEqual(
-  accounts.map(({ game_id: gameId }) => gameId),
-  [gameA, gameB],
+  devIdentities.map((row) => ({
+    gameId: row.game_id,
+    userId: row.user_id,
+    provider: row.provider,
+    providerAppId: row.provider_app_id,
+    subjectType: row.subject_type,
+    subject: row.subject,
+  })),
+  [
+    {
+      gameId: gameA,
+      userId: gameALogin.body.userId,
+      provider: "dev",
+      providerAppId: "local",
+      subjectType: "dev_key",
+      subject: devKey,
+    },
+    {
+      gameId: gameB,
+      userId: gameBLogin.body.userId,
+      provider: "dev",
+      providerAppId: "local",
+      subjectType: "dev_key",
+      subject: devKey,
+    },
+  ],
 );
 
-const [integrationRows] = await connection.execute(
-  `SELECT game_id, wechat_app_secret
-     FROM game_integrations
+const [providerRows] = await connection.execute(
+  `SELECT game_id, provider, enabled, app_id, app_secret,
+          secret_version
+     FROM game_identity_providers
     WHERE game_id IN (?, ?)
-    ORDER BY game_id`,
+    ORDER BY game_id, FIELD(provider, 'wechat', 'douyin')`,
   [gameA, gameB],
 );
-assert.ok(
-  integrationRows.length === 2
-  && integrationRows.every(
-    (row) => row.wechat_app_secret === wechatSecrets.get(row.game_id),
-  ),
-  "the current WeChat AppSecret was not stored as configured",
-);
+assert.equal(providerRows.length, 4);
+for (const gameId of [gameA, gameB]) {
+  const wechat = providerRows.find(
+    (row) => row.game_id === gameId && row.provider === "wechat",
+  );
+  assert.ok(wechat, `stored WeChat provider missing for ${gameId}`);
+  assert.equal(Number(wechat.enabled), 1);
+  assert.equal(wechat.app_id, `wx-${gameId}`);
+  assert.equal(wechat.app_secret, providerSecrets.get(gameId));
+  assert.equal(Number(wechat.secret_version), 1);
+
+  const douyin = providerRows.find(
+    (row) => row.game_id === gameId && row.provider === "douyin",
+  );
+  assert.ok(douyin, `stored Douyin provider missing for ${gameId}`);
+  assert.equal(Number(douyin.enabled), 0);
+  assert.equal(douyin.app_id, `tt-${gameId}`);
+  assert.equal(douyin.app_secret, null);
+  assert.equal(Number(douyin.secret_version), 0);
+}
 
 const [machineSecrets] = await connection.execute(
   `SELECT identity_id, secret_digest, state

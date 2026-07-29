@@ -157,6 +157,7 @@ export async function createRuntime(
       database,
       configResolver,
       config.nodeEnv === "production",
+      metrics,
     );
     const machineIdentities = new MachineIdentityService(database);
     const sessions = new SessionService(database.pool, metrics);

@@ -1,9 +1,9 @@
 # 游戏接入指南
 
-gameManageKit 使用 MySQL 作为游戏项目、区服、微信参数、限流参数和机器身份的唯一业务
-配置真源。运行时不读取 `config/games.json`、区服 JSON、`directoryPath` 或每游戏
-Secret 环境变量。管理员保存后通过 revision 自动热更新，不需要把配置发布和滚动重启
-绑定在一起。
+gameManageKit 使用 MySQL 作为游戏项目、区服、身份 Provider、限流参数和机器身份的
+唯一业务配置真源。运行时不读取 `config/games.json`、区服 JSON、`directoryPath` 或
+每游戏 Secret 环境变量。管理员保存后通过 revision 自动热更新，不需要把配置发布和
+滚动重启绑定在一起。
 
 ## 0. 准备管理员
 
@@ -31,7 +31,8 @@ SSH 隧道，或受控的 mTLS/VPN 入口访问；不能把未初始化端口发
   连字符，并以字母开头。
 - `gameId` 创建后不可修改、删除或复用。
 - 新项目固定为 `draft + maintenance`、`clientVisible=false`、`sortOrder=0`。
-- 创建事务会同时建立空目录设置、默认接入配置和账号序列。
+- 创建事务会同时建立空目录设置、共享接入配置、默认禁用的微信/抖音 Provider 和账号
+  序列。
 
 零游戏、草稿游戏和零区服都属于合法管理状态，不影响服务启动或管理员登录。
 
@@ -66,32 +67,53 @@ AND 区服 openTime <= 当前时间
 维护、未开放或尚未到开放时间的区服不会下发，也不能登录。正常游戏暂时没有可进入
 区服时，`/areas` 返回 HTTP 200 和空 `servers`。
 
-## 3. 配置微信和运行参数
+## 3. 配置身份 Provider 和运行参数
 
-在独立“接入配置”页面填写：
+在独立“接入配置”页面先保存共享运行参数：
 
-- 微信 AppID 和 endpoint。
-- 微信请求 timeout、熔断阈值和熔断开启时间。
 - 玩家会话 TTL。
 - 登录与管理接口的令牌桶 capacity 和 refill rate。
 
-普通参数保存使用 integration `revision` 乐观锁，不包含 Secret。生产微信 endpoint
-必须为 HTTPS。
+再分别编辑微信和抖音 Provider 卡片：
 
-随后选择“替换 AppSecret”，完成重新认证并输入新值。请求携带当前 revision 和唯一
-`operationId`；同一个 operationId 的重放不会再次覆盖或递增版本。AppID 与 AppSecret
-都存在后，项目自动从 `draft` 变为 `configured`。
+- `enabled`。
+- AppID。
+- `code2session` endpoint。
+- timeout、熔断阈值和熔断开启时间。
 
-微信 AppSecret 的边界：
+所有普通参数共享 integration `revision` 乐观锁，不包含 Secret。生产环境只接受微信
+与抖音各自的官方 HTTPS endpoint；开发环境只额外接受显式 loopback 地址。
 
-- AppSecret 以明文保存在 `game_integrations`，替换时直接覆盖旧值。
-- GET API 和网页永不返回明文，只返回是否配置、版本和更新时间。
+随后在目标 Provider 卡片选择“替换 AppSecret”，完成重新认证并输入新值。请求携带
+当前 revision 和唯一 `operationId`；同一个 operationId 的重放不会再次覆盖或递增
+版本，并返回首次提交时保存的 revision、Secret 版本与更新时间。operationId 同时绑定
+目标、revision 和操作内容；复用 ID 但改变任一字段会返回 HTTP 409。启用前必须同时
+具备 AppID 和 AppSecret；至少一个启用 Provider 配置完整时，项目自动从 `draft`
+变为 `configured`。
+
+AppSecret 的边界：
+
+- AppSecret 以明文保存在 `game_identity_providers`，替换时直接覆盖旧值。
+- GET API 和网页永不返回明文，只返回是否配置、版本和 Secret 自身的更新时间；普通
+  Provider 参数编辑不会改变这个时间。
 - 管理页面的输入框永远为空；成功、失败、关闭、冲突或会话过期后立即清空。
-- 成功保存只表示 gameManageKit 已持久化，不能宣称微信侧已经验证。
+- 清除 Secret 会同时禁用对应 Provider；回滚抖音接入时可直接禁用抖音而保留身份。
+- 普通玩家无效 code 不改变凭据状态；只有明确的 AppID/AppSecret 错误才标记
+  `validation_failed`，配置 revision 变化后重新验证。
 - 数据库 TLS、最小权限、磁盘/快照/备份加密和脱敏恢复属于部署强制项。
 
 不要把 AppSecret 放入环境变量、URL、Hash、命令行、日志、工单、浏览器存储或普通
 审计。
+
+AppID 是身份命名空间，不是普通展示字段。该 Provider 已产生任何
+`account_identities` 后，普通编辑接口会以 HTTP 409
+`IDENTITY_PROVIDER_CONFLICT` 拒绝变更 AppID；确需变更时必须设计独立、可审计的身份
+迁移，不能静默让老玩家获得新账号。
+
+抖音小游戏客户端通过 `tt.login` 获取一次性 code，再调用
+`POST /v1/games/{gameId}/sessions/douyin`。服务端协议以
+[抖音小游戏 code2Session 官方文档](https://developer.open-douyin.com/docs/resource/zh-CN/mini-game/develop/server/log-in/code-2-session/)
+为准，不接收 `anonymous_code`，也不会自动重试一次性 code。
 
 ## 4. 创建机器身份
 
@@ -138,8 +160,9 @@ x-admin-secret: <one-time Secret>
 ## 5. 启用并验收
 
 接入完整后，在游戏项目中将状态改为 `enabled`，并按需要开启 `clientVisible` 和设置
-排序。`disabled` 是不可逆终态；缺少 AppID 或 AppSecret 时，项目会回到
-`draft + maintenance` 并取消客户端可见性。
+排序。`disabled` 是不可逆终态；没有任何“已启用且 AppID/AppSecret 完整”的 Provider
+时，项目会回到 `draft + maintenance` 并取消客户端可见性。禁用一个 Provider 不影响
+另一个 Provider；只有所有 Provider 都不可用时才失去 `configured` 状态。
 
 基本检查：
 
@@ -151,20 +174,27 @@ curl --fail http://127.0.0.1:2570/v1/games/example-game/areas
 
 还应验证：
 
-- 相同微信身份分别登录两个游戏时，账号与 token 相互隔离。
+- 相同外部 subject 在微信、抖音、不同 AppID 和不同游戏中分别登录时，账号与 token
+  相互隔离；同一 Provider/AppID/subject 重复登录返回同一账号。
+- 抖音链路完成 `tt.login -> /sessions/douyin -> code2session -> accessToken ->
+  session verify`；一次性 code 不做自动重试。
+- timeout、熔断、半开恢复按 `gameId + provider` 隔离；微信故障不打开抖音熔断。
 - A 游戏 token 不能在 B 游戏验证。
 - Service 和机器 Admin 不能访问范围外游戏。
 - 不同游戏可以安全使用相同 `serverId`。
 - 新旧 Service Secret 在轮换窗口内都可用，到期或撤销后旧值被拒绝。
-- AppSecret GET 响应、机器身份 GET 响应、日志、审计和指标中没有明文或摘要。
+- AppSecret GET 响应、机器身份 GET 响应、日志、审计和指标中没有 Secret、code、
+  `session_key`、openid 或 unionid 原文。
 - 管理页面显示的保存 revision 与当前实例 loaded revision 符合预期；不要把单实例状态
   解读为所有实例已经同步。
+- 配置审计能区分 Provider 更新、启用、禁用、Secret 轮换与清除，并关联 revision、
+  requestId、operationId、结果以及过滤后的前后非敏感元数据。
 
 ## 6. 账号管理语义
 
 `POST .../revoke` 只撤销该游戏、该账号的全部现有会话，不删除账号，也不阻止账号随后
-重新登录。`POST .../ban` 会封禁当前游戏内账号并撤销其会话，不影响其他游戏中的同一
-微信身份。
+重新登录。`POST .../ban` 会封禁当前游戏内账号并撤销其会话，不影响其他游戏或其他
+Provider 命名空间中的同一 subject。
 
 当前不提供 `unban`、`deregister` 或账号恢复接口。需要这些能力时，应先定义审计、
 授权和恢复语义，再扩展 OpenAPI，不能通过直接修改业务表绕过管理 API。

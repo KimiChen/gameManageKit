@@ -5,8 +5,11 @@ import {
   DirectoryService,
   validateAreaDirectory,
 } from "../../src/domain/directory/service.js";
+import { LoginService } from "../../src/domain/account/login.js";
 import type { GameContext } from "../../src/domain/game/resolver.js";
 import { parseAccessToken } from "../../src/domain/session/service.js";
+import type { SessionService } from "../../src/domain/session/service.js";
+import type { Database } from "../../src/infra/mysql/database.js";
 import { MetricsRegistry } from "../../src/infra/observability/metrics.js";
 import {
   matchesAnySecret,
@@ -153,15 +156,25 @@ test("指标只允许已登记 gameId 与有限标签并按身份范围过滤", 
   const metrics = new MetricsRegistry(["game-a", "game-b"]);
   metrics.recordLogin("game-a", "success");
   metrics.recordRateLimit("game-a", "admin");
-  metrics.recordWechat("game-b", "unavailable");
+  metrics.recordIdentityProvider("game-b", "douyin", "provider_error");
+  metrics.recordIdentityProviderDuration("game-b", "douyin", 0.25);
   metrics.recordDatabaseDuration("game-a", "login", 0.125);
 
   const gameA = metrics.renderPrometheus(["game-a"]);
+  const gameB = metrics.renderPrometheus(["game-b"]);
   assert.match(gameA, /game_id="game-a"/);
   assert.doesNotMatch(gameA, /game_id="game-b"/);
+  assert.match(
+    gameB,
+    /identity_provider_requests_total\{game_id="game-b",provider="douyin",outcome="provider_error"\} 1/u,
+  );
+  assert.match(
+    gameB,
+    /identity_provider_request_duration_seconds_count\{game_id="game-b",provider="douyin"\} 1/u,
+  );
   assert.doesNotMatch(
-    gameA,
-    /user_id|token|operation_id|service_id|operator_id/,
+    `${gameA}\n${gameB}`,
+    /user_id|token|operation_id|service_id|operator_id|app_id|subject|code|secret/,
   );
   assert.throws(
     () => metrics.recordLogin("missing-game", "success"),
@@ -169,6 +182,14 @@ test("指标只允许已登记 gameId 与有限标签并按身份范围过滤", 
   );
   assert.throws(
     () => metrics.recordLogin("game-a", "u_123" as never),
+    /指标拒绝未定义 label 值/,
+  );
+  assert.throws(
+    () => metrics.recordIdentityProvider(
+      "game-a",
+      "douyin",
+      "subject-value" as never,
+    ),
     /指标拒绝未定义 label 值/,
   );
 });
@@ -302,23 +323,130 @@ test("每个微信 Client 的熔断状态互相隔离", async () => {
 
   assert.deepEqual(
     await gameA.exchange("failure-1"),
-    { ok: false, reason: "wx_unavailable" },
+    { ok: false, reason: "unavailable" },
   );
   assert.deepEqual(
     await gameA.exchange("failure-2"),
-    { ok: false, reason: "wx_unavailable" },
+    { ok: false, reason: "unavailable" },
   );
   assert.deepEqual(
     await gameA.exchange("short-circuit"),
-    { ok: false, reason: "wx_unavailable" },
+    { ok: false, reason: "circuit_open" },
   );
   assert.equal(gameACalls, 2);
   assert.deepEqual(await gameB.exchange("healthy"), {
     ok: true,
-    openid: "game-b-openid",
-    unionid: null,
-    sessionKey: "game-b-session",
+    provider: "wechat",
+    providerAppId: "wx-app-b",
+    subject: "game-b-openid",
+    unionSubject: null,
   });
   assert.equal(gameBCalls, 1);
   assert.deepEqual(redirects, ["error", "error", "error"]);
+});
+
+test("身份登录仅在事务提交后记录结果指标", async () => {
+  const scenarios = [
+    { kind: "success", outcome: "success" },
+    { kind: "banned", outcome: "banned" },
+    { kind: "conflict", outcome: "identity_conflict" },
+    { kind: "provider_changed", outcome: "provider_unavailable" },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const metrics = new MetricsRegistry(["game-a"]);
+    const connection = {
+      async query(sql: string, parameters?: readonly unknown[]) {
+        if (sql.includes("FROM game_identity_providers")) {
+          return scenario.kind === "provider_changed"
+            ? [[], []]
+            : [[{ enabled: 1, app_id: "wx-app-a" }], []];
+        }
+        assert.match(sql, /FROM account_identities/u);
+        if (scenario.kind === "conflict") {
+          return parameters?.[3] === "unionid"
+            ? [[{ user_id: "u_2", status: 0 }], []]
+            : [[{ user_id: "u_1", status: 0 }], []];
+        }
+        return [[{
+          user_id: "u_1",
+          status: scenario.kind === "banned" ? 1 : 0,
+        }], []];
+      },
+      async execute() {
+        return [{ affectedRows: 1 }, []];
+      },
+    };
+    let transactionCallbackCompleted = false;
+    const database = {
+      pool: {
+        async execute() {
+          return [{ affectedRows: 1 }, []];
+        },
+      },
+      async transaction(
+        callback: (value: typeof connection) => Promise<unknown>,
+      ) {
+        await callback(connection);
+        transactionCallbackCompleted = true;
+        throw new Error("fixture commit failure");
+      },
+    } as unknown as Database;
+    const sessions = {
+      async issue() {
+        return {
+          accessToken: `game-a.u_1.${"ab".repeat(24)}`,
+          issuedAtMs: Date.now(),
+        };
+      },
+    } as unknown as SessionService;
+    const login = new LoginService(database, sessions, metrics);
+    const game = {
+      gameId: "game-a",
+      loginLimiter: { allow: () => true },
+      wechat: {
+        provider: "wechat",
+        async exchange() {
+          return {
+            ok: true,
+            provider: "wechat",
+            providerAppId: "wx-app-a",
+            subject: "fixture-openid",
+            unionSubject: scenario.kind === "conflict"
+              ? "fixture-unionid"
+              : null,
+          };
+        },
+      },
+    } as unknown as GameContext;
+    const currentAttempt = {
+      rateKey: "fixture-rate-key",
+      ip: "192.0.2.10",
+      deviceId: "fixture-device",
+      requestId: `fixture-${scenario.kind}`,
+      serverId: 1,
+    } as const;
+    const operation = scenario.kind === "success"
+      || scenario.kind === "banned"
+      ? login.loginDev(game, "fixture-key", currentAttempt)
+      : login.loginWechat(game, "fixture-code", currentAttempt);
+
+    await assert.rejects(operation, /fixture commit failure/u);
+
+    assert.equal(transactionCallbackCompleted, true, scenario.kind);
+    const rendered = metrics.renderPrometheus(["game-a"]);
+    assert.doesNotMatch(
+      rendered,
+      new RegExp(
+        `game_manage_kit_login_attempts_total\\{game_id="game-a",outcome="${scenario.outcome}"\\}`,
+        "u",
+      ),
+      scenario.kind,
+    );
+    assert.match(
+      rendered,
+      /game_manage_kit_login_attempts_total\{game_id="game-a",outcome="internal_error"\} 1/u,
+      scenario.kind,
+    );
+  }
 });

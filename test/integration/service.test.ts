@@ -16,6 +16,36 @@ interface LoginBody {
   readonly isNewAccount: boolean;
 }
 
+type IdentityProvider = "wechat" | "douyin";
+
+interface ProviderFetch {
+  readonly provider: IdentityProvider;
+  readonly gameId: string;
+  readonly code: string;
+  readonly appId: string;
+  readonly secret: string;
+}
+
+function providerKey(
+  gameId: string,
+  provider: IdentityProvider,
+): string {
+  return `${gameId}:${provider}`;
+}
+
+function providerAppId(
+  gameId: string,
+  provider: IdentityProvider,
+): string {
+  return `${provider === "wechat" ? "wx" : "dy"}-${gameId}`;
+}
+
+function providerEndpoint(provider: IdentityProvider): string {
+  return provider === "wechat"
+    ? "https://api.weixin.qq.com/sns/jscode2session"
+    : "https://minigame.zijieapi.com/mgplatform/api/apps/jscode2session";
+}
+
 function databaseUrl(adminUrl: string, databaseName: string): string {
   const url = new URL(adminUrl);
   url.pathname = `/${databaseName}`;
@@ -101,21 +131,90 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       AUTH_DEV_ENABLED: "1",
       GAME_MANAGE_KIT_LOG_ENABLED: "0",
     });
-    let wechatValidationShouldFail = true;
-    const validationFetch: typeof fetch = async () => new Response(
-      JSON.stringify(
-        wechatValidationShouldFail
-          ? { errcode: 40013, errmsg: "invalid appid" }
-          : {
-              openid: "validation-openid",
-              session_key: "validation-session-key",
-            },
-      ),
-      {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      },
-    );
+    const appSecrets = new Map<string, string>();
+    const allProviderSecrets = new Set<string>();
+    const storeProviderSecret = (
+      gameId: string,
+      provider: IdentityProvider,
+      secret: string,
+    ): void => {
+      appSecrets.set(providerKey(gameId, provider), secret);
+      allProviderSecrets.add(secret);
+    };
+    const providerFetches: ProviderFetch[] = [];
+    const credentialMismatches: string[] = [];
+    const validationFetch: typeof fetch = async (input) => {
+      const url = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input
+            : input.url,
+      );
+      const provider: IdentityProvider =
+        url.hostname === "api.weixin.qq.com" ? "wechat" : "douyin";
+      const appId = url.searchParams.get("appid") ?? "";
+      const secret = url.searchParams.get("secret") ?? "";
+      const code = url.searchParams.get(
+        provider === "wechat" ? "js_code" : "code",
+      ) ?? "";
+      const prefix = provider === "wechat" ? "wx-" : "dy-";
+      const gameId = appId.startsWith(prefix)
+        ? appId.slice(prefix.length)
+        : "";
+      const expectedAppId = providerAppId(gameId, provider);
+      const expectedSecret = appSecrets.get(providerKey(gameId, provider));
+      if (appId !== expectedAppId || secret !== expectedSecret) {
+        credentialMismatches.push(
+          `${provider}:${gameId}:credential-mismatch`,
+        );
+      }
+      providerFetches.push({ provider, gameId, code, appId, secret });
+
+      const response = (body: object, status = 200): Response => (
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { "content-type": "application/json" },
+        })
+      );
+      if (code.endsWith("-unavailable")) {
+        return response({ error: "unavailable" }, 503);
+      }
+      if (code.endsWith("-rate-limited")) {
+        return response({ error: "rate limited" }, 429);
+      }
+      if (code.endsWith("-invalid-credentials")) {
+        return provider === "wechat"
+          ? response({ errcode: 40_013, errmsg: "invalid appid" })
+          : response({ error: 40_015, message: "invalid appid" });
+      }
+      if (code.endsWith("-invalid-code")) {
+        return provider === "wechat"
+          ? response({ errcode: 40_029, errmsg: "invalid code" })
+          : response({ error: 40_018, message: "invalid code" });
+      }
+      if (provider === "wechat") {
+        if (code === "wechat-conflict") {
+          return response({
+            openid: "wechat-openid-a",
+            unionid: "wechat-union-b",
+            session_key: "wechat-session-conflict",
+          });
+        }
+        const suffix = code === "wechat-success-b" ? "b" : "a";
+        return response({
+          openid: `wechat-openid-${suffix}`,
+          unionid: `wechat-union-${suffix}`,
+          session_key: `wechat-session-${suffix}`,
+        });
+      }
+      return response({
+        error: 0,
+        openid: "douyin-openid-a",
+        unionid: "douyin-union-a",
+        session_key: "douyin-session-a",
+      });
+    };
     runtime = await createRuntime(config, {
       cacheTtlMs: 100,
       fetchImpl: validationFetch,
@@ -204,7 +303,7 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       limitedPassword,
     );
     const mutate = async (
-      method: "POST" | "PATCH" | "PUT",
+      method: "POST" | "PATCH" | "PUT" | "DELETE",
       url: string,
       payload: Record<string, unknown>,
       cookie = adminCookie,
@@ -243,7 +342,6 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       elevatedUntil: null,
     });
 
-    const appSecrets = new Map<string, string>();
     const configureGame = async (
       gameId: string,
       sortOrder: number,
@@ -260,12 +358,6 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
         "PATCH",
         `/v1/admin/games/${gameId}/integration`,
         {
-          wechatAppId: `wx-${gameId}`,
-          wechatEndpoint:
-            "https://api.weixin.qq.com/sns/jscode2session",
-          wechatTimeoutMs: 2_000,
-          wechatBreakerThreshold: 4,
-          wechatBreakerOpenMs: 5_000,
           sessionTtlSeconds: 7_200,
           loginRateCapacity: 100,
           loginRateRefillPerSecond: 100,
@@ -276,23 +368,65 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       );
       assert.equal(integration.statusCode, 200, integration.body);
       assert.equal(integration.json().revision, 2);
-      assert.equal(integration.json().wechatSecret.configured, false);
+      assert.equal(integration.json().providers.length, 2);
 
       const appSecret = randomValue();
-      appSecrets.set(gameId, appSecret);
+      storeProviderSecret(gameId, "wechat", appSecret);
+      const providerConfiguration = await mutate(
+        "PATCH",
+        `/v1/admin/games/${gameId}/identity-providers/wechat`,
+        {
+          enabled: false,
+          appId: providerAppId(gameId, "wechat"),
+          endpoint: providerEndpoint("wechat"),
+          timeoutMs: 2_000,
+          breakerThreshold: 4,
+          breakerOpenMs: 5_000,
+          revision: 2,
+        },
+      );
+      assert.equal(
+        providerConfiguration.statusCode,
+        200,
+        providerConfiguration.body,
+      );
+      assert.equal(providerConfiguration.json().revision, 3);
       const secretWrite = await mutate(
         "PUT",
-        `/v1/admin/games/${gameId}/secrets/wechat-app-secret`,
+        `/v1/admin/games/${gameId}`
+          + "/identity-providers/wechat/secret",
         {
-          wechatAppSecret: appSecret,
-          revision: 2,
+          appSecret,
+          revision: 3,
           operationId: `set-${gameId}-wechat`,
         },
       );
       assert.equal(secretWrite.statusCode, 200, secretWrite.body);
       assert.equal(secretWrite.body.includes(appSecret), false);
-      assert.equal(secretWrite.json().configurationState, "configured");
-      assert.equal(secretWrite.json().wechatSecret.version, 1);
+      assert.equal(secretWrite.json().configurationState, "draft");
+      assert.equal(secretWrite.json().secretMetadata.version, 1);
+      assert.equal(secretWrite.json().revision, 4);
+
+      const enabledProvider = await mutate(
+        "PATCH",
+        `/v1/admin/games/${gameId}/identity-providers/wechat`,
+        {
+          enabled: true,
+          appId: providerAppId(gameId, "wechat"),
+          endpoint: providerEndpoint("wechat"),
+          timeoutMs: 2_000,
+          breakerThreshold: 4,
+          breakerOpenMs: 5_000,
+          revision: 4,
+        },
+      );
+      assert.equal(
+        enabledProvider.statusCode,
+        200,
+        enabledProvider.body,
+      );
+      assert.equal(enabledProvider.json().configurationState, "configured");
+      assert.equal(enabledProvider.json().revision, 5);
 
       const server = await mutate(
         "POST",
@@ -335,22 +469,33 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       description: "动态配置测试",
     });
     assert.equal(gameA.statusCode, 201, gameA.body);
-    const secretExfiltrationEndpoint = await mutate(
+    const gameAShared = await mutate(
       "PATCH",
       "/v1/admin/games/game-a/integration",
       {
-        wechatAppId: "wx-game-a",
-        wechatEndpoint:
-          "https://credential-collector.example.invalid/code2session",
-        wechatTimeoutMs: 2_000,
-        wechatBreakerThreshold: 4,
-        wechatBreakerOpenMs: 5_000,
         sessionTtlSeconds: 7_200,
         loginRateCapacity: 100,
         loginRateRefillPerSecond: 100,
         adminRateCapacity: 100,
         adminRateRefillPerSecond: 100,
         revision: 1,
+      },
+    );
+    assert.equal(gameAShared.statusCode, 200, gameAShared.body);
+    assert.equal(gameAShared.json().revision, 2);
+
+    const secretExfiltrationEndpoint = await mutate(
+      "PATCH",
+      "/v1/admin/games/game-a/identity-providers/wechat",
+      {
+        enabled: false,
+        appId: providerAppId("game-a", "wechat"),
+        endpoint:
+          "https://credential-collector.example.invalid/code2session",
+        timeoutMs: 2_000,
+        breakerThreshold: 4,
+        breakerOpenMs: 5_000,
+        revision: 2,
       },
     );
     assert.equal(
@@ -358,34 +503,34 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       400,
       secretExfiltrationEndpoint.body,
     );
-    const gameAIntegration = await mutate(
+    const gameAWechatProvider = await mutate(
       "PATCH",
-      "/v1/admin/games/game-a/integration",
+      "/v1/admin/games/game-a/identity-providers/wechat",
       {
-        wechatAppId: "wx-game-a",
-        wechatEndpoint:
-          "https://api.weixin.qq.com/sns/jscode2session",
-        wechatTimeoutMs: 2_000,
-        wechatBreakerThreshold: 4,
-        wechatBreakerOpenMs: 5_000,
-        sessionTtlSeconds: 7_200,
-        loginRateCapacity: 100,
-        loginRateRefillPerSecond: 100,
-        adminRateCapacity: 100,
-        adminRateRefillPerSecond: 100,
-        revision: 1,
+        enabled: false,
+        appId: providerAppId("game-a", "wechat"),
+        endpoint: providerEndpoint("wechat"),
+        timeoutMs: 2_000,
+        breakerThreshold: 4,
+        breakerOpenMs: 5_000,
+        revision: 2,
       },
     );
-    assert.equal(gameAIntegration.statusCode, 200, gameAIntegration.body);
+    assert.equal(
+      gameAWechatProvider.statusCode,
+      200,
+      gameAWechatProvider.body,
+    );
+    assert.equal(gameAWechatProvider.json().revision, 3);
 
-    const gameAAppSecret = randomValue();
-    appSecrets.set("game-a", gameAAppSecret);
+    const gameAWechatSecret = randomValue();
+    storeProviderSecret("game-a", "wechat", gameAWechatSecret);
     const notElevated = await mutate(
       "PUT",
-      "/v1/admin/games/game-a/secrets/wechat-app-secret",
+      "/v1/admin/games/game-a/identity-providers/wechat/secret",
       {
-        wechatAppSecret: gameAAppSecret,
-        revision: 2,
+        appSecret: gameAWechatSecret,
+        revision: 3,
         operationId: "set-game-a-before-reauth",
       },
     );
@@ -403,10 +548,10 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
     assert.equal(limitedReauth.statusCode, 204, limitedReauth.body);
     const noSecretCapability = await mutate(
       "PUT",
-      "/v1/admin/games/game-a/secrets/wechat-app-secret",
+      "/v1/admin/games/game-a/identity-providers/wechat/secret",
       {
-        wechatAppSecret: randomValue(),
-        revision: 2,
+        appSecret: randomValue(),
+        revision: 3,
         operationId: "set-game-a-no-capability",
       },
       limitedCookie,
@@ -426,36 +571,120 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
 
     const gameASecret = await mutate(
       "PUT",
-      "/v1/admin/games/game-a/secrets/wechat-app-secret",
+      "/v1/admin/games/game-a/identity-providers/wechat/secret",
       {
-        wechatAppSecret: gameAAppSecret,
-        revision: 2,
+        appSecret: gameAWechatSecret,
+        revision: 3,
         operationId: "set-game-a-wechat",
       },
     );
     assert.equal(gameASecret.statusCode, 200, gameASecret.body);
-    assert.equal(gameASecret.body.includes(gameAAppSecret), false);
+    assert.equal(gameASecret.body.includes(gameAWechatSecret), false);
     assert.deepEqual({
-      configured: gameASecret.json().wechatSecret.configured,
-      version: gameASecret.json().wechatSecret.version,
+      provider: gameASecret.json().provider,
+      configured: gameASecret.json().secretMetadata.configured,
+      version: gameASecret.json().secretMetadata.version,
+      revision: gameASecret.json().revision,
       replayed: gameASecret.json().replayed,
     }, {
+      provider: "wechat",
       configured: true,
       version: 1,
+      revision: 4,
       replayed: false,
     });
     const replay = await mutate(
       "PUT",
-      "/v1/admin/games/game-a/secrets/wechat-app-secret",
+      "/v1/admin/games/game-a/identity-providers/wechat/secret",
       {
-        wechatAppSecret: randomValue(),
-        revision: 2,
+        appSecret: gameAWechatSecret,
+        revision: 3,
         operationId: "set-game-a-wechat",
       },
     );
     assert.equal(replay.statusCode, 200, replay.body);
     assert.equal(replay.json().replayed, true);
-    assert.equal(replay.body.includes(gameAAppSecret), false);
+    assert.equal(replay.body.includes(gameAWechatSecret), false);
+    const conflictingReplay = await mutate(
+      "PUT",
+      "/v1/admin/games/game-a/identity-providers/wechat/secret",
+      {
+        appSecret: randomValue(),
+        revision: 3,
+        operationId: "set-game-a-wechat",
+      },
+    );
+    assert.equal(conflictingReplay.statusCode, 409, conflictingReplay.body);
+
+    const enabledWechat = await mutate(
+      "PATCH",
+      "/v1/admin/games/game-a/identity-providers/wechat",
+      {
+        enabled: true,
+        appId: providerAppId("game-a", "wechat"),
+        endpoint: providerEndpoint("wechat"),
+        timeoutMs: 2_000,
+        breakerThreshold: 4,
+        breakerOpenMs: 5_000,
+        revision: 4,
+      },
+    );
+    assert.equal(enabledWechat.statusCode, 200, enabledWechat.body);
+    assert.equal(enabledWechat.json().configurationState, "configured");
+    assert.equal(enabledWechat.json().revision, 5);
+
+    const gameADouyinProvider = await mutate(
+      "PATCH",
+      "/v1/admin/games/game-a/identity-providers/douyin",
+      {
+        enabled: false,
+        appId: providerAppId("game-a", "douyin"),
+        endpoint: providerEndpoint("douyin"),
+        timeoutMs: 2_000,
+        breakerThreshold: 4,
+        breakerOpenMs: 5_000,
+        revision: 5,
+      },
+    );
+    assert.equal(
+      gameADouyinProvider.statusCode,
+      200,
+      gameADouyinProvider.body,
+    );
+    assert.equal(gameADouyinProvider.json().revision, 6);
+    const gameADouyinSecret = randomValue();
+    storeProviderSecret("game-a", "douyin", gameADouyinSecret);
+    const douyinSecretWrite = await mutate(
+      "PUT",
+      "/v1/admin/games/game-a/identity-providers/douyin/secret",
+      {
+        appSecret: gameADouyinSecret,
+        revision: 6,
+        operationId: "set-game-a-douyin",
+      },
+    );
+    assert.equal(
+      douyinSecretWrite.statusCode,
+      200,
+      douyinSecretWrite.body,
+    );
+    assert.equal(douyinSecretWrite.body.includes(gameADouyinSecret), false);
+    assert.equal(douyinSecretWrite.json().revision, 7);
+    const enabledDouyin = await mutate(
+      "PATCH",
+      "/v1/admin/games/game-a/identity-providers/douyin",
+      {
+        enabled: true,
+        appId: providerAppId("game-a", "douyin"),
+        endpoint: providerEndpoint("douyin"),
+        timeoutMs: 2_000,
+        breakerThreshold: 4,
+        breakerOpenMs: 5_000,
+        revision: 7,
+      },
+    );
+    assert.equal(enabledDouyin.statusCode, 200, enabledDouyin.body);
+    assert.equal(enabledDouyin.json().revision, 8);
 
     const gameAServer = await mutate(
       "POST",
@@ -487,52 +716,243 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       },
     );
     assert.equal(enableGameA.statusCode, 200, enableGameA.body);
-    const validationContext = await runtime.games.resolve("game-a");
-    assert.deepEqual(
-      await validationContext.wechat.exchange("validation-failure"),
-      { ok: false, reason: "wx_invalid" },
+
+    const loginProvider = async (
+      provider: IdentityProvider,
+      code: string,
+    ) => publicApp.inject({
+      method: "POST",
+      url: `/v1/games/game-a/sessions/${provider}`,
+      payload: { code, serverId: 1 },
+    });
+    for (const provider of ["wechat", "douyin"] as const) {
+      const invalidCode = await loginProvider(
+        provider,
+        `${provider}-invalid-code`,
+      );
+      assert.equal(invalidCode.statusCode, 401, invalidCode.body);
+      assert.equal(invalidCode.json().code, "AUTH_CODE_INVALID");
+    }
+    const unavailable = await loginProvider(
+      "wechat",
+      "wechat-unavailable",
+    );
+    assert.equal(unavailable.statusCode, 503, unavailable.body);
+    assert.equal(unavailable.json().code, "PROVIDER_UNAVAILABLE");
+    const upstreamRateLimited = await loginProvider(
+      "douyin",
+      "douyin-rate-limited",
+    );
+    assert.equal(
+      upstreamRateLimited.statusCode,
+      429,
+      upstreamRateLimited.body,
+    );
+    assert.equal(upstreamRateLimited.json().code, "RATE_LIMITED");
+
+    const validationAfterBusinessFailures = await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/games/game-a/integration",
+      headers: { cookie: adminCookie },
+    });
+    assert.equal(
+      validationAfterBusinessFailures.statusCode,
+      200,
+      validationAfterBusinessFailures.body,
+    );
+    for (const provider of validationAfterBusinessFailures.json().providers) {
+      assert.equal(provider.validationState, "unvalidated");
+      assert.equal(provider.validationFailedAt, null);
+      assert.equal(provider.validationErrorCode, null);
+    }
+
+    const wechatLoginA = await loginProvider(
+      "wechat",
+      "wechat-success-a",
+    );
+    const wechatLoginB = await loginProvider(
+      "wechat",
+      "wechat-success-b",
+    );
+    const douyinLogin = await loginProvider(
+      "douyin",
+      "douyin-success-a",
+    );
+    for (const response of [wechatLoginA, wechatLoginB, douyinLogin]) {
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(response.json().isNewAccount, true);
+    }
+    assert.notEqual(
+      wechatLoginA.json().userId,
+      douyinLogin.json().userId,
+    );
+    const repeatedWechat = await loginProvider(
+      "wechat",
+      "wechat-success-a",
+    );
+    const repeatedDouyin = await loginProvider(
+      "douyin",
+      "douyin-success-a",
+    );
+    assert.equal(repeatedWechat.statusCode, 200, repeatedWechat.body);
+    assert.equal(repeatedWechat.json().isNewAccount, false);
+    assert.equal(repeatedDouyin.statusCode, 200, repeatedDouyin.body);
+    assert.equal(repeatedDouyin.json().isNewAccount, false);
+
+    const identityConflict = await loginProvider(
+      "wechat",
+      "wechat-conflict",
+    );
+    assert.equal(identityConflict.statusCode, 409, identityConflict.body);
+    assert.equal(identityConflict.json().code, "IDENTITY_CONFLICT");
+
+    const activeValidation = await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/games/game-a/integration",
+      headers: { cookie: adminCookie },
+    });
+    for (const provider of activeValidation.json().providers) {
+      assert.equal(provider.validationState, "active");
+      assert.equal(provider.validationFailedAt, null);
+    }
+
+    const invalidCredentials = await loginProvider(
+      "douyin",
+      "douyin-invalid-credentials",
+    );
+    assert.equal(
+      invalidCredentials.statusCode,
+      503,
+      invalidCredentials.body,
+    );
+    assert.equal(
+      invalidCredentials.json().code,
+      "PROVIDER_CONFIGURATION_INVALID",
     );
     const failedValidationMetadata = await internalApp.inject({
       method: "GET",
       url: "/v1/admin/games/game-a/integration",
       headers: { cookie: adminCookie },
     });
+    const failedDouyin = failedValidationMetadata
+      .json()
+      .providers
+      .find((provider: { provider: string }) => (
+        provider.provider === "douyin"
+      ));
+    const healthyWechat = failedValidationMetadata
+      .json()
+      .providers
+      .find((provider: { provider: string }) => (
+        provider.provider === "wechat"
+      ));
+    assert.ok(failedDouyin);
+    assert.ok(healthyWechat);
+    assert.equal(failedDouyin.validationState, "validation_failed");
+    assert.ok(failedDouyin.validationFailedAt);
     assert.equal(
-      failedValidationMetadata.json().wechatSecret.state,
-      "validation_failed",
+      failedDouyin.validationErrorCode,
+      "invalid_credentials",
     );
-    wechatValidationShouldFail = false;
+    assert.equal(healthyWechat.validationState, "active");
+
+    const fetchCountAfterCredentialFailure = providerFetches.length;
+    const fastFailedDouyin = await loginProvider(
+      "douyin",
+      "douyin-success-a",
+    );
+    assert.equal(fastFailedDouyin.statusCode, 503, fastFailedDouyin.body);
     assert.equal(
-      (await validationContext.wechat.exchange("validation-success")).ok,
-      true,
+      fastFailedDouyin.json().code,
+      "PROVIDER_CONFIGURATION_INVALID",
     );
-    const recoveredValidationMetadata = await internalApp.inject({
+    assert.equal(providerFetches.length, fetchCountAfterCredentialFailure);
+
+    const rotatedGameADouyinSecret = randomValue();
+    storeProviderSecret(
+      "game-a",
+      "douyin",
+      rotatedGameADouyinSecret,
+    );
+    const rotateDouyin = await mutate(
+      "PUT",
+      "/v1/admin/games/game-a/identity-providers/douyin/secret",
+      {
+        appSecret: rotatedGameADouyinSecret,
+        revision: 8,
+        operationId: "rotate-game-a-douyin",
+      },
+    );
+    assert.equal(rotateDouyin.statusCode, 200, rotateDouyin.body);
+    assert.equal(rotateDouyin.body.includes(rotatedGameADouyinSecret), false);
+    assert.deepEqual({
+      version: rotateDouyin.json().secretMetadata.version,
+      revision: rotateDouyin.json().revision,
+      loadedRevision: rotateDouyin.json().loadedRevision,
+    }, {
+      version: 2,
+      revision: 9,
+      loadedRevision: 8,
+    });
+    const afterDouyinRotation = await internalApp.inject({
       method: "GET",
       url: "/v1/admin/games/game-a/integration",
       headers: { cookie: adminCookie },
     });
+    const rotatedDouyinProvider = afterDouyinRotation
+      .json()
+      .providers
+      .find((provider: { provider: string }) => (
+        provider.provider === "douyin"
+      ));
+    assert.equal(afterDouyinRotation.json().revision, 9);
+    assert.equal(afterDouyinRotation.json().loadedRevision, 8);
+    assert.equal(rotatedDouyinProvider.validationState, "unvalidated");
+    assert.equal(rotatedDouyinProvider.secretMetadata.version, 2);
+
+    const recoveredDouyin = await loginProvider(
+      "douyin",
+      "douyin-success-a",
+    );
+    assert.equal(recoveredDouyin.statusCode, 200, recoveredDouyin.body);
+    assert.equal(recoveredDouyin.json().isNewAccount, false);
+    const loadedAfterRotation = await internalApp.inject({
+      method: "GET",
+      url: "/v1/admin/games/game-a/integration",
+      headers: { cookie: adminCookie },
+    });
+    assert.equal(loadedAfterRotation.json().loadedRevision, 9);
     assert.equal(
-      recoveredValidationMetadata.json().wechatSecret.state,
+      loadedAfterRotation
+        .json()
+        .providers
+        .find((provider: { provider: string }) => (
+          provider.provider === "douyin"
+        ))
+        .validationState,
       "active",
     );
+    assert.deepEqual(credentialMismatches, []);
+
     await configureGame("game-b", 20);
     const rotatedGameBAppSecret = randomValue();
+    storeProviderSecret("game-b", "wechat", rotatedGameBAppSecret);
     const concurrentSecretWrites = await Promise.all([
       mutate(
         "PUT",
-        "/v1/admin/games/game-b/secrets/wechat-app-secret",
+        "/v1/admin/games/game-b/identity-providers/wechat/secret",
         {
-          wechatAppSecret: rotatedGameBAppSecret,
-          revision: 3,
+          appSecret: rotatedGameBAppSecret,
+          revision: 5,
           operationId: "rotate-game-b-wechat-concurrent",
         },
       ),
       mutate(
         "PUT",
-        "/v1/admin/games/game-b/secrets/wechat-app-secret",
+        "/v1/admin/games/game-b/identity-providers/wechat/secret",
         {
-          wechatAppSecret: rotatedGameBAppSecret,
-          revision: 3,
+          appSecret: rotatedGameBAppSecret,
+          revision: 5,
           operationId: "rotate-game-b-wechat-concurrent",
         },
       ),
@@ -546,7 +966,7 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
         .sort(),
       [false, true],
     );
-    appSecrets.set("game-b", rotatedGameBAppSecret);
+    assert.equal(concurrentSecretWrites[0]?.json().secretMetadata.version, 2);
 
     const clientGames = await publicApp.inject({
       method: "GET",
@@ -861,7 +1281,7 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
     for (const response of [integrationGet, identitiesGet, auditGet]) {
       assert.equal(response.statusCode, 200, response.body);
       for (const secret of [
-        ...appSecrets.values(),
+        ...allProviderSecrets,
         serviceSecret,
         rotatedServiceSecret,
         recoveredServiceSecret,
@@ -881,27 +1301,58 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       ["game_configuration", "machine_identity", "secret"],
     );
 
-    const [storedIntegrations] = await runtime.database.pool.query<
+    const [storedProviders] = await runtime.database.pool.query<
       RowDataPacket[]
     >(
-      `SELECT game_id, wechat_app_secret, wechat_secret_version
-         FROM game_integrations
-        ORDER BY game_id`,
+      `SELECT game_id, provider, enabled, app_id, app_secret,
+              secret_version, validation_state
+         FROM game_identity_providers
+        ORDER BY game_id, FIELD(provider, 'wechat', 'douyin')`,
     );
-    assert.deepEqual(storedIntegrations.map((row) => ({
+    assert.deepEqual(storedProviders.map((row) => ({
       gameId: String(row.game_id),
-      appSecret: String(row.wechat_app_secret),
-      version: Number(row.wechat_secret_version),
+      provider: String(row.provider),
+      enabled: Number(row.enabled) === 1,
+      appId: row.app_id === null ? null : String(row.app_id),
+      appSecret: row.app_secret === null ? null : String(row.app_secret),
+      version: Number(row.secret_version),
+      validationState: String(row.validation_state),
     })), [
       {
         gameId: "game-a",
-        appSecret: appSecrets.get("game-a"),
+        provider: "wechat",
+        enabled: true,
+        appId: providerAppId("game-a", "wechat"),
+        appSecret: gameAWechatSecret,
         version: 1,
+        validationState: "active",
+      },
+      {
+        gameId: "game-a",
+        provider: "douyin",
+        enabled: true,
+        appId: providerAppId("game-a", "douyin"),
+        appSecret: rotatedGameADouyinSecret,
+        version: 2,
+        validationState: "active",
       },
       {
         gameId: "game-b",
-        appSecret: appSecrets.get("game-b"),
+        provider: "wechat",
+        enabled: true,
+        appId: providerAppId("game-b", "wechat"),
+        appSecret: rotatedGameBAppSecret,
         version: 2,
+        validationState: "unvalidated",
+      },
+      {
+        gameId: "game-b",
+        provider: "douyin",
+        enabled: false,
+        appId: null,
+        appSecret: null,
+        version: 0,
+        validationState: "unvalidated",
       },
     ]);
     const [machineSecrets] = await runtime.database.pool.query<
@@ -971,16 +1422,23 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
         WHERE result = 'failed'
         ORDER BY id`,
     );
-    assert.ok(failedSecretAudits.length >= 2);
-    assert.ok(failedSecretAudits.every((row) => (
-      String(row.result) === "failed"
-      && String(row.reason) === "GAME_ACCESS_DENIED"
+    const failedSecretReasons = failedSecretAudits.map((row) => {
+      assert.equal(String(row.result), "failed");
+      return String(row.reason);
+    });
+    assert.ok(
+      failedSecretReasons.filter((reason) => reason === "GAME_ACCESS_DENIED")
+        .length >= 2,
+    );
+    assert.ok(failedSecretReasons.includes("OPERATION_CONFLICT"));
+    assert.ok(failedSecretReasons.every((reason) => (
+      reason === "GAME_ACCESS_DENIED" || reason === "OPERATION_CONFLICT"
     )));
     const auditText = [...gameAudits, ...secretAudits]
       .map((row) => String(row.audit_text))
       .join("\n");
     for (const secret of [
-      ...appSecrets.values(),
+      ...allProviderSecrets,
       serviceSecret,
       rotatedServiceSecret,
       recoveredServiceSecret,
@@ -1028,22 +1486,58 @@ test("管理员从空库完成动态配置、热更新与机器 Secret 轮换", 
       },
     );
     assert.equal(disabledGameB.statusCode, 200, disabledGameB.body);
+    const clearedGameBSecret = await mutate(
+      "DELETE",
+      "/v1/admin/games/game-b/identity-providers/wechat/secret",
+      {
+        revision: 6,
+        operationId: "clear-game-b-wechat",
+      },
+    );
+    assert.equal(
+      clearedGameBSecret.statusCode,
+      200,
+      clearedGameBSecret.body,
+    );
+    assert.deepEqual({
+      configured: clearedGameBSecret.json().secretMetadata.configured,
+      version: clearedGameBSecret.json().secretMetadata.version,
+      revision: clearedGameBSecret.json().revision,
+      configurationState: clearedGameBSecret.json().configurationState,
+      replayed: clearedGameBSecret.json().replayed,
+    }, {
+      configured: false,
+      version: 0,
+      revision: 7,
+      configurationState: "draft",
+      replayed: false,
+    });
+    assert.equal(
+      clearedGameBSecret.body.includes(rotatedGameBAppSecret),
+      false,
+    );
+    const replayedClear = await mutate(
+      "DELETE",
+      "/v1/admin/games/game-b/identity-providers/wechat/secret",
+      {
+        revision: 6,
+        operationId: "clear-game-b-wechat",
+      },
+    );
+    assert.equal(replayedClear.statusCode, 200, replayedClear.body);
+    assert.equal(replayedClear.json().replayed, true);
+
     const clearedGameBAppId = await mutate(
       "PATCH",
-      "/v1/admin/games/game-b/integration",
+      "/v1/admin/games/game-b/identity-providers/wechat",
       {
-        wechatAppId: null,
-        wechatEndpoint:
-          "https://api.weixin.qq.com/sns/jscode2session",
-        wechatTimeoutMs: 2_000,
-        wechatBreakerThreshold: 4,
-        wechatBreakerOpenMs: 5_000,
-        sessionTtlSeconds: 7_200,
-        loginRateCapacity: 100,
-        loginRateRefillPerSecond: 100,
-        adminRateCapacity: 100,
-        adminRateRefillPerSecond: 100,
-        revision: 4,
+        enabled: false,
+        appId: null,
+        endpoint: providerEndpoint("wechat"),
+        timeoutMs: 2_000,
+        breakerThreshold: 4,
+        breakerOpenMs: 5_000,
+        revision: 7,
       },
     );
     assert.equal(clearedGameBAppId.statusCode, 200, clearedGameBAppId.body);

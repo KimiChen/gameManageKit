@@ -1,7 +1,9 @@
 # gameManageKit
 
-gameManageKit 是多游戏独立账号门户服务。一套进程通过 HTTP 提供登录、会话校验、
-角色足迹、选服目录和账号管理能力。同一微信身份在不同游戏中拥有相互隔离的账号。
+gameManageKit 是多游戏独立账号门户服务。一套进程通过 HTTP 提供微信、抖音和开发
+身份登录、会话校验、角色足迹、选服目录和账号管理能力。外部身份以
+`gameId + provider + providerAppId + subjectType + subject` 为命名空间；相同 subject
+不会跨游戏、Provider 或 AppID 串号。
 
 核心边界：
 
@@ -11,9 +13,9 @@ gameManageKit 是多游戏独立账号门户服务。一套进程通过 HTTP 提
 - Public、Internal/Admin 端点分监听面注册。
 - MySQL 是游戏、区服、接入参数和机器身份的唯一业务配置真源。
 
-运行时不读取游戏或区服 JSON，也不从环境变量读取每游戏微信、Service 或机器 Admin
-Secret。管理员保存配置后，当前实例立即失效缓存，其他实例在有界 TTL 内按数据库
-revision 刷新，无需人工重启。
+运行时不读取游戏或区服 JSON，也不从环境变量读取每游戏 Provider、Service 或机器
+Admin Secret。管理员保存配置后，当前实例立即失效对应 Provider 缓存，其他实例在
+有界 TTL 内按数据库 revision 刷新，无需人工重启。
 
 ## 本地启动
 
@@ -48,7 +50,8 @@ mTLS、VPN 与访问控制。`Origin` 校验是 CSRF 防护，不是首个操作
 1. 在 `/admin/` 创建首个管理员并登录。
 2. 创建草稿游戏项目。
 3. 配置目录设置和全部区服；没有区服也是合法状态。
-4. 在独立“接入配置”页面保存微信 AppID、调用参数和 AppSecret。
+4. 在独立“接入配置”页面配置微信和/或抖音 Provider，保存 AppID、调用参数和
+   AppSecret，再显式启用至少一个完整 Provider。
 5. 创建 Service 或机器 Admin 身份，安全保存只显示一次的 Secret。
 6. 游戏变为 `configured` 后，再按需要切换为 `enabled` 并允许客户端发现。
 
@@ -145,7 +148,7 @@ npm run mysql:docker:down
 
 冒烟测试必须使用尚未完成管理员引导的新数据库。它先通过
 `GET/POST /v1/admin/bootstrap` 创建一次性首管并取得会话，再只通过管理员 API 创建
-两个游戏、区服、微信接入和机器身份。它验证租户账号隔离、Service 越权拒绝、机器
+两个游戏、区服、Provider 接入和机器身份。它验证租户账号隔离、Service 越权拒绝、机器
 Admin 范围、Secret 摘要和无停机轮换。测试不依赖静态游戏文件或每游戏环境变量；
 命名卷会保留引导完成状态，再次测试前必须运行 `npm run mysql:docker:clean`。
 
@@ -155,6 +158,7 @@ Admin 范围、Secret 摘要和无停机轮换。测试不依赖静态游戏文�
 
 ```bash
 npm run build
+# 先摘流并停止全部 schema v4 实例
 node --env-file=.env.production dist/migrate.js
 node --env-file=.env.production dist/main.js
 ```
@@ -162,6 +166,14 @@ node --env-file=.env.production dist/main.js
 `.env.production` 由部署系统生成或挂载，不得提交到 Git。migration job 与服务进程
 必须指向同一数据库；不再需要游戏配置文件或每游戏 Secret 环境变量。容器也提供相同
 migration 入口：
+
+schema v5 会一次性迁移并删除旧 `accounts.openid/unionid` 与微信专用配置列，不能与
+仍会写旧结构的 v4 实例并行。执行前必须完成备份、摘流并确认全部 v4 写进程停止；在
+等价环境先验证升级与恢复。migration 账号除既有 DDL/DML 权限外，执行 v5 时还需要
+临时 `CREATE ROUTINE` 权限；过程使用 `SQL SECURITY INVOKER`，成功后会删除临时
+procedure。晚期 DDL 失败时会保留不含身份原文或 Secret 的阶段检查点；修复失败原因后
+直接重新执行同一 migration，它会从实际结构安全续跑，不得删除已回填的 Provider 或
+身份表。
 
 ```bash
 docker run --rm \
@@ -190,16 +202,17 @@ docker run --rm --env-file .env.production \
 生产环境还必须在应用外落实以下信任边界：
 
 - 应用与 MySQL 强制 TLS，应用账号使用最小权限。
-- 仅 gameManageKit 运行账号可以读取明文 `wechat_app_secret`；禁止任意导出、复制和
-  数据库管理权限。
+- 仅 gameManageKit 运行账号可以读取 `game_identity_providers.app_secret` 明文；禁止
+  任意导出、复制和数据库管理权限。
 - MySQL 数据盘、快照和备份加密，限制下载并记录访问审计。
 - 测试/开发环境不得直接恢复生产备份；脱敏副本必须删除 AppSecret。
 - 反向代理、WAF、APM、SQL/慢查询和错误追踪不得采集 Secret 路由请求体。
-- 定期在隔离环境演练恢复；疑似泄露后替换微信 AppSecret，并轮换全部机器 Secret。
+- 定期在隔离环境演练恢复；疑似泄露后替换对应 Provider AppSecret，并轮换全部机器
+  Secret。
 
-微信 AppSecret 按设计以明文保存在 MySQL，替换会覆盖旧值。Service 与机器 Admin
-Secret 由服务端生成，数据库只保存 SHA-256 摘要，明文仅在创建或轮换响应中显示一次。
-这两类 Secret 都不会通过 GET API 回显。
+微信和抖音 AppSecret 按设计以明文保存在 MySQL，替换会覆盖旧值；清除 Secret 会同时
+禁用对应 Provider。Service 与机器 Admin Secret 由服务端生成，数据库只保存 SHA-256
+摘要，明文仅在创建或轮换响应中显示一次。这两类 Secret 都不会通过 GET API 回显。
 
 ## 接口与运行规则
 
@@ -214,6 +227,17 @@ curl --fail http://127.0.0.1:2570/v1/games
 ```bash
 curl --fail http://127.0.0.1:2570/v1/games/example-game/areas
 ```
+
+微信与抖音分别使用固定服务端路由，客户端不能提交任意 Provider 名称：
+
+```text
+POST /v1/games/{gameId}/sessions/wechat
+POST /v1/games/{gameId}/sessions/douyin
+```
+
+请求均为 `code + serverId + deviceId?`，成功响应为
+`userId + accessToken + isNewAccount`。一次性 code 不重试；AppSecret、code、
+`session_key`、openid 和 unionid 不进入响应、日志、指标或审计原文。
 
 `/areas` 与登录共用一条准入规则：游戏必须 `configured + enabled`，区服必须
 `isOpen=true`、状态为 `smooth|busy`，且 `openTime` 已到。正常游戏没有可进入区服时
@@ -234,8 +258,9 @@ curl --fail \
 ```
 
 `SERVICE_SECRET` 应从受控 Secret Manager 注入调用进程，不要写入仓库或普通日志。
-指标只使用有界标签；请求日志会关联 `gameId`、`serviceId` 或 `operatorId`，并脱敏
-Authorization、Token、Cookie、密码和全部 Secret 字段。
+指标只使用有界标签，并按 `game_id + provider + outcome` 观察上游请求；AppID、subject
+和 code 永不作为标签。请求日志会关联 `gameId`、`serviceId` 或 `operatorId`，并脱敏
+Authorization、Token、Cookie、密码、登录身份值和全部 Secret 字段。
 
 HTTP 契约真源是 `openapi/openapi.yaml`。修改契约后执行：
 
