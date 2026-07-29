@@ -287,6 +287,62 @@ test("Provider 登录审计仅使用上游请求耗时元数据", async () => {
   assert.equal(auditParameters?.[15], 4);
 });
 
+test("登录审计写入失败时拒绝登录并记录有界失败指标", async () => {
+  const metrics = new MetricsRegistry(["game-a"]);
+  const database = {
+    pool: {
+      async execute() {
+        throw new Error("fixture login audit storage unavailable");
+      },
+    },
+  } as unknown as Database;
+  const login = new LoginService(
+    database,
+    {} as SessionService,
+    metrics,
+  );
+  const game = {
+    gameId: "game-a",
+    loginLimiter: { allow: () => true },
+    douyin: {
+      provider: "douyin",
+      async exchange() {
+        return {
+          ok: false,
+          reason: "timeout",
+          providerVersion: 7,
+          providerLatencyMs: 11,
+        } as const;
+      },
+    },
+  } as unknown as GameContext;
+
+  await assert.rejects(
+    login.loginDouyin(game, "one-time-code", {
+      rateKey: "fixture-rate-key",
+      ip: "192.0.2.1",
+      deviceId: "fixture-device",
+      requestId: "fixture-audit-failure",
+      serverId: 1,
+    }),
+    /fixture login audit storage unavailable/u,
+  );
+
+  const rendered = metrics.renderPrometheus(["game-a"]);
+  assert.match(
+    rendered,
+    /game_manage_kit_audit_write_failures_total\{game_id="game-a",audit_type="login"\} 1/u,
+  );
+  assert.match(
+    rendered,
+    /game_manage_kit_login_attempts_total\{game_id="game-a",outcome="timeout"\} 1/u,
+  );
+  assert.match(
+    rendered,
+    /game_manage_kit_identity_provider_requests_total\{game_id="game-a",provider="douyin",outcome="timeout"\} 1/u,
+  );
+});
+
 test("DirectoryService 使用当前游戏 TTL 并过滤目录外角色足迹", async () => {
   const servers = [
     {

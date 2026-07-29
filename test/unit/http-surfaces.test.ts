@@ -3,6 +3,7 @@ import test from "node:test";
 import type { AreaListResponse, LoginResponse } from "@gono/game-manage-kit-contract";
 import { buildApps, type GameManageKitServices } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
+import type { LoginResult } from "../../src/domain/account/login.js";
 import type { GameRuntimeRegistry } from "../../src/domain/game/resolver.js";
 import {
   authorizeAdminGame,
@@ -590,6 +591,145 @@ test("区服准入拒绝发生在 Provider 请求前并记录规范化审计", a
     reason: "SERVER_NOT_FOUND",
     requestIdType: "string",
   });
+});
+
+test("公开登录故障矩阵稳定映射 400/401/403/404/429/503", async (t) => {
+  const games = await gameRegistry();
+  const results = new Map<string, LoginResult>([
+    ["invalid-code", { ok: false, reason: "invalid_code" }],
+    ["banned-account", { ok: false, reason: "banned" }],
+    ["provider-rate-limited", { ok: false, reason: "rate_limited" }],
+    ["provider-disabled", { ok: false, reason: "unavailable" }],
+    ["provider-unconfigured", { ok: false, reason: "unavailable" }],
+    ["provider-timeout", { ok: false, reason: "timeout" }],
+    ["provider-circuit-open", { ok: false, reason: "circuit_open" }],
+    ["provider-invalid-credentials", {
+      ok: false,
+      reason: "invalid_credentials",
+    }],
+  ]);
+  let providerCalls = 0;
+  const apps = buildApps(config(), services(games, {
+    login: {
+      async loginWechat() {
+        return { ok: true, response: LOGIN };
+      },
+      async loginDouyin(_game, code) {
+        providerCalls += 1;
+        if (code === "session-issue-failure") {
+          throw new Error("fixture session issue sensitive detail");
+        }
+        if (code === "login-audit-write-failure") {
+          throw new Error("fixture login audit sensitive detail");
+        }
+        const result = results.get(code);
+        if (!result) {
+          throw new Error("未定义的故障矩阵 fixture");
+        }
+        return result;
+      },
+      async loginDev() {
+        return { ok: true, response: LOGIN };
+      },
+    },
+  }));
+  t.after(async () => {
+    await Promise.all([apps.publicApp.close(), apps.internalApp.close()]);
+  });
+
+  const invalidRequest = await apps.publicApp.inject({
+    method: "POST",
+    url: "/v1/games/game-a/sessions/douyin",
+    payload: { serverId: 1 },
+  });
+  assert.equal(invalidRequest.statusCode, 400, invalidRequest.body);
+  assert.equal(invalidRequest.json().code, "INVALID_REQUEST");
+  assert.equal(providerCalls, 0);
+
+  const missingServer = await apps.publicApp.inject({
+    method: "POST",
+    url: "/v1/games/game-a/sessions/douyin",
+    payload: { code: "must-not-reach-provider", serverId: 99 },
+  });
+  assert.equal(missingServer.statusCode, 404, missingServer.body);
+  assert.equal(missingServer.json().code, "SERVER_NOT_FOUND");
+  assert.equal(providerCalls, 0);
+
+  const cases = [
+    {
+      code: "invalid-code",
+      statusCode: 401,
+      errorCode: "AUTH_CODE_INVALID",
+    },
+    {
+      code: "banned-account",
+      statusCode: 403,
+      errorCode: "ACCOUNT_BANNED",
+    },
+    {
+      code: "provider-rate-limited",
+      statusCode: 429,
+      errorCode: "RATE_LIMITED",
+    },
+    {
+      code: "provider-disabled",
+      statusCode: 503,
+      errorCode: "PROVIDER_UNAVAILABLE",
+    },
+    {
+      code: "provider-unconfigured",
+      statusCode: 503,
+      errorCode: "PROVIDER_UNAVAILABLE",
+    },
+    {
+      code: "provider-timeout",
+      statusCode: 503,
+      errorCode: "PROVIDER_UNAVAILABLE",
+    },
+    {
+      code: "provider-circuit-open",
+      statusCode: 503,
+      errorCode: "PROVIDER_UNAVAILABLE",
+    },
+    {
+      code: "provider-invalid-credentials",
+      statusCode: 503,
+      errorCode: "PROVIDER_CONFIGURATION_INVALID",
+    },
+  ] as const;
+  for (const current of cases) {
+    const response = await apps.publicApp.inject({
+      method: "POST",
+      url: "/v1/games/game-a/sessions/douyin",
+      payload: { code: current.code, serverId: 1 },
+    });
+    assert.equal(response.statusCode, current.statusCode, current.code);
+    assert.deepEqual(Object.keys(response.json()).sort(), [
+      "code",
+      "requestId",
+    ]);
+    assert.equal(response.json().code, current.errorCode, current.code);
+    assert.equal(typeof response.json().requestId, "string", current.code);
+  }
+
+  for (const code of [
+    "session-issue-failure",
+    "login-audit-write-failure",
+  ]) {
+    const response = await apps.publicApp.inject({
+      method: "POST",
+      url: "/v1/games/game-a/sessions/douyin",
+      payload: { code, serverId: 1 },
+    });
+    assert.equal(response.statusCode, 500, code);
+    assert.deepEqual(Object.keys(response.json()).sort(), [
+      "code",
+      "requestId",
+    ]);
+    assert.equal(response.json().code, "INTERNAL", code);
+    assert.equal(response.body.includes("sensitive detail"), false, code);
+  }
+  assert.equal(providerCalls, cases.length + 2);
 });
 
 test("/readyz 将未就绪和检查异常都映射为 503", async (t) => {
