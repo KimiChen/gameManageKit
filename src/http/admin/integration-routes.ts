@@ -6,9 +6,12 @@ import type {
 import {
   type GameIntegration,
   GameManageKitPath,
-  type ReplaceWechatAppSecretRequest,
+  type ClearIdentityProviderSecretRequest,
+  type IdentityProvider,
+  type IdentityProviderSecretWriteResponse,
+  type ReplaceIdentityProviderSecretRequest,
   type UpdateGameIntegrationRequest,
-  type WechatSecretWriteResponse,
+  type UpdateIdentityProviderRequest,
 } from "@gono/game-manage-kit-contract";
 import type { GameManageKitConfig } from "../../config.js";
 import type {
@@ -46,12 +49,17 @@ export interface AdminIntegrationRouteServices {
   >;
   readonly integrations: Pick<
     GameIntegrationService,
-    "get" | "update" | "replaceWechatSecret"
+    "get" | "updateShared" | "updateProvider"
+    | "replaceProviderSecret" | "clearProviderSecret"
   >;
 }
 
 interface GameParams {
   readonly gameId: string;
+}
+
+interface IdentityProviderParams extends GameParams {
+  readonly provider: IdentityProvider;
 }
 
 interface AuthorizedAdmin {
@@ -65,6 +73,16 @@ const noStoreHook = async (
 ): Promise<void> => {
   void reply.header("cache-control", "no-store");
 };
+
+const identityProviderParamsSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["gameId", "provider"],
+  properties: {
+    gameId: schemaRef("GameId"),
+    provider: schemaRef("IdentityProvider"),
+  },
+} as const;
 
 async function authorize(
   request: FastifyRequest,
@@ -183,7 +201,7 @@ export function registerAdminIntegrationRoutes(
     async (request, reply): Promise<GameIntegration> => {
       const auth = await authorize(request, reply, config, services, true);
       requireMutationCapacity(request, auth.identity);
-      return services.integrations.update(
+      return services.integrations.updateShared(
         request.params.gameId,
         request.body,
         configurationAuthorization(request, auth, services),
@@ -191,27 +209,90 @@ export function registerAdminIntegrationRoutes(
     },
   );
 
-  app.put<{
-    Params: GameParams;
-    Body: ReplaceWechatAppSecretRequest;
+  app.patch<{
+    Params: IdentityProviderParams;
+    Body: UpdateIdentityProviderRequest;
   }>(
-    fastifyPath(GameManageKitPath.ReplaceAdminWechatAppSecret),
+    fastifyPath(GameManageKitPath.UpdateAdminIdentityProvider),
     {
       onRequest: noStoreHook,
       schema: {
-        params: gameParamsSchema,
-        body: schemaRef("ReplaceWechatAppSecretRequest"),
+        params: identityProviderParamsSchema,
+        body: schemaRef("UpdateIdentityProviderRequest"),
         response: {
-          200: schemaRef("WechatSecretWriteResponse"),
+          200: schemaRef("GameIntegration"),
           ...errorResponseSchemas,
         },
       },
     },
-    async (request, reply): Promise<WechatSecretWriteResponse> => {
+    async (request, reply): Promise<GameIntegration> => {
       const auth = await authorize(request, reply, config, services, true);
       requireMutationCapacity(request, auth.identity);
-      return services.integrations.replaceWechatSecret(
+      return services.integrations.updateProvider(
         request.params.gameId,
+        request.params.provider,
+        request.body,
+        configurationAuthorization(request, auth, services),
+      );
+    },
+  );
+
+  app.put<{
+    Params: IdentityProviderParams;
+    Body: ReplaceIdentityProviderSecretRequest;
+  }>(
+    fastifyPath(GameManageKitPath.ReplaceAdminIdentityProviderSecret),
+    {
+      onRequest: noStoreHook,
+      schema: {
+        params: identityProviderParamsSchema,
+        body: schemaRef("ReplaceIdentityProviderSecretRequest"),
+        response: {
+          200: schemaRef("IdentityProviderSecretWriteResponse"),
+          ...errorResponseSchemas,
+        },
+      },
+    },
+    async (
+      request,
+      reply,
+    ): Promise<IdentityProviderSecretWriteResponse> => {
+      const auth = await authorize(request, reply, config, services, true);
+      requireMutationCapacity(request, auth.identity);
+      return services.integrations.replaceProviderSecret(
+        request.params.gameId,
+        request.params.provider,
+        request.body,
+        configurationAuthorization(request, auth, services),
+      );
+    },
+  );
+
+  app.delete<{
+    Params: IdentityProviderParams;
+    Body: ClearIdentityProviderSecretRequest;
+  }>(
+    fastifyPath(GameManageKitPath.ClearAdminIdentityProviderSecret),
+    {
+      onRequest: noStoreHook,
+      schema: {
+        params: identityProviderParamsSchema,
+        body: schemaRef("ClearIdentityProviderSecretRequest"),
+        response: {
+          200: schemaRef("IdentityProviderSecretWriteResponse"),
+          ...errorResponseSchemas,
+        },
+      },
+    },
+    async (
+      request,
+      reply,
+    ): Promise<IdentityProviderSecretWriteResponse> => {
+      const auth = await authorize(request, reply, config, services, true);
+      requireMutationCapacity(request, auth.identity);
+      return services.integrations.clearProviderSecret(
+        request.params.gameId,
+        request.params.provider,
         request.body,
         configurationAuthorization(request, auth, services),
       );

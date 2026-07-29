@@ -121,11 +121,17 @@ export interface ConfigurationAuditRecord {
     | "secret";
   readonly operatorId: string;
   readonly gameId: string | null;
+  readonly provider: "wechat" | "douyin" | null;
   readonly identityId: string | null;
   readonly action: string;
   readonly result: string;
   readonly oldVersion: number | null;
   readonly newVersion: number | null;
+  readonly revision: number | null;
+  readonly requestId: string | null;
+  readonly operationId: string | null;
+  readonly beforeMetadata: Readonly<Record<string, unknown>> | null;
+  readonly afterMetadata: Readonly<Record<string, unknown>> | null;
   readonly createdAt: string;
 }
 
@@ -163,6 +169,7 @@ interface SecretOperationRow extends RowDataPacket {
   readonly operation_id: string;
   readonly operator_id: string;
   readonly game_id: string | null;
+  readonly provider: string | null;
   readonly identity_id: string | null;
   readonly secret_kind: string;
   readonly action: string;
@@ -176,11 +183,17 @@ interface AuditRow extends RowDataPacket {
   readonly audit_type: string;
   readonly operator_id: string;
   readonly game_id: string | null;
+  readonly provider: string | null;
   readonly identity_id: string | null;
   readonly action: string;
   readonly result: string;
   readonly old_version: number | string | null;
   readonly new_version: number | string | null;
+  readonly revision: number | string | null;
+  readonly request_id: string | null;
+  readonly operation_id: string | null;
+  readonly before_data: unknown;
+  readonly after_data: unknown;
   readonly created_at: Date | string;
 }
 
@@ -230,10 +243,96 @@ function optionalIsoDate(value: Date | string | null): string | null {
   return value === null ? null : isoDate(value);
 }
 
+const FORBIDDEN_AUDIT_METADATA_KEYS = new Set([
+  "appSecret",
+  "app_secret",
+  "secret",
+  "secretDigest",
+  "secret_digest",
+  "password",
+  "token",
+  "accessToken",
+  "sessionKey",
+  "session_key",
+  "openid",
+  "unionid",
+  "subject",
+  "code",
+]);
+
+function safeAuditJson(
+  value: unknown,
+  depth = 0,
+): unknown {
+  if (
+    value === null
+    || typeof value === "string"
+    || typeof value === "boolean"
+  ) {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new Error("配置审计元数据包含非法数字");
+    }
+    return value;
+  }
+  if (depth >= 8) {
+    throw new Error("配置审计元数据嵌套过深");
+  }
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((item) => safeAuditJson(item, depth + 1)));
+  }
+  if (typeof value !== "object") {
+    throw new Error("配置审计元数据不是 JSON");
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (FORBIDDEN_AUDIT_METADATA_KEYS.has(key)) {
+      throw new Error("配置审计元数据包含敏感字段");
+    }
+    result[key] = safeAuditJson(item, depth + 1);
+  }
+  return Object.freeze(result);
+}
+
+function auditMetadata(
+  value: unknown,
+): Readonly<Record<string, unknown>> | null {
+  if (value === null) {
+    return null;
+  }
+  let parsed: unknown = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value) as unknown;
+    } catch {
+      throw new Error("配置审计元数据不是有效 JSON");
+    }
+  }
+  const sanitized = safeAuditJson(parsed);
+  if (
+    typeof sanitized !== "object"
+    || sanitized === null
+    || Array.isArray(sanitized)
+  ) {
+    throw new Error("配置审计元数据必须是对象");
+  }
+  return sanitized as Readonly<Record<string, unknown>>;
+}
+
 function positiveRevision(value: unknown): number {
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number < 1) {
     return invalidPayload();
+  }
+  return number;
+}
+
+function auditRevision(value: unknown): number {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 1) {
+    throw new Error("配置审计 revision 数据无效");
   }
   return number;
 }
@@ -926,8 +1025,11 @@ export class MachineIdentityService {
         `SELECT *
            FROM (
              SELECT CONCAT('s:', id) AS id, 'secret' AS audit_type,
-                    operator_id, game_id, identity_id, action, result,
-                    old_version, new_version, created_at
+                    operator_id, game_id, provider, identity_id,
+                    action, result,
+                    old_version, new_version, revision,
+                    request_id, operation_id,
+                    NULL AS before_data, NULL AS after_data, created_at
                FROM admin_secret_audit
               WHERE (
                 ? IS NULL
@@ -943,9 +1045,12 @@ export class MachineIdentityService {
              UNION ALL
              SELECT CONCAT('m:', id) AS id,
                     'machine_identity' AS audit_type,
-                    operator_id, NULL AS game_id, identity_id, action,
+                    operator_id, NULL AS game_id, NULL AS provider,
+                    identity_id, action,
                     'succeeded' AS result, NULL AS old_version,
-                    NULL AS new_version, created_at
+                    NULL AS new_version, NULL AS revision,
+                    NULL AS request_id, NULL AS operation_id,
+                    before_data, after_data, created_at
                FROM admin_machine_identity_audit
               WHERE (
                 ? IS NULL
@@ -960,9 +1065,11 @@ export class MachineIdentityService {
              UNION ALL
              SELECT CONCAT('g:', id) AS id,
                     'game_configuration' AS audit_type,
-                    operator_id, game_id, NULL AS identity_id, action,
-                    'succeeded' AS result, NULL AS old_version,
-                    NULL AS new_version, created_at
+                    operator_id, game_id, provider,
+                    NULL AS identity_id, action,
+                    result, NULL AS old_version, NULL AS new_version,
+                    revision, request_id, NULL AS operation_id,
+                    before_data, after_data, created_at
                FROM admin_game_audit
               WHERE (? IS NULL OR game_id = ?)
            ) AS audit
@@ -985,6 +1092,9 @@ export class MachineIdentityService {
           auditType: row.audit_type as ConfigurationAuditRecord["auditType"],
           operatorId: String(row.operator_id),
           gameId: row.game_id === null ? null : String(row.game_id),
+          provider: row.provider === "wechat" || row.provider === "douyin"
+            ? row.provider as "wechat" | "douyin"
+            : null,
           identityId: row.identity_id === null
             ? null
             : String(row.identity_id),
@@ -996,6 +1106,17 @@ export class MachineIdentityService {
           newVersion: row.new_version === null
             ? null
             : Number(row.new_version),
+          revision: row.revision === null
+            ? null
+            : auditRevision(row.revision),
+          requestId: row.request_id === null
+            ? null
+            : String(row.request_id),
+          operationId: row.operation_id === null
+            ? null
+            : String(row.operation_id),
+          beforeMetadata: auditMetadata(row.before_data),
+          afterMetadata: auditMetadata(row.after_data),
           createdAt: isoDate(row.created_at),
         }))),
       });

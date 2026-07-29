@@ -753,7 +753,8 @@
                 <p class="wsk-panel-title">INTEGRATION CONTROL</p>
                 <h1 tabindex="-1">接入配置</h1>
                 <p>
-                  维护微信、运行参数和机器身份。Secret 只可替换或一次性领取。
+                  维护微信与抖音 Provider、共享运行参数和机器身份。Secret
+                  只可替换、清除或一次性领取。
                 </p>
               </div>
               <div class="gmk-config-toolbar">
@@ -824,7 +825,7 @@
                     </p>
                   </div>
                   <div class="gmk-completeness-score">
-                    <strong id="configuration-completeness-score">0 / 4</strong>
+                    <strong id="configuration-completeness-score">0 / 5</strong>
                     <span class="wsk-badge" id="configuration-state-badge">
                       读取中
                     </span>
@@ -833,6 +834,12 @@
                   <p class="wsk-help" id="configuration-loaded-revision"></p>
                 </div>
 
+                <div
+                  class="gmk-provider-grid"
+                  id="identity-provider-cards"
+                  aria-label="身份 Provider 配置"
+                ></div>
+
                 <form
                   class="wsk-panel gmk-config-form"
                   id="integration-form"
@@ -840,90 +847,14 @@
                 >
                   <div class="wsk-section-head">
                     <div>
-                      <h2>微信与运行参数</h2>
+                      <h2>共享运行参数</h2>
                       <p class="wsk-help">
-                        保存普通参数不会读取或改写已有 AppSecret。
+                        这些参数由微信和抖音登录共享，不读取或改写任何 AppSecret。
                       </p>
                     </div>
-                    <span class="wsk-badge" id="wechat-secret-status-badge">
-                      未配置
-                    </span>
                   </div>
 
                   <div class="gmk-config-grid">
-                    <div class="wsk-field">
-                      <label class="wsk-label" for="integration-wechat-app-id">
-                        微信 AppID
-                      </label>
-                      <input
-                        class="wsk-control"
-                        id="integration-wechat-app-id"
-                        name="wechatAppId"
-                        type="text"
-                        maxlength="128"
-                        autocapitalize="none"
-                        spellcheck="false"
-                        placeholder="wx…"
-                      />
-                    </div>
-                    <div class="wsk-field gmk-config-span-two">
-                      <label class="wsk-label" for="integration-wechat-endpoint">
-                        微信接口地址
-                      </label>
-                      <input
-                        class="wsk-control"
-                        id="integration-wechat-endpoint"
-                        name="wechatEndpoint"
-                        type="url"
-                        maxlength="2048"
-                        required
-                      />
-                    </div>
-                    <div class="wsk-field">
-                      <label class="wsk-label" for="integration-wechat-timeout">
-                        微信超时（毫秒）
-                      </label>
-                      <input
-                        class="wsk-control"
-                        id="integration-wechat-timeout"
-                        name="wechatTimeoutMs"
-                        type="number"
-                        min="100"
-                        max="30000"
-                        step="1"
-                        required
-                      />
-                    </div>
-                    <div class="wsk-field">
-                      <label class="wsk-label" for="integration-breaker-threshold">
-                        熔断失败阈值
-                      </label>
-                      <input
-                        class="wsk-control"
-                        id="integration-breaker-threshold"
-                        name="wechatBreakerThreshold"
-                        type="number"
-                        min="1"
-                        max="1000"
-                        step="1"
-                        required
-                      />
-                    </div>
-                    <div class="wsk-field">
-                      <label class="wsk-label" for="integration-breaker-open">
-                        熔断开启时长（毫秒）
-                      </label>
-                      <input
-                        class="wsk-control"
-                        id="integration-breaker-open"
-                        name="wechatBreakerOpenMs"
-                        type="number"
-                        min="100"
-                        max="600000"
-                        step="1"
-                        required
-                      />
-                    </div>
                     <div class="wsk-field">
                       <label class="wsk-label" for="integration-session-ttl">
                         会话 TTL（秒）
@@ -1036,13 +967,6 @@
                   </div>
 
                   <div class="gmk-config-actions">
-                    <button
-                      class="wsk-button wsk-secondary"
-                      id="wechat-secret-replace"
-                      type="button"
-                    >
-                      替换 AppSecret
-                    </button>
                     <button class="wsk-button" id="integration-save" type="submit">
                       <span
                         class="wsk-spinner"
@@ -1721,18 +1645,18 @@
 
     <dialog
       class="wsk-dialog"
-      id="wechat-secret-dialog"
-      aria-labelledby="wechat-secret-dialog-title"
+      id="provider-secret-dialog"
+      aria-labelledby="provider-secret-dialog-title"
     >
-      <form id="wechat-secret-form" autocomplete="off">
+      <form id="provider-secret-form" autocomplete="off">
         <div class="wsk-dialog-head">
           <div>
             <p class="wsk-panel-title">REPLACE CREDENTIAL</p>
-            <h2 id="wechat-secret-dialog-title">替换微信 AppSecret</h2>
+            <h2 id="provider-secret-dialog-title">替换 Provider AppSecret</h2>
           </div>
           <button
             class="wsk-icon-button"
-            id="wechat-secret-close"
+            id="provider-secret-close"
             type="button"
             aria-label="关闭 AppSecret 窗口"
           >
@@ -1747,18 +1671,18 @@
             <div>
               <strong>旧值将立即被覆盖</strong>
               <p>
-                保存仅表示 gameManageKit 已写入凭据，不代表微信侧已经验证成功。
+                保存仅表示 gameManageKit 已写入凭据，不代表 Provider 已验证成功。
               </p>
             </div>
           </div>
           <div class="wsk-field">
-            <label class="wsk-label" for="wechat-secret-input">
+            <label class="wsk-label" for="provider-secret-input">
               新 AppSecret
             </label>
             <div class="wsk-input-wrap">
               <input
                 class="wsk-control"
-                id="wechat-secret-input"
+                id="provider-secret-input"
                 type="password"
                 autocomplete="new-password"
                 minlength="1"
@@ -1767,9 +1691,9 @@
               />
               <button
                 class="wsk-icon-button"
-                id="wechat-secret-toggle"
+                id="provider-secret-toggle"
                 type="button"
-                aria-controls="wechat-secret-input"
+                aria-controls="provider-secret-input"
                 aria-label="显示 AppSecret"
                 aria-pressed="false"
               >
@@ -1784,7 +1708,7 @@
           </div>
           <div
             class="wsk-alert wsk-danger"
-            id="wechat-secret-error"
+            id="provider-secret-error"
             role="alert"
             tabindex="-1"
             hidden
@@ -1794,21 +1718,28 @@
             </svg>
             <div>
               <strong>AppSecret 未保存</strong>
-              <p id="wechat-secret-error-message"></p>
+              <p id="provider-secret-error-message"></p>
             </div>
           </div>
         </div>
         <div class="wsk-dialog-foot">
           <button
             class="wsk-button wsk-secondary"
-            id="wechat-secret-cancel"
+            id="provider-secret-cancel"
             type="button"
           >
             取消
           </button>
           <button
+            class="wsk-button wsk-secondary"
+            id="provider-secret-clear"
+            type="button"
+          >
+            清除并禁用
+          </button>
+          <button
             class="wsk-button wsk-danger"
-            id="wechat-secret-submit"
+            id="provider-secret-submit"
             type="submit"
           >
             <span

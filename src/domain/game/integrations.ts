@@ -1,15 +1,41 @@
 import type {
+  ClearIdentityProviderSecretRequest,
+  GameConfigurationState,
+  GameIntegration,
+  IdentityProvider,
+  IdentityProviderConfiguration,
+  IdentityProviderSecretMetadata,
+  IdentityProviderSecretWriteResponse,
+  IdentityProviderValidationState,
+  ReplaceIdentityProviderSecretRequest,
+  UpdateGameIntegrationRequest,
+  UpdateIdentityProviderRequest,
+} from "@gono/game-manage-kit-contract";
+import type {
   Pool,
   PoolConnection,
   ResultSetHeader,
   RowDataPacket,
 } from "mysql2/promise";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { GameManageKitError } from "../../errors.js";
+import type { MetricsRegistry } from "../../infra/observability/metrics.js";
 import { normalizeIp } from "../../infra/security/security.js";
 import { GAME_ID_PATTERN } from "./resolver.js";
 
-export type GameConfigurationState = "draft" | "configured";
 export type ConfigurationAuthorizationKind = "read" | "write" | "secret";
+export type {
+  ClearIdentityProviderSecretRequest,
+  GameConfigurationState,
+  GameIntegration,
+  IdentityProvider,
+  IdentityProviderConfiguration,
+  IdentityProviderSecretMetadata,
+  IdentityProviderSecretWriteResponse,
+  ReplaceIdentityProviderSecretRequest,
+  UpdateGameIntegrationRequest,
+  UpdateIdentityProviderRequest,
+};
 
 export interface ConfigurationAuthorization {
   readonly operatorId: string;
@@ -29,80 +55,18 @@ export interface GameIntegrationDatabase {
 }
 
 export interface GameIntegrationRuntime {
-  invalidate(gameId: string): void;
+  invalidate(
+    gameId: string,
+    provider?: IdentityProvider | null,
+  ): void;
   loadedRevision(
     gameId: string,
   ): Readonly<{ integration: number }> | null;
 }
 
-export interface WechatSecretMetadata {
-  readonly configured: boolean;
-  readonly version: number;
-  readonly state: "active" | "missing" | "validation_failed";
-  readonly updatedAt: string | null;
-}
-
-export interface GameIntegration {
-  readonly gameId: string;
-  readonly configurationState: GameConfigurationState;
-  readonly wechatAppId: string | null;
-  readonly wechatSecret: WechatSecretMetadata;
-  readonly wechatEndpoint: string;
-  readonly wechatTimeoutMs: number;
-  readonly wechatBreakerThreshold: number;
-  readonly wechatBreakerOpenMs: number;
-  readonly sessionTtlSeconds: number;
-  readonly loginRateCapacity: number;
-  readonly loginRateRefillPerSecond: number;
-  readonly adminRateCapacity: number;
-  readonly adminRateRefillPerSecond: number;
-  readonly revision: number;
-  readonly loadedRevision: number | null;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
-
-export interface UpdateGameIntegrationInput {
-  readonly wechatAppId: string | null;
-  readonly wechatEndpoint: string;
-  readonly wechatTimeoutMs: number;
-  readonly wechatBreakerThreshold: number;
-  readonly wechatBreakerOpenMs: number;
-  readonly sessionTtlSeconds: number;
-  readonly loginRateCapacity: number;
-  readonly loginRateRefillPerSecond: number;
-  readonly adminRateCapacity: number;
-  readonly adminRateRefillPerSecond: number;
-  readonly revision: number;
-}
-
-export interface ReplaceWechatSecretInput {
-  readonly wechatAppSecret: string;
-  readonly revision: number;
-  readonly operationId: string;
-}
-
-export interface WechatSecretWriteResult {
-  readonly gameId: string;
-  readonly configurationState: GameConfigurationState;
-  readonly wechatSecret: WechatSecretMetadata;
-  readonly revision: number;
-  readonly loadedRevision: number | null;
-  readonly replayed: boolean;
-}
-
 interface IntegrationRow extends RowDataPacket {
   readonly game_id: string;
   readonly configuration_state: string;
-  readonly wechat_app_id: string | null;
-  readonly wechat_secret_configured: number | boolean | string;
-  readonly wechat_secret_version: number | string;
-  readonly wechat_secret_updated_at: Date | string | null;
-  readonly wechat_validation_failed_at: Date | string | null;
-  readonly wechat_endpoint: string;
-  readonly wechat_timeout_ms: number | string;
-  readonly wechat_breaker_threshold: number | string;
-  readonly wechat_breaker_open_ms: number | string;
   readonly session_ttl_seconds: number | string;
   readonly login_rate_capacity: number | string;
   readonly login_rate_refill_per_second: number | string;
@@ -113,43 +77,106 @@ interface IntegrationRow extends RowDataPacket {
   readonly updated_at: Date | string;
 }
 
-interface GameStateRow extends RowDataPacket {
+interface ProviderRow extends RowDataPacket {
   readonly game_id: string;
-  readonly configuration_state: string;
+  readonly provider: string;
+  readonly enabled: number | boolean | string;
+  readonly app_id: string | null;
+  readonly secret_configured: number | boolean | string;
+  readonly secret_version: number | string;
+  readonly secret_updated_at: Date | string | null;
+  readonly endpoint: string;
+  readonly timeout_ms: number | string;
+  readonly breaker_threshold: number | string;
+  readonly breaker_open_ms: number | string;
+  readonly validation_state: string;
+  readonly validation_failed_at: Date | string | null;
+  readonly validation_error_code: string | null;
+  readonly updated_by: string | null;
+  readonly updated_at: Date | string;
 }
 
 interface SecretOperationRow extends RowDataPacket {
   readonly operation_id: string;
   readonly operator_id: string;
   readonly game_id: string | null;
+  readonly provider: string | null;
   readonly identity_id: string | null;
   readonly secret_kind: string;
   readonly action: string;
   readonly old_version: number | string | null;
   readonly new_version: number | string | null;
+  readonly revision: number | string | null;
+  readonly request_digest: Uint8Array | null;
+  readonly result_configuration_state: string | null;
+  readonly result_revision: number | string | null;
+  readonly result_secret_updated_at: Date | string | null;
   readonly created_at: Date | string;
 }
 
-const OPERATION_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/u;
+type ProviderSecretAction = "set" | "rotate" | "clear";
+type ProviderConfigurationAction =
+  | "identity_provider_update"
+  | "identity_provider_enable"
+  | "identity_provider_disable";
+type SecretMutation =
+  | Readonly<{
+      kind: "replace";
+      input: ReplaceIdentityProviderSecretRequest;
+    }>
+  | Readonly<{
+      kind: "clear";
+      input: ClearIdentityProviderSecretRequest;
+    }>;
+
+const IDENTITY_PROVIDERS = Object.freeze([
+  "wechat",
+  "douyin",
+] as const satisfies readonly IdentityProvider[]);
+const IDENTITY_PROVIDER_SET = new Set<IdentityProvider>(
+  IDENTITY_PROVIDERS,
+);
+const VALIDATION_STATES = new Set<IdentityProviderValidationState>([
+  "unvalidated",
+  "active",
+  "validation_failed",
+]);
 const CONFIGURATION_STATES = new Set<GameConfigurationState>([
   "draft",
   "configured",
 ]);
+const OPERATION_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/u;
+const OFFICIAL_ENDPOINTS: Readonly<Record<IdentityProvider, Readonly<{
+  hostname: string;
+  pathname: string;
+}>>> = Object.freeze({
+  wechat: Object.freeze({
+    hostname: "api.weixin.qq.com",
+    pathname: "/sns/jscode2session",
+  }),
+  douyin: Object.freeze({
+    hostname: "minigame.zijieapi.com",
+    pathname: "/mgplatform/api/apps/jscode2session",
+  }),
+});
 
 const SELECT_INTEGRATION = `
   SELECT g.game_id, g.configuration_state,
-         i.wechat_app_id,
-         (i.wechat_app_secret IS NOT NULL) AS wechat_secret_configured,
-         i.wechat_secret_version, i.wechat_secret_updated_at,
-         i.wechat_validation_failed_at,
-         i.wechat_endpoint, i.wechat_timeout_ms,
-         i.wechat_breaker_threshold, i.wechat_breaker_open_ms,
          i.session_ttl_seconds, i.login_rate_capacity,
          i.login_rate_refill_per_second, i.admin_rate_capacity,
          i.admin_rate_refill_per_second, i.revision,
          i.created_at, i.updated_at
     FROM games AS g
     JOIN game_integrations AS i ON i.game_id = g.game_id`;
+
+const SELECT_PROVIDERS = `
+  SELECT game_id, provider, enabled, app_id,
+         (app_secret IS NOT NULL) AS secret_configured,
+         secret_version, secret_updated_at, endpoint, timeout_ms,
+         breaker_threshold, breaker_open_ms, validation_state,
+         validation_failed_at, validation_error_code,
+         updated_by, updated_at
+    FROM game_identity_providers`;
 
 function invalidPayload(): never {
   throw new GameManageKitError(400, "INVALID_PAYLOAD");
@@ -177,7 +204,7 @@ function optionalIsoDate(value: Date | string | null): string | null {
   return value === null ? null : isoDate(value);
 }
 
-function safeInteger(
+function inputInteger(
   value: unknown,
   minimum: number,
   maximum: number,
@@ -193,18 +220,50 @@ function safeInteger(
   return number;
 }
 
-function positiveNumber(
+function rowInteger(
   value: unknown,
-  maximum = 1_000_000,
+  minimum: number,
+  maximum: number,
+  label: string,
 ): number {
   const number = Number(value);
-  if (!Number.isFinite(number) || number <= 0 || number > maximum) {
+  if (
+    !Number.isSafeInteger(number)
+    || number < minimum
+    || number > maximum
+  ) {
+    throw new Error(`${label} 数据无效`);
+  }
+  return number;
+}
+
+function inputPositiveNumber(value: unknown): number {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0 || number > 1_000_000) {
     return invalidPayload();
   }
   return number;
 }
 
-function normalizedAppId(value: string | null): string | null {
+function rowPositiveNumber(value: unknown, label: string): number {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0 || number > 1_000_000) {
+    throw new Error(`${label} 数据无效`);
+  }
+  return number;
+}
+
+function normalizedProvider(value: unknown): IdentityProvider {
+  if (
+    typeof value !== "string"
+    || !IDENTITY_PROVIDER_SET.has(value as IdentityProvider)
+  ) {
+    return invalidPayload();
+  }
+  return value as IdentityProvider;
+}
+
+function normalizedAppId(value: unknown): string | null {
   if (value === null) {
     return null;
   }
@@ -220,7 +279,11 @@ function normalizedAppId(value: string | null): string | null {
   return value;
 }
 
-function normalizedEndpoint(raw: string, production: boolean): string {
+function normalizedEndpoint(
+  raw: unknown,
+  provider: IdentityProvider,
+  production: boolean,
+): string {
   if (
     typeof raw !== "string"
     || raw !== raw.trim()
@@ -235,16 +298,22 @@ function normalizedEndpoint(raw: string, production: boolean): string {
   } catch {
     return invalidPayload();
   }
-  if (parsed.username || parsed.password || parsed.hash) {
+  if (
+    parsed.username
+    || parsed.password
+    || parsed.hash
+    || parsed.search
+  ) {
     return invalidPayload();
   }
-  const officialWechatEndpoint = parsed.protocol === "https:"
-    && parsed.hostname === "api.weixin.qq.com"
+  const official = OFFICIAL_ENDPOINTS[provider];
+  if (
+    parsed.protocol === "https:"
+    && parsed.hostname === official.hostname
     && parsed.port === ""
-    && parsed.pathname === "/sns/jscode2session"
-    && parsed.search === "";
-  if (officialWechatEndpoint) {
-    return raw;
+    && parsed.pathname === official.pathname
+  ) {
+    return `https://${official.hostname}${official.pathname}`;
   }
   const loopback = parsed.hostname === "localhost"
     || parsed.hostname === "127.0.0.1"
@@ -260,108 +329,270 @@ function normalizedEndpoint(raw: string, production: boolean): string {
   return raw;
 }
 
-function secretMetadataFromRow(row: IntegrationRow): WechatSecretMetadata {
-  const configured = Number(row.wechat_secret_configured) === 1;
-  const version = Number(row.wechat_secret_version);
-  if (!Number.isSafeInteger(version) || version < 0) {
-    throw new Error("微信 Secret 版本数据无效");
+function sharedInput(
+  input: UpdateGameIntegrationRequest,
+): UpdateGameIntegrationRequest {
+  if (!input || typeof input !== "object") {
+    return invalidPayload();
+  }
+  return Object.freeze({
+    sessionTtlSeconds: inputInteger(
+      input.sessionTtlSeconds,
+      60,
+      31_536_000,
+    ),
+    loginRateCapacity: inputPositiveNumber(input.loginRateCapacity),
+    loginRateRefillPerSecond: inputPositiveNumber(
+      input.loginRateRefillPerSecond,
+    ),
+    adminRateCapacity: inputPositiveNumber(input.adminRateCapacity),
+    adminRateRefillPerSecond: inputPositiveNumber(
+      input.adminRateRefillPerSecond,
+    ),
+    revision: inputInteger(input.revision, 1, Number.MAX_SAFE_INTEGER),
+  });
+}
+
+function providerInput(
+  input: UpdateIdentityProviderRequest,
+  provider: IdentityProvider,
+  production: boolean,
+): UpdateIdentityProviderRequest {
+  if (!input || typeof input !== "object" || typeof input.enabled !== "boolean") {
+    return invalidPayload();
+  }
+  const appId = normalizedAppId(input.appId);
+  if (appId === "local") {
+    return invalidPayload();
+  }
+  return Object.freeze({
+    enabled: input.enabled,
+    appId,
+    endpoint: normalizedEndpoint(input.endpoint, provider, production),
+    timeoutMs: inputInteger(input.timeoutMs, 100, 30_000),
+    breakerThreshold: inputInteger(input.breakerThreshold, 1, 1_000),
+    breakerOpenMs: inputInteger(input.breakerOpenMs, 100, 600_000),
+    revision: inputInteger(input.revision, 1, Number.MAX_SAFE_INTEGER),
+  });
+}
+
+function secretInput(
+  input: ReplaceIdentityProviderSecretRequest,
+): ReplaceIdentityProviderSecretRequest {
+  if (
+    !input
+    || typeof input !== "object"
+    || typeof input.appSecret !== "string"
+    || input.appSecret.length < 1
+    || input.appSecret.length > 512
+    || typeof input.operationId !== "string"
+    || !OPERATION_ID_PATTERN.test(input.operationId)
+  ) {
+    return invalidPayload();
+  }
+  return Object.freeze({
+    appSecret: input.appSecret,
+    revision: inputInteger(input.revision, 1, Number.MAX_SAFE_INTEGER),
+    operationId: input.operationId,
+  });
+}
+
+function clearInput(
+  input: ClearIdentityProviderSecretRequest,
+): ClearIdentityProviderSecretRequest {
+  if (
+    !input
+    || typeof input !== "object"
+    || typeof input.operationId !== "string"
+    || !OPERATION_ID_PATTERN.test(input.operationId)
+  ) {
+    return invalidPayload();
+  }
+  return Object.freeze({
+    revision: inputInteger(input.revision, 1, Number.MAX_SAFE_INTEGER),
+    operationId: input.operationId,
+  });
+}
+
+function secretMetadataFromRow(
+  row: ProviderRow,
+): IdentityProviderSecretMetadata {
+  const configured = Number(row.secret_configured) === 1;
+  const version = rowInteger(
+    row.secret_version,
+    0,
+    Number.MAX_SAFE_INTEGER,
+    "Provider Secret 版本",
+  );
+  if (configured !== (version > 0)) {
+    throw new Error("Provider Secret 配置状态数据无效");
+  }
+  if (configured !== (row.secret_updated_at !== null)) {
+    throw new Error("Provider Secret 更新时间数据无效");
   }
   return Object.freeze({
     configured,
     version,
-    state: !configured
-      ? "missing"
-      : row.wechat_validation_failed_at === null
-        ? "active"
-        : "validation_failed",
-    updatedAt: optionalIsoDate(row.wechat_secret_updated_at),
+    updatedAt: row.secret_updated_at === null
+      ? null
+      : isoDate(row.secret_updated_at),
   });
 }
 
-function integrationFromRow(
+function secretMutationDigest(
+  gameId: string,
+  provider: IdentityProvider,
+  mutation: SecretMutation,
+): Buffer {
+  const digest = createHash("sha256");
+  digest.update(mutation.kind, "ascii");
+  digest.update("\0", "ascii");
+  digest.update(gameId, "ascii");
+  digest.update("\0", "ascii");
+  digest.update(provider, "ascii");
+  digest.update("\0", "ascii");
+  digest.update(String(mutation.input.revision), "ascii");
+  if (mutation.kind === "replace") {
+    digest.update("\0", "ascii");
+    digest.update(mutation.input.appSecret, "utf8");
+  }
+  return digest.digest();
+}
+
+function providerFromRow(row: ProviderRow): IdentityProviderConfiguration {
+  const provider = String(row.provider);
+  if (!IDENTITY_PROVIDER_SET.has(provider as IdentityProvider)) {
+    throw new Error("身份 Provider 数据无效");
+  }
+  const validationState = String(row.validation_state);
+  if (
+    !VALIDATION_STATES.has(
+      validationState as IdentityProviderValidationState,
+    )
+  ) {
+    throw new Error("Provider 验证状态数据无效");
+  }
+  const validationFailedAt = optionalIsoDate(row.validation_failed_at);
+  const validationErrorCode = row.validation_error_code === null
+    ? null
+    : String(row.validation_error_code);
+  const validFailureMetadata = validationState === "validation_failed"
+    ? validationFailedAt !== null && validationErrorCode !== null
+    : validationFailedAt === null && validationErrorCode === null;
+  if (!validFailureMetadata) {
+    throw new Error("Provider 验证失败元数据不一致");
+  }
+  const enabledValue = Number(row.enabled);
+  if (enabledValue !== 0 && enabledValue !== 1) {
+    throw new Error("Provider 启用状态数据无效");
+  }
+  return Object.freeze({
+    provider: provider as IdentityProvider,
+    enabled: enabledValue === 1,
+    appId: row.app_id === null ? null : String(row.app_id),
+    secretMetadata: secretMetadataFromRow(row),
+    endpoint: String(row.endpoint),
+    timeoutMs: rowInteger(row.timeout_ms, 100, 30_000, "Provider 超时"),
+    breakerThreshold: rowInteger(
+      row.breaker_threshold,
+      1,
+      1_000,
+      "Provider 熔断阈值",
+    ),
+    breakerOpenMs: rowInteger(
+      row.breaker_open_ms,
+      100,
+      600_000,
+      "Provider 熔断时长",
+    ),
+    validationState:
+      validationState as IdentityProviderValidationState,
+    validationFailedAt,
+    validationErrorCode,
+    updatedBy: row.updated_by === null ? null : String(row.updated_by),
+    updatedAt: isoDate(row.updated_at),
+  });
+}
+
+function integrationFromRows(
   row: IntegrationRow,
+  providerRows: readonly ProviderRow[],
   loadedRevision: number | null,
 ): GameIntegration {
   const configurationState = String(row.configuration_state);
   if (!CONFIGURATION_STATES.has(configurationState as GameConfigurationState)) {
     throw new Error("游戏配置状态数据无效");
   }
-  const revision = safeInteger(row.revision, 1, Number.MAX_SAFE_INTEGER);
+  const providers = providerRows.map(providerFromRow);
+  if (
+    providers.length !== IDENTITY_PROVIDERS.length
+    || providers.some(
+      (provider, index) => provider.provider !== IDENTITY_PROVIDERS[index],
+    )
+  ) {
+    throw new Error("游戏身份 Provider 白名单数据不完整");
+  }
   return Object.freeze({
     gameId: String(row.game_id),
     configurationState: configurationState as GameConfigurationState,
-    wechatAppId: row.wechat_app_id === null
-      ? null
-      : String(row.wechat_app_id),
-    wechatSecret: secretMetadataFromRow(row),
-    wechatEndpoint: String(row.wechat_endpoint),
-    wechatTimeoutMs: safeInteger(row.wechat_timeout_ms, 100, 30_000),
-    wechatBreakerThreshold: safeInteger(
-      row.wechat_breaker_threshold,
-      1,
-      1_000,
-    ),
-    wechatBreakerOpenMs: safeInteger(
-      row.wechat_breaker_open_ms,
-      100,
-      600_000,
-    ),
-    sessionTtlSeconds: safeInteger(
+    providers,
+    sessionTtlSeconds: rowInteger(
       row.session_ttl_seconds,
       60,
       31_536_000,
+      "Session TTL",
     ),
-    loginRateCapacity: positiveNumber(row.login_rate_capacity),
-    loginRateRefillPerSecond: positiveNumber(
+    loginRateCapacity: rowPositiveNumber(
+      row.login_rate_capacity,
+      "登录限流容量",
+    ),
+    loginRateRefillPerSecond: rowPositiveNumber(
       row.login_rate_refill_per_second,
+      "登录限流补充速率",
     ),
-    adminRateCapacity: positiveNumber(row.admin_rate_capacity),
-    adminRateRefillPerSecond: positiveNumber(
+    adminRateCapacity: rowPositiveNumber(
+      row.admin_rate_capacity,
+      "管理限流容量",
+    ),
+    adminRateRefillPerSecond: rowPositiveNumber(
       row.admin_rate_refill_per_second,
+      "管理限流补充速率",
     ),
-    revision,
+    revision: rowInteger(
+      row.revision,
+      1,
+      Number.MAX_SAFE_INTEGER,
+      "接入配置 revision",
+    ),
     loadedRevision,
     createdAt: isoDate(row.created_at),
     updatedAt: isoDate(row.updated_at),
   });
 }
 
-function normalizedUpdate(
-  input: UpdateGameIntegrationInput,
-  production: boolean,
-): UpdateGameIntegrationInput {
-  if (!input || typeof input !== "object") {
-    return invalidPayload();
+function providerConfiguration(
+  integration: GameIntegration,
+  provider: IdentityProvider,
+): IdentityProviderConfiguration {
+  const configuration = integration.providers.find(
+    (candidate) => candidate.provider === provider,
+  );
+  if (!configuration) {
+    throw new Error("游戏身份 Provider 白名单数据不完整");
   }
-  return Object.freeze({
-    wechatAppId: normalizedAppId(input.wechatAppId),
-    wechatEndpoint: normalizedEndpoint(input.wechatEndpoint, production),
-    wechatTimeoutMs: safeInteger(input.wechatTimeoutMs, 100, 30_000),
-    wechatBreakerThreshold: safeInteger(
-      input.wechatBreakerThreshold,
-      1,
-      1_000,
-    ),
-    wechatBreakerOpenMs: safeInteger(
-      input.wechatBreakerOpenMs,
-      100,
-      600_000,
-    ),
-    sessionTtlSeconds: safeInteger(
-      input.sessionTtlSeconds,
-      60,
-      31_536_000,
-    ),
-    loginRateCapacity: positiveNumber(input.loginRateCapacity),
-    loginRateRefillPerSecond: positiveNumber(
-      input.loginRateRefillPerSecond,
-    ),
-    adminRateCapacity: positiveNumber(input.adminRateCapacity),
-    adminRateRefillPerSecond: positiveNumber(
-      input.adminRateRefillPerSecond,
-    ),
-    revision: safeInteger(input.revision, 1, Number.MAX_SAFE_INTEGER),
-  });
+  return configuration;
+}
+
+function providerConfigurationAction(
+  currentEnabled: boolean,
+  requestedEnabled: boolean,
+): ProviderConfigurationAction {
+  if (currentEnabled === requestedEnabled) {
+    return "identity_provider_update";
+  }
+  return requestedEnabled
+    ? "identity_provider_enable"
+    : "identity_provider_disable";
 }
 
 export class GameIntegrationService {
@@ -369,6 +600,7 @@ export class GameIntegrationService {
     private readonly database: GameIntegrationDatabase,
     private readonly runtime: GameIntegrationRuntime,
     private readonly production: boolean,
+    private readonly metrics?: MetricsRegistry,
   ) {}
 
   async get(
@@ -382,180 +614,377 @@ export class GameIntegrationService {
     });
   }
 
-  async update(
+  async updateShared(
     gameId: string,
-    input: UpdateGameIntegrationInput,
+    input: UpdateGameIntegrationRequest,
     authorization: ConfigurationAuthorization,
   ): Promise<GameIntegration> {
     this.validateGameId(gameId);
-    const normalized = normalizedUpdate(input, this.production);
-    const result = await this.database.transaction(async (connection) => {
-      await authorization.authorize(connection, "write");
-      await this.requireGame(connection, gameId);
-      const current = await this.requireIntegration(
-        connection,
-        gameId,
-        true,
-      );
-      if (current.revision !== normalized.revision) {
-        throw new GameManageKitError(409, "GAME_PROJECT_CONFLICT");
-      }
-      const [updated] = await connection.execute<ResultSetHeader>(
-        `UPDATE game_integrations
-            SET wechat_app_id = ?,
-                wechat_endpoint = ?,
-                wechat_timeout_ms = ?,
-                wechat_breaker_threshold = ?,
-                wechat_breaker_open_ms = ?,
-                session_ttl_seconds = ?,
-                login_rate_capacity = ?,
-                login_rate_refill_per_second = ?,
-                admin_rate_capacity = ?,
-                admin_rate_refill_per_second = ?,
-                wechat_validation_failed_at = NULL,
-                revision = revision + 1
-          WHERE game_id = ? AND revision = ?`,
-        [
-          normalized.wechatAppId,
-          normalized.wechatEndpoint,
-          normalized.wechatTimeoutMs,
-          normalized.wechatBreakerThreshold,
-          normalized.wechatBreakerOpenMs,
-          normalized.sessionTtlSeconds,
-          normalized.loginRateCapacity,
-          normalized.loginRateRefillPerSecond,
-          normalized.adminRateCapacity,
-          normalized.adminRateRefillPerSecond,
-          gameId,
-          normalized.revision,
-        ],
-      );
-      if (updated.affectedRows !== 1) {
-        throw new GameManageKitError(409, "GAME_PROJECT_CONFLICT");
-      }
-      await this.reconcileConfigurationState(connection, gameId);
-      const integration = await this.requireIntegration(
-        connection,
-        gameId,
-        true,
-      );
-      await connection.execute(
-        `INSERT INTO admin_game_audit
-           (game_id, operator_id, action, before_data, after_data, ip)
-         VALUES (?, ?, 'integration_update', ?, ?, INET6_ATON(?))`,
-        [
-          gameId,
-          authorization.operatorId,
-          JSON.stringify(current),
-          JSON.stringify(integration),
-          normalizeIp(authorization.ip),
-        ],
-      );
-      return integration;
-    });
-    this.runtime.invalidate(gameId);
-    return result;
-  }
-
-  async replaceWechatSecret(
-    gameId: string,
-    input: ReplaceWechatSecretInput,
-    authorization: ConfigurationAuthorization,
-  ): Promise<WechatSecretWriteResult> {
-    this.validateGameId(gameId);
-    const normalized = this.normalizeSecretInput(input);
-    let replay: WechatSecretWriteResult | null;
+    const normalized = sharedInput(input);
+    let result: GameIntegration;
     try {
-      replay = await this.findReplay(
-        gameId,
-        normalized.operationId,
-        authorization,
-      );
-    } catch (error) {
-      await this.auditSecretFailure(gameId, authorization, error);
-      throw error;
-    }
-    if (replay) {
-      return replay;
-    }
-    try {
-      const result = await this.database.transaction(async (connection) => {
-        await authorization.authorize(connection, "secret");
-        await this.requireGame(connection, gameId);
+      result = await this.database.transaction(async (connection) => {
+        await authorization.authorize(connection, "write");
         const current = await this.requireIntegration(
           connection,
           gameId,
           true,
         );
-        if (current.revision !== normalized.revision) {
-          throw new GameManageKitError(409, "GAME_PROJECT_CONFLICT");
-        }
-        const oldVersion = current.wechatSecret.version;
-        const newVersion = oldVersion + 1;
-        const [updatedSecret] = await connection.execute<ResultSetHeader>(
+        this.requireRevision(current, normalized.revision);
+        const [updated] = await connection.execute<ResultSetHeader>(
           `UPDATE game_integrations
-              SET wechat_app_secret = ?,
-                  wechat_secret_version = ?,
-                  wechat_secret_updated_by = ?,
-                  wechat_secret_updated_at = NOW(3),
-                  wechat_validation_failed_at = NULL,
+              SET session_ttl_seconds = ?,
+                  login_rate_capacity = ?,
+                  login_rate_refill_per_second = ?,
+                  admin_rate_capacity = ?,
+                  admin_rate_refill_per_second = ?,
                   revision = revision + 1
             WHERE game_id = ? AND revision = ?`,
           [
-            normalized.wechatAppSecret,
-            newVersion,
-            authorization.operatorId,
+            normalized.sessionTtlSeconds,
+            normalized.loginRateCapacity,
+            normalized.loginRateRefillPerSecond,
+            normalized.adminRateCapacity,
+            normalized.adminRateRefillPerSecond,
             gameId,
             normalized.revision,
           ],
         );
-        if (updatedSecret.affectedRows !== 1) {
-          throw new GameManageKitError(409, "GAME_PROJECT_CONFLICT");
-        }
-        await connection.execute(
-          `INSERT INTO admin_secret_operations
-             (operation_id, operator_id, game_id, identity_id,
-              secret_kind, action, old_version, new_version)
-           VALUES (?, ?, ?, NULL, 'wechat_app_secret', 'set', ?, ?)`,
-          [
-            normalized.operationId,
-            authorization.operatorId,
-            gameId,
-            oldVersion,
-            newVersion,
-          ],
-        );
-        await connection.execute(
-          `INSERT INTO admin_secret_audit
-             (operator_id, game_id, identity_id, secret_kind, action,
-              old_version, new_version, result, reason, request_id, ip)
-           VALUES (?, ?, NULL, 'wechat_app_secret', 'set',
-                   ?, ?, 'succeeded', NULL, ?, INET6_ATON(?))`,
-          [
-            authorization.operatorId,
-            gameId,
-            oldVersion,
-            newVersion,
-            authorization.requestId,
-            normalizeIp(authorization.ip),
-          ],
-        );
-        await this.reconcileConfigurationState(connection, gameId);
-        const updated = await this.requireIntegration(
+        this.requireSingleUpdate(updated);
+        const integration = await this.requireIntegration(
           connection,
           gameId,
           true,
         );
-        return this.secretWriteResult(updated, false);
+        await this.insertGameAudit(
+          connection,
+          gameId,
+          null,
+          "integration_update",
+          current,
+          integration,
+          integration.revision,
+          authorization,
+        );
+        return integration;
       });
-      this.runtime.invalidate(gameId);
+    } catch (error) {
+      await this.auditGameFailure(
+        gameId,
+        null,
+        "integration_update",
+        normalized.revision,
+        authorization,
+        error,
+      );
+      throw error;
+    }
+    this.runtime.invalidate(gameId, null);
+    return result;
+  }
+
+  async updateProvider(
+    gameId: string,
+    providerValue: IdentityProvider,
+    input: UpdateIdentityProviderRequest,
+    authorization: ConfigurationAuthorization,
+  ): Promise<GameIntegration> {
+    this.validateGameId(gameId);
+    const provider = normalizedProvider(providerValue);
+    const normalized = providerInput(input, provider, this.production);
+    let result: GameIntegration;
+    try {
+      result = await this.database.transaction(async (connection) => {
+        await authorization.authorize(connection, "write");
+        const current = await this.requireIntegration(connection, gameId, true);
+        this.requireRevision(current, normalized.revision);
+        const currentProvider = providerConfiguration(current, provider);
+        const providerAction = providerConfigurationAction(
+          currentProvider.enabled,
+          normalized.enabled,
+        );
+        if (
+          normalized.enabled
+          && (
+            normalized.appId === null
+            || !currentProvider.secretMetadata.configured
+          )
+        ) {
+          invalidPayload();
+        }
+        if (normalized.appId !== currentProvider.appId) {
+          await this.requireAppIdMutable(connection, gameId, provider);
+        }
+        const [updatedProvider] = await connection.execute<ResultSetHeader>(
+          `UPDATE game_identity_providers
+              SET enabled = ?,
+                  app_id = ?,
+                  endpoint = ?,
+                  timeout_ms = ?,
+                  breaker_threshold = ?,
+                  breaker_open_ms = ?,
+                  validation_state = 'unvalidated',
+                  validation_failed_at = NULL,
+                  validation_error_code = NULL,
+                  updated_by = ?,
+                  updated_at = NOW(3)
+            WHERE game_id = ? AND provider = ?`,
+          [
+            normalized.enabled ? 1 : 0,
+            normalized.appId,
+            normalized.endpoint,
+            normalized.timeoutMs,
+            normalized.breakerThreshold,
+            normalized.breakerOpenMs,
+            authorization.operatorId,
+            gameId,
+            provider,
+          ],
+        );
+        if (updatedProvider.affectedRows > 1) {
+          throw new Error("Provider 配置更新影响了异常数量的记录");
+        }
+        await this.bumpRevision(
+          connection,
+          gameId,
+          normalized.revision,
+        );
+        await this.reconcileConfigurationState(connection, gameId);
+        const integration = await this.requireIntegration(
+          connection,
+          gameId,
+          true,
+        );
+        await this.insertGameAudit(
+          connection,
+          gameId,
+          provider,
+          providerAction,
+          currentProvider,
+          providerConfiguration(integration, provider),
+          integration.revision,
+          authorization,
+        );
+        return integration;
+      });
+    } catch (error) {
+      await this.auditGameFailure(
+        gameId,
+        provider,
+        "identity_provider_update",
+        normalized.revision,
+        authorization,
+        error,
+        normalized.enabled,
+      );
+      throw error;
+    }
+    this.runtime.invalidate(gameId, provider);
+    return result;
+  }
+
+  async replaceProviderSecret(
+    gameId: string,
+    providerValue: IdentityProvider,
+    input: ReplaceIdentityProviderSecretRequest,
+    authorization: ConfigurationAuthorization,
+  ): Promise<IdentityProviderSecretWriteResponse> {
+    this.validateGameId(gameId);
+    const provider = normalizedProvider(providerValue);
+    const normalized = secretInput(input);
+    return this.mutateSecret(
+      gameId,
+      provider,
+      { kind: "replace", input: normalized },
+      authorization,
+    );
+  }
+
+  async clearProviderSecret(
+    gameId: string,
+    providerValue: IdentityProvider,
+    input: ClearIdentityProviderSecretRequest,
+    authorization: ConfigurationAuthorization,
+  ): Promise<IdentityProviderSecretWriteResponse> {
+    this.validateGameId(gameId);
+    const provider = normalizedProvider(providerValue);
+    const normalized = clearInput(input);
+    return this.mutateSecret(
+      gameId,
+      provider,
+      { kind: "clear", input: normalized },
+      authorization,
+    );
+  }
+
+  private async mutateSecret(
+    gameId: string,
+    provider: IdentityProvider,
+    mutation: SecretMutation,
+    authorization: ConfigurationAuthorization,
+  ): Promise<IdentityProviderSecretWriteResponse> {
+    const operationId = mutation.input.operationId;
+    const requestDigest = secretMutationDigest(gameId, provider, mutation);
+    let replay: IdentityProviderSecretWriteResponse | null;
+    try {
+      replay = await this.findReplay(
+        gameId,
+        provider,
+        operationId,
+        mutation,
+        authorization,
+      );
+    } catch (error) {
+      await this.auditSecretFailure(
+        gameId,
+        provider,
+        mutation,
+        authorization,
+        error,
+      );
+      throw error;
+    }
+    if (replay) {
+      return replay;
+    }
+
+    try {
+      const result = await this.database.transaction(async (connection) => {
+        await authorization.authorize(connection, "secret");
+        const current = await this.requireIntegration(
+          connection,
+          gameId,
+          true,
+        );
+        this.requireRevision(current, mutation.input.revision);
+        const currentProvider = providerConfiguration(current, provider);
+        const oldVersion = currentProvider.secretMetadata.version;
+        let action: ProviderSecretAction;
+        let newVersion: number | null;
+
+        if (mutation.kind === "replace") {
+          action = oldVersion === 0 ? "set" : "rotate";
+          newVersion = oldVersion + 1;
+          if (!Number.isSafeInteger(newVersion)) {
+            throw new Error("Provider Secret 版本已超出安全整数范围");
+          }
+          const [updated] = await connection.execute<ResultSetHeader>(
+            `UPDATE game_identity_providers
+                SET app_secret = ?,
+                    secret_version = ?,
+                    secret_updated_at = NOW(3),
+                    validation_state = 'unvalidated',
+                    validation_failed_at = NULL,
+                    validation_error_code = NULL,
+                    updated_by = ?,
+                    updated_at = NOW(3)
+              WHERE game_id = ? AND provider = ?`,
+            [
+              mutation.input.appSecret,
+              newVersion,
+              authorization.operatorId,
+              gameId,
+              provider,
+            ],
+          );
+          this.requireSingleUpdate(updated);
+        } else {
+          if (!currentProvider.secretMetadata.configured || oldVersion < 1) {
+            throw new GameManageKitError(409, "OPERATION_CONFLICT");
+          }
+          action = "clear";
+          newVersion = null;
+          const [updated] = await connection.execute<ResultSetHeader>(
+            `UPDATE game_identity_providers
+                SET enabled = 0,
+                    app_secret = NULL,
+                    secret_version = 0,
+                    secret_updated_at = NULL,
+                    validation_state = 'unvalidated',
+                    validation_failed_at = NULL,
+                    validation_error_code = NULL,
+                    updated_by = ?,
+                    updated_at = NOW(3)
+              WHERE game_id = ? AND provider = ?`,
+            [authorization.operatorId, gameId, provider],
+          );
+          this.requireSingleUpdate(updated);
+        }
+
+        await this.bumpRevision(
+          connection,
+          gameId,
+          mutation.input.revision,
+        );
+        await this.reconcileConfigurationState(connection, gameId);
+        const integration = await this.requireIntegration(
+          connection,
+          gameId,
+          true,
+        );
+        const metadata = mutation.kind === "clear"
+          ? Object.freeze({
+              configured: false,
+              version: 0,
+              updatedAt: null,
+            })
+          : providerConfiguration(
+              integration,
+              provider,
+            ).secretMetadata;
+        await connection.execute(
+          `INSERT INTO admin_secret_operations
+             (operation_id, operator_id, game_id, provider, identity_id,
+              secret_kind, action, old_version, new_version, revision,
+              request_digest, result_configuration_state, result_revision,
+              result_secret_updated_at)
+           VALUES (?, ?, ?, ?, NULL, 'identity_provider_secret',
+                   ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            operationId,
+            authorization.operatorId,
+            gameId,
+            provider,
+            action,
+            oldVersion === 0 ? null : oldVersion,
+            newVersion,
+            mutation.input.revision,
+            requestDigest,
+            integration.configurationState,
+            integration.revision,
+            metadata.updatedAt === null ? null : new Date(metadata.updatedAt),
+          ],
+        );
+        await this.insertSecretAudit(
+          connection,
+          gameId,
+          provider,
+          action,
+          oldVersion === 0 ? null : oldVersion,
+          newVersion,
+          "succeeded",
+          null,
+          authorization,
+          operationId,
+          integration.revision,
+        );
+        return this.secretWriteResult(
+          integration,
+          provider,
+          false,
+          metadata,
+        );
+      });
+      this.runtime.invalidate(gameId, provider);
       return result;
     } catch (error) {
       if (isDuplicate(error) || isConflict(error)) {
         try {
           const replayed = await this.findReplay(
             gameId,
-            normalized.operationId,
+            provider,
+            operationId,
+            mutation,
             authorization,
           );
           if (replayed) {
@@ -564,13 +993,21 @@ export class GameIntegrationService {
         } catch (replayError) {
           await this.auditSecretFailure(
             gameId,
+            provider,
+            mutation,
             authorization,
             replayError,
           );
           throw replayError;
         }
       }
-      await this.auditSecretFailure(gameId, authorization, error);
+      await this.auditSecretFailure(
+        gameId,
+        provider,
+        mutation,
+        authorization,
+        error,
+      );
       throw error;
     }
   }
@@ -581,40 +1018,33 @@ export class GameIntegrationService {
     }
   }
 
-  private normalizeSecretInput(
-    input: ReplaceWechatSecretInput,
-  ): ReplaceWechatSecretInput {
-    if (
-      !input
-      || typeof input !== "object"
-      || typeof input.wechatAppSecret !== "string"
-      || input.wechatAppSecret.length < 1
-      || input.wechatAppSecret.length > 512
-      || !OPERATION_ID_PATTERN.test(input.operationId)
-    ) {
-      return invalidPayload();
+  private requireRevision(
+    current: GameIntegration,
+    revision: number,
+  ): void {
+    if (current.revision !== revision) {
+      throw new GameManageKitError(409, "GAME_PROJECT_CONFLICT");
     }
-    return Object.freeze({
-      wechatAppSecret: input.wechatAppSecret,
-      revision: safeInteger(input.revision, 1, Number.MAX_SAFE_INTEGER),
-      operationId: input.operationId,
-    });
   }
 
-  private async requireGame(
+  private requireSingleUpdate(result: ResultSetHeader): void {
+    if (result.affectedRows !== 1) {
+      throw new GameManageKitError(409, "GAME_PROJECT_CONFLICT");
+    }
+  }
+
+  private async bumpRevision(
     connection: PoolConnection,
     gameId: string,
+    revision: number,
   ): Promise<void> {
-    const [rows] = await connection.query<GameStateRow[]>(
-      `SELECT game_id, configuration_state
-         FROM games
-        WHERE game_id = ?
-        FOR UPDATE`,
-      [gameId],
+    const [updated] = await connection.execute<ResultSetHeader>(
+      `UPDATE game_integrations
+          SET revision = revision + 1
+        WHERE game_id = ? AND revision = ?`,
+      [gameId, revision],
     );
-    if (!rows[0]) {
-      throw new GameManageKitError(404, "GAME_NOT_FOUND");
-    }
+    this.requireSingleUpdate(updated);
   }
 
   private async requireIntegration(
@@ -622,19 +1052,48 @@ export class GameIntegrationService {
     gameId: string,
     lock: boolean,
   ): Promise<GameIntegration> {
+    const lockClause = lock ? " FOR UPDATE" : "";
     const [rows] = await connection.query<IntegrationRow[]>(
       `${SELECT_INTEGRATION}
-        WHERE g.game_id = ?${lock ? " FOR UPDATE" : ""}`,
+        WHERE g.game_id = ?${lockClause}`,
       [gameId],
     );
     const row = rows[0];
     if (!row) {
       throw new GameManageKitError(404, "GAME_NOT_FOUND");
     }
-    return integrationFromRow(
+    const [providerRows] = await connection.query<ProviderRow[]>(
+      `${SELECT_PROVIDERS}
+        WHERE game_id = ?
+        ORDER BY FIELD(provider, 'wechat', 'douyin')${lockClause}`,
+      [gameId],
+    );
+    return integrationFromRows(
       row,
+      providerRows,
       this.runtime.loadedRevision(gameId)?.integration ?? null,
     );
+  }
+
+  private async requireAppIdMutable(
+    connection: PoolConnection,
+    gameId: string,
+    provider: IdentityProvider,
+  ): Promise<void> {
+    const [rows] = await connection.query<RowDataPacket[]>(
+      `SELECT id
+         FROM account_identities
+        WHERE game_id = ? AND provider = ?
+        LIMIT 1
+        FOR SHARE`,
+      [gameId, provider],
+    );
+    if (rows[0]) {
+      throw new GameManageKitError(
+        409,
+        "IDENTITY_PROVIDER_CONFLICT",
+      );
+    }
   }
 
   private async reconcileConfigurationState(
@@ -643,10 +1102,15 @@ export class GameIntegrationService {
   ): Promise<void> {
     const [rows] = await connection.query<RowDataPacket[]>(
       `SELECT g.configuration_state,
-              i.wechat_app_id,
-              (i.wechat_app_secret IS NOT NULL) AS secret_configured
+              EXISTS (
+                SELECT 1
+                  FROM game_identity_providers AS provider
+                 WHERE provider.game_id = g.game_id
+                   AND provider.enabled = 1
+                   AND provider.app_id IS NOT NULL
+                   AND provider.app_secret IS NOT NULL
+              ) AS provider_configured
          FROM games AS g
-         JOIN game_integrations AS i ON i.game_id = g.game_id
         WHERE g.game_id = ?
         FOR UPDATE`,
       [gameId],
@@ -655,12 +1119,8 @@ export class GameIntegrationService {
     if (!row) {
       throw new GameManageKitError(404, "GAME_NOT_FOUND");
     }
-    const configured = typeof row.wechat_app_id === "string"
-      && row.wechat_app_id.length > 0
-      && Number(row.secret_configured) === 1;
-    const nextState: GameConfigurationState = configured
-      ? "configured"
-      : "draft";
+    const nextState: GameConfigurationState =
+      Number(row.provider_configured) === 1 ? "configured" : "draft";
     if (String(row.configuration_state) === nextState) {
       return;
     }
@@ -672,37 +1132,151 @@ export class GameIntegrationService {
           WHERE game_id = ?`,
         [gameId],
       );
-    } else {
+      return;
+    }
+    await connection.execute(
+      `UPDATE games
+          SET configuration_state = 'draft',
+              status = CASE
+                WHEN status = 'disabled' THEN 'disabled'
+                ELSE 'maintenance'
+              END,
+              client_visible = 0,
+              revision = revision + 1
+        WHERE game_id = ?`,
+      [gameId],
+    );
+  }
+
+  private async insertGameAudit(
+    connection: PoolConnection,
+    gameId: string,
+    provider: IdentityProvider | null,
+    action: "integration_update" | ProviderConfigurationAction,
+    before: GameIntegration | IdentityProviderConfiguration,
+    after: GameIntegration | IdentityProviderConfiguration,
+    revision: number,
+    authorization: ConfigurationAuthorization,
+  ): Promise<void> {
+    try {
       await connection.execute(
-        `UPDATE games
-            SET configuration_state = 'draft',
-                status = CASE
-                  WHEN status = 'disabled' THEN 'disabled'
-                  ELSE 'maintenance'
-                END,
-                client_visible = 0,
-                revision = revision + 1
-          WHERE game_id = ?`,
-        [gameId],
+        `INSERT INTO admin_game_audit
+           (game_id, operator_id, provider, revision, request_id,
+            action, result, before_data, after_data, ip)
+         VALUES (?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, INET6_ATON(?))`,
+        [
+          gameId,
+          authorization.operatorId,
+          provider,
+          revision,
+          authorization.requestId,
+          action,
+          JSON.stringify(before),
+          JSON.stringify(after),
+          normalizeIp(authorization.ip),
+        ],
       );
+    } catch (error) {
+      this.metrics?.recordAuditWriteFailure(gameId, "admin");
+      throw error;
+    }
+  }
+
+  private async auditGameFailure(
+    gameId: string,
+    provider: IdentityProvider | null,
+    action: "integration_update" | ProviderConfigurationAction,
+    revision: number,
+    authorization: ConfigurationAuthorization,
+    error: unknown,
+    requestedProviderEnabled: boolean | null = null,
+  ): Promise<void> {
+    const errorCode = error instanceof GameManageKitError
+      ? error.code
+      : "INTERNAL";
+    await this.database.transaction(async (connection) => {
+      let recordedAction = action;
+      if (provider !== null && requestedProviderEnabled !== null) {
+        const current = await this.requireIntegration(connection, gameId, false);
+        recordedAction = providerConfigurationAction(
+          providerConfiguration(current, provider).enabled,
+          requestedProviderEnabled,
+        );
+      }
+      await connection.execute(
+        `INSERT INTO admin_game_audit
+           (game_id, operator_id, provider, revision, request_id,
+            action, result, before_data, after_data, ip)
+         VALUES (?, ?, ?, ?, ?, ?, 'failed', NULL, ?, INET6_ATON(?))`,
+        [
+          gameId,
+          authorization.operatorId,
+          provider,
+          revision,
+          authorization.requestId,
+          recordedAction,
+          JSON.stringify({ errorCode }),
+          normalizeIp(authorization.ip),
+        ],
+      );
+    }).catch(() => {
+      this.metrics?.recordAuditWriteFailure(gameId, "admin");
+    });
+  }
+
+  private async insertSecretAudit(
+    connection: PoolConnection,
+    gameId: string,
+    provider: IdentityProvider,
+    action: ProviderSecretAction,
+    oldVersion: number | null,
+    newVersion: number | null,
+    result: "succeeded" | "failed",
+    reason: string | null,
+    authorization: ConfigurationAuthorization,
+    operationId: string,
+    revision: number,
+  ): Promise<void> {
+    try {
+      await connection.execute(
+        `INSERT INTO admin_secret_audit
+           (operator_id, game_id, provider, identity_id,
+            secret_kind, action, old_version, new_version,
+            result, reason, request_id, operation_id, revision, ip)
+         VALUES (?, ?, ?, NULL, 'identity_provider_secret', ?,
+                 ?, ?, ?, ?, ?, ?, ?, INET6_ATON(?))`,
+        [
+          authorization.operatorId,
+          gameId,
+          provider,
+          action,
+          oldVersion,
+          newVersion,
+          result,
+          reason,
+          authorization.requestId,
+          operationId,
+          revision,
+          normalizeIp(authorization.ip),
+        ],
+      );
+    } catch (error) {
+      this.metrics?.recordAuditWriteFailure(gameId, "admin");
+      throw error;
     }
   }
 
   private secretWriteResult(
     integration: GameIntegration,
+    provider: IdentityProvider,
     replayed: boolean,
-    version = integration.wechatSecret.version,
-    updatedAt = integration.wechatSecret.updatedAt,
-  ): WechatSecretWriteResult {
+    metadata: IdentityProviderSecretMetadata,
+  ): IdentityProviderSecretWriteResponse {
     return Object.freeze({
       gameId: integration.gameId,
+      provider,
       configurationState: integration.configurationState,
-      wechatSecret: Object.freeze({
-        configured: true,
-        version,
-        state: integration.wechatSecret.state,
-        updatedAt,
-      }),
+      secretMetadata: metadata,
       revision: integration.revision,
       loadedRevision: integration.loadedRevision,
       replayed,
@@ -711,14 +1285,19 @@ export class GameIntegrationService {
 
   private async findReplay(
     gameId: string,
+    provider: IdentityProvider,
     operationId: string,
+    mutation: SecretMutation,
     authorization: ConfigurationAuthorization,
-  ): Promise<WechatSecretWriteResult | null> {
+  ): Promise<IdentityProviderSecretWriteResponse | null> {
     return this.database.transaction(async (connection) => {
       await authorization.authorize(connection, "secret");
       const [rows] = await connection.query<SecretOperationRow[]>(
-        `SELECT operation_id, operator_id, game_id, identity_id,
-                secret_kind, action, old_version, new_version, created_at
+        `SELECT operation_id, operator_id, game_id, provider,
+                identity_id, secret_kind, action,
+                old_version, new_version, revision, request_digest,
+                result_configuration_state, result_revision,
+                result_secret_updated_at, created_at
            FROM admin_secret_operations
           WHERE operation_id = ?
           FOR SHARE`,
@@ -728,63 +1307,159 @@ export class GameIntegrationService {
       if (!operation) {
         return null;
       }
+      const actionMatches = mutation.kind === "replace"
+        ? operation.action === "set" || operation.action === "rotate"
+        : operation.action === "clear";
       if (
         operation.operator_id !== authorization.operatorId
         || operation.game_id !== gameId
+        || operation.provider !== provider
         || operation.identity_id !== null
-        || operation.secret_kind !== "wechat_app_secret"
-        || operation.action !== "set"
+        || operation.secret_kind !== "identity_provider_secret"
+        || !actionMatches
       ) {
         throw new GameManageKitError(409, "OPERATION_CONFLICT");
       }
-      const version = Number(operation.new_version);
-      if (!Number.isSafeInteger(version) || version < 1) {
-        throw new Error("Secret 操作版本数据无效");
+      if (
+        operation.revision === null
+        || rowInteger(
+          operation.revision,
+          1,
+          Number.MAX_SAFE_INTEGER,
+          "Provider Secret 操作 revision",
+        ) !== mutation.input.revision
+      ) {
+        throw new GameManageKitError(409, "OPERATION_CONFLICT");
       }
-      const integration = await this.requireIntegration(
-        connection,
+      const expectedDigest = secretMutationDigest(gameId, provider, mutation);
+      if (
+        !(operation.request_digest instanceof Uint8Array)
+        || operation.request_digest.byteLength !== expectedDigest.byteLength
+        || !timingSafeEqual(operation.request_digest, expectedDigest)
+      ) {
+        throw new GameManageKitError(409, "OPERATION_CONFLICT");
+      }
+      const configurationState = operation.result_configuration_state;
+      if (
+        configurationState === null
+        || !CONFIGURATION_STATES.has(
+          configurationState as GameConfigurationState,
+        )
+        || operation.result_revision === null
+      ) {
+        throw new Error("Provider Secret 操作结果数据无效");
+      }
+      const resultRevision = rowInteger(
+        operation.result_revision,
+        1,
+        Number.MAX_SAFE_INTEGER,
+        "Provider Secret 结果 revision",
+      );
+      let metadata: IdentityProviderSecretMetadata;
+      if (mutation.kind === "clear") {
+        if (
+          operation.old_version === null
+          || operation.new_version !== null
+          || operation.result_secret_updated_at !== null
+        ) {
+          throw new Error("清除 Provider Secret 操作版本数据无效");
+        }
+        rowInteger(
+          operation.old_version,
+          1,
+          Number.MAX_SAFE_INTEGER,
+          "Provider Secret 旧版本",
+        );
+        metadata = Object.freeze({
+          configured: false,
+          version: 0,
+          updatedAt: null,
+        });
+      } else {
+        if (
+          operation.new_version === null
+          || operation.result_secret_updated_at === null
+        ) {
+          throw new Error("替换 Provider Secret 操作版本数据无效");
+        }
+        metadata = Object.freeze({
+          configured: true,
+          version: rowInteger(
+            operation.new_version,
+            1,
+            Number.MAX_SAFE_INTEGER,
+            "Provider Secret 新版本",
+          ),
+          updatedAt: isoDate(operation.result_secret_updated_at),
+        });
+      }
+      return Object.freeze({
         gameId,
-        false,
-      );
-      return this.secretWriteResult(
-        integration,
-        true,
-        version,
-        isoDate(operation.created_at),
-      );
+        provider,
+        configurationState:
+          configurationState as GameConfigurationState,
+        secretMetadata: metadata,
+        revision: resultRevision,
+        loadedRevision:
+          this.runtime.loadedRevision(gameId)?.integration ?? null,
+        replayed: true,
+      });
     });
   }
 
   private async auditSecretFailure(
     gameId: string,
+    provider: IdentityProvider,
+    mutation: SecretMutation,
     authorization: ConfigurationAuthorization,
     error: unknown,
   ): Promise<void> {
     const reason = error instanceof GameManageKitError
       ? error.code
       : "INTERNAL";
+    let auditAttempted = false;
     await this.database.transaction(async (connection) => {
       const [games] = await connection.query<RowDataPacket[]>(
-        "SELECT game_id FROM games WHERE game_id = ? FOR SHARE",
-        [gameId],
+        `SELECT g.game_id, p.secret_version,
+                (p.app_secret IS NOT NULL) AS secret_configured
+           FROM games AS g
+           LEFT JOIN game_identity_providers AS p
+             ON p.game_id = g.game_id AND p.provider = ?
+          WHERE g.game_id = ?
+          FOR SHARE`,
+        [provider, gameId],
       );
-      if (!games[0]) {
+      const current = games[0];
+      if (!current) {
         return;
       }
-      await connection.execute(
-        `INSERT INTO admin_secret_audit
-           (operator_id, game_id, identity_id, secret_kind, action,
-            old_version, new_version, result, reason, request_id, ip)
-         VALUES (?, ?, NULL, 'wechat_app_secret', 'set',
-                 NULL, NULL, 'failed', ?, ?, INET6_ATON(?))`,
-        [
-          authorization.operatorId,
-          gameId,
-          reason,
-          authorization.requestId,
-          normalizeIp(authorization.ip),
-        ],
+      const rawVersion = Number(current.secret_version ?? 0);
+      const oldVersion = Number.isSafeInteger(rawVersion) && rawVersion > 0
+        ? rawVersion
+        : null;
+      const action: ProviderSecretAction = mutation.kind === "clear"
+        ? "clear"
+        : Number(current.secret_configured) === 1 && oldVersion !== null
+          ? "rotate"
+          : "set";
+      auditAttempted = true;
+      await this.insertSecretAudit(
+        connection,
+        gameId,
+        provider,
+        action,
+        oldVersion,
+        null,
+        "failed",
+        reason,
+        authorization,
+        mutation.input.operationId,
+        mutation.input.revision,
       );
-    }).catch(() => undefined);
+    }).catch(() => {
+      if (!auditAttempted) {
+        this.metrics?.recordAuditWriteFailure(gameId, "admin");
+      }
+    });
   }
 }

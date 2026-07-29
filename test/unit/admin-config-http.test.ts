@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { PoolConnection } from "mysql2/promise";
+import type { GameIntegration } from "@gono/game-manage-kit-contract";
 import { loadConfig } from "../../src/config.js";
 import {
   registerAdminIntegrationRoutes,
@@ -47,23 +48,50 @@ function config() {
   });
 }
 
-test("接入配置 HTTP 只返回 Secret 元数据，并在事务授权后幂等替换", async (t) => {
+test("接入配置 HTTP 分离共享参数与 Provider，并安全替换和清除 Secret", async (t) => {
   const authorizationKinds: string[] = [];
   let submittedSecret = "";
-  const integration = {
+  const integration: GameIntegration = {
     gameId: "game-a",
     configurationState: "configured",
-    wechatAppId: "wx-example",
-    wechatSecret: {
-      configured: true,
-      version: 3,
-      state: "active",
+    providers: [{
+      provider: "wechat",
+      enabled: true,
+      appId: "wx-example",
+      secretMetadata: {
+        configured: true,
+        version: 3,
+        updatedAt: NOW,
+      },
+      endpoint: "https://api.weixin.qq.com/sns/jscode2session",
+      timeoutMs: 3_000,
+      breakerThreshold: 5,
+      breakerOpenMs: 30_000,
+      validationState: "active",
+      validationFailedAt: null,
+      validationErrorCode: null,
+      updatedBy: identity.operatorId,
       updatedAt: NOW,
-    },
-    wechatEndpoint: "https://api.weixin.qq.com/sns/jscode2session",
-    wechatTimeoutMs: 3_000,
-    wechatBreakerThreshold: 5,
-    wechatBreakerOpenMs: 30_000,
+    }, {
+      provider: "douyin",
+      enabled: false,
+      appId: null,
+      secretMetadata: {
+        configured: false,
+        version: 0,
+        updatedAt: null,
+      },
+      endpoint:
+        "https://minigame.zijieapi.com/mgplatform/api/apps/jscode2session",
+      timeoutMs: 3_000,
+      breakerThreshold: 5,
+      breakerOpenMs: 10_000,
+      validationState: "unvalidated",
+      validationFailedAt: null,
+      validationErrorCode: null,
+      updatedBy: null,
+      updatedAt: NOW,
+    }],
     sessionTtlSeconds: 86_400,
     loginRateCapacity: 20,
     loginRateRefillPerSecond: 2,
@@ -73,7 +101,7 @@ test("接入配置 HTTP 只返回 Secret 元数据，并在事务授权后幂等
     loadedRevision: 8,
     createdAt: NOW,
     updatedAt: NOW,
-  } as const;
+  };
   const services: AdminIntegrationRouteServices = {
     adminAuth: {
       async authenticate(sessionToken) {
@@ -101,7 +129,7 @@ test("接入配置 HTTP 只返回 Secret 元数据，并在事务授权后幂等
         );
         return integration;
       },
-      async update(gameId, input, authorization) {
+      async updateShared(gameId, input, authorization) {
         assert.equal(gameId, "game-a");
         await authorization.authorize(
           {} as PoolConnection,
@@ -114,21 +142,77 @@ test("接入配置 HTTP 只返回 Secret 元数据，并在事务授权后幂等
           loadedRevision: input.revision,
         };
       },
-      async replaceWechatSecret(gameId, input, authorization) {
+      async updateProvider(gameId, provider, input, authorization) {
         assert.equal(gameId, "game-a");
-        submittedSecret = input.wechatAppSecret;
+        assert.equal(provider, "douyin");
+        await authorization.authorize(
+          {} as PoolConnection,
+          "write",
+        );
+        return {
+          ...integration,
+          providers: integration.providers.map((configuration) => (
+            configuration.provider === provider
+              ? {
+                  ...configuration,
+                  ...input,
+                  validationState: "unvalidated" as const,
+                  updatedBy: identity.operatorId,
+                  updatedAt: NOW,
+                }
+              : configuration
+          )),
+          revision: input.revision + 1,
+          loadedRevision: input.revision,
+        };
+      },
+      async replaceProviderSecret(
+        gameId,
+        provider,
+        input,
+        authorization,
+      ) {
+        assert.equal(gameId, "game-a");
+        assert.equal(provider, "douyin");
+        submittedSecret = input.appSecret;
         await authorization.authorize(
           {} as PoolConnection,
           "secret",
         );
         return {
           gameId,
+          provider,
           configurationState: "configured",
-          wechatSecret: {
+          secretMetadata: {
             configured: true,
-            version: 4,
-            state: "active",
+            version: 1,
             updatedAt: NOW,
+          },
+          revision: input.revision + 1,
+          loadedRevision: input.revision,
+          replayed: false,
+        };
+      },
+      async clearProviderSecret(
+        gameId,
+        provider,
+        input,
+        authorization,
+      ) {
+        assert.equal(gameId, "game-a");
+        assert.equal(provider, "douyin");
+        await authorization.authorize(
+          {} as PoolConnection,
+          "secret",
+        );
+        return {
+          gameId,
+          provider,
+          configurationState: "configured",
+          secretMetadata: {
+            configured: false,
+            version: 0,
+            updatedAt: null,
           },
           revision: input.revision + 1,
           loadedRevision: input.revision,
@@ -160,11 +244,6 @@ test("接入配置 HTTP 只返回 Secret 元数据，并在事务授权后幂等
     url: "/v1/admin/games/game-a/integration",
     headers: { cookie: COOKIE },
     payload: {
-      wechatAppId: "wx-updated",
-      wechatEndpoint: integration.wechatEndpoint,
-      wechatTimeoutMs: integration.wechatTimeoutMs,
-      wechatBreakerThreshold: integration.wechatBreakerThreshold,
-      wechatBreakerOpenMs: integration.wechatBreakerOpenMs,
       sessionTtlSeconds: integration.sessionTtlSeconds,
       loginRateCapacity: integration.loginRateCapacity,
       loginRateRefillPerSecond: integration.loginRateRefillPerSecond,
@@ -181,12 +260,7 @@ test("接入配置 HTTP 只返回 Secret 元数据，并在事务授权后幂等
     url: "/v1/admin/games/game-a/integration",
     headers: { cookie: COOKIE, origin: ORIGIN },
     payload: {
-      wechatAppId: "wx-updated",
-      wechatEndpoint: integration.wechatEndpoint,
-      wechatTimeoutMs: integration.wechatTimeoutMs,
-      wechatBreakerThreshold: integration.wechatBreakerThreshold,
-      wechatBreakerOpenMs: integration.wechatBreakerOpenMs,
-      sessionTtlSeconds: integration.sessionTtlSeconds,
+      sessionTtlSeconds: 172_800,
       loginRateCapacity: integration.loginRateCapacity,
       loginRateRefillPerSecond: integration.loginRateRefillPerSecond,
       adminRateCapacity: integration.adminRateCapacity,
@@ -195,18 +269,52 @@ test("接入配置 HTTP 只返回 Secret 元数据，并在事务授权后幂等
     },
   });
   assert.equal(updated.statusCode, 200, updated.body);
-  assert.equal(updated.json().wechatAppId, "wx-updated");
+  assert.equal(updated.json().sessionTtlSeconds, 172_800);
   assert.equal(updated.json().revision, 9);
 
-  const secretValue = "wx-secret-value";
-  const replaced = await app.inject({
-    method: "PUT",
-    url: "/v1/admin/games/game-a/secrets/wechat-app-secret",
+  const updatedProvider = await app.inject({
+    method: "PATCH",
+    url: "/v1/admin/games/game-a/identity-providers/douyin",
     headers: { cookie: COOKIE, origin: ORIGIN },
     payload: {
-      wechatAppSecret: secretValue,
+      enabled: false,
+      appId: "tt-example",
+      endpoint: integration.providers[1]!.endpoint,
+      timeoutMs: 4_000,
+      breakerThreshold: 6,
+      breakerOpenMs: 20_000,
       revision: 8,
-      operationId: "wechat-secret-op-1",
+    },
+  });
+  assert.equal(updatedProvider.statusCode, 200, updatedProvider.body);
+  assert.equal(updatedProvider.json().providers[1].appId, "tt-example");
+  assert.equal(updatedProvider.json().providers[1].timeoutMs, 4_000);
+
+  const invalidProvider = await app.inject({
+    method: "PATCH",
+    url: "/v1/admin/games/game-a/identity-providers/unknown",
+    headers: { cookie: COOKIE, origin: ORIGIN },
+    payload: {
+      enabled: false,
+      appId: null,
+      endpoint: "https://example.com/provider",
+      timeoutMs: 3_000,
+      breakerThreshold: 5,
+      breakerOpenMs: 10_000,
+      revision: 8,
+    },
+  });
+  assert.equal(invalidProvider.statusCode, 400, invalidProvider.body);
+
+  const secretValue = "douyin-secret-value";
+  const replaced = await app.inject({
+    method: "PUT",
+    url: "/v1/admin/games/game-a/identity-providers/douyin/secret",
+    headers: { cookie: COOKIE, origin: ORIGIN },
+    payload: {
+      appSecret: secretValue,
+      revision: 8,
+      operationId: "douyin-secret-op-1",
     },
   });
   assert.equal(replaced.statusCode, 200, replaced.body);
@@ -214,9 +322,33 @@ test("接入配置 HTTP 只返回 Secret 元数据，并在事务授权后幂等
   assert.equal(submittedSecret, secretValue);
   assert.equal(replaced.body.includes(secretValue), false);
   assert.equal(replaced.body.toLowerCase().includes("digest"), false);
+  assert.deepEqual(replaced.json().secretMetadata, {
+    configured: true,
+    version: 1,
+    updatedAt: NOW,
+  });
+
+  const cleared = await app.inject({
+    method: "DELETE",
+    url: "/v1/admin/games/game-a/identity-providers/douyin/secret",
+    headers: { cookie: COOKIE, origin: ORIGIN },
+    payload: {
+      revision: 9,
+      operationId: "douyin-secret-clear-op-1",
+    },
+  });
+  assert.equal(cleared.statusCode, 200, cleared.body);
+  assert.deepEqual(cleared.json().secretMetadata, {
+    configured: false,
+    version: 0,
+    updatedAt: null,
+  });
   assert.deepEqual(authorizationKinds, [
     "integration",
     "integration",
+    "integration",
+    "integration",
+    "secret",
     "integration",
     "secret",
   ]);
@@ -360,11 +492,17 @@ test("机器身份 HTTP 一次性返回 Secret，重放和状态查询均不恢�
             auditType: "secret",
             operatorId: identity.operatorId,
             gameId,
+            provider: null,
             identityId: machineIdentity.identityId,
             action: "rotate",
             result: "succeeded",
             oldVersion: 1,
             newVersion: 2,
+            revision: 7,
+            requestId: "request-audit-12",
+            operationId: "operation-rotate",
+            beforeMetadata: null,
+            afterMetadata: null,
             createdAt: NOW,
           }],
         };

@@ -11,6 +11,7 @@ export const OPERATOR_ID_PATTERN = /^[a-z][a-z0-9_.-]{2,63}$/u;
 export const MACHINE_ID_PATTERN = /^[a-z][a-z0-9_.-]{2,63}$/u;
 export const OPERATION_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/u;
 export const ADMIN_ACTIONS = Object.freeze(["ban", "revoke"]);
+export const IDENTITY_PROVIDERS = Object.freeze(["wechat", "douyin"]);
 export const ADMIN_SESSION_IDLE_TTL_MS = 30 * 60 * 1_000;
 
 const GAME_STATUSES = new Set(["enabled", "maintenance", "disabled"]);
@@ -23,6 +24,12 @@ const MACHINE_SECRET_STATES = new Set(["current", "previous", "revoked"]);
 const MACHINE_SECRET_ACTIONS = new Set(["set", "rotate", "revoke"]);
 const ACCOUNT_STATUSES = new Set(["active", "banned", "deregistered"]);
 const OPERATION_STATUSES = new Set(["banned", "revoked", "not_found"]);
+const IDENTITY_PROVIDER_SET = new Set(IDENTITY_PROVIDERS);
+const PROVIDER_VALIDATION_STATES = new Set([
+  "unvalidated",
+  "active",
+  "validation_failed",
+]);
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -120,16 +127,75 @@ function assertNoSensitiveFields(payload, label) {
   const forbidden = new Set([
     "wechatAppSecret",
     "wechat_app_secret",
+    "douyinAppSecret",
+    "douyin_app_secret",
+    "appSecret",
     "secret",
     "secretDigest",
     "secret_digest",
     "digest",
+    "password",
+    "token",
+    "accessToken",
+    "sessionKey",
+    "session_key",
+    "openid",
+    "unionid",
+    "subject",
+    "code",
   ]);
   for (const key of Object.keys(payload)) {
     if (forbidden.has(key)) {
       throw new InvalidApiPayloadError(`${label} 含敏感字段`);
     }
   }
+}
+
+function normalizeAuditMetadata(value, label, depth = 0) {
+  if (value === null) { return null; }
+  if (depth >= 8 || !isRecord(value)) {
+    throw new InvalidApiPayloadError(`${label} 无效`);
+  }
+  assertNoSensitiveFields(value, label);
+  const normalized = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (
+      item === null
+      || typeof item === "string"
+      || typeof item === "boolean"
+      || (typeof item === "number" && Number.isFinite(item))
+    ) {
+      normalized[key] = item;
+      continue;
+    }
+    if (Array.isArray(item)) {
+      if (item.length > 65_536) {
+        throw new InvalidApiPayloadError(`${label}.${key} 无效`);
+      }
+      normalized[key] = Object.freeze(item.map((entry, index) => {
+        if (
+          entry === null
+          || typeof entry === "string"
+          || typeof entry === "boolean"
+          || (typeof entry === "number" && Number.isFinite(entry))
+        ) {
+          return entry;
+        }
+        return normalizeAuditMetadata(
+          entry,
+          `${label}.${key}[${index}]`,
+          depth + 1,
+        );
+      }));
+      continue;
+    }
+    normalized[key] = normalizeAuditMetadata(
+      item,
+      `${label}.${key}`,
+      depth + 1,
+    );
+  }
+  return Object.freeze(normalized);
 }
 
 export function normalizeBootstrapStatus(payload) {
@@ -359,20 +425,29 @@ function requiredEndpoint(value, label, protocols) {
   return endpoint;
 }
 
-function requiredWechatEndpoint(value, label) {
+function requiredProviderEndpoint(value, provider, label) {
   const endpoint = requiredEndpoint(
     value,
     label,
     new Set(["http:", "https:"]),
   );
   const parsed = new URL(endpoint);
-  const official = (
-    parsed.protocol === "https:"
-    && parsed.hostname === "api.weixin.qq.com"
+  const official = parsed.protocol === "https:"
     && parsed.port === ""
-    && parsed.pathname === "/sns/jscode2session"
     && parsed.search === ""
-  );
+    && (
+      (
+        provider === "wechat"
+        && parsed.hostname === "api.weixin.qq.com"
+        && parsed.pathname === "/sns/jscode2session"
+      )
+      || (
+        provider === "douyin"
+        && parsed.hostname === "minigame.zijieapi.com"
+        && parsed.pathname
+          === "/mgplatform/api/apps/jscode2session"
+      )
+    );
   const loopback = (
     parsed.hostname === "localhost"
     || parsed.hostname === "127.0.0.1"
@@ -523,9 +598,9 @@ export function normalizeGameServerMutation(
   });
 }
 
-export function normalizeWechatSecretMetadata(payload) {
+export function normalizeIdentityProviderSecretMetadata(payload, label) {
   if (!isRecord(payload)) {
-    throw new InvalidApiPayloadError("微信 Secret 元数据无效");
+    throw new InvalidApiPayloadError(`${label} Secret 元数据无效`);
   }
   const version = Number.isSafeInteger(payload.version)
     && payload.version >= 0
@@ -534,23 +609,102 @@ export function normalizeWechatSecretMetadata(payload) {
   if (
     typeof payload.configured !== "boolean"
     || version === null
-    || !["active", "missing", "validation_failed"].includes(payload.state)
-    || (
-      payload.configured
-      && (
-        version < 1
-        || !["active", "validation_failed"].includes(payload.state)
-      )
-    )
-    || (!payload.configured && payload.state !== "missing")
+    || (payload.configured && version < 1)
+    || (!payload.configured && version === 0 && payload.updatedAt !== null)
   ) {
-    throw new InvalidApiPayloadError("微信 Secret 元数据无效");
+    throw new InvalidApiPayloadError(`${label} Secret 元数据无效`);
   }
   return Object.freeze({
     configured: payload.configured,
     version,
-    state: payload.state,
-    updatedAt: nullableDate(payload.updatedAt, "wechatSecret.updatedAt"),
+    updatedAt: nullableDate(payload.updatedAt, `${label}.updatedAt`),
+  });
+}
+
+export function normalizeIdentityProviderConfiguration(payload) {
+  if (!isRecord(payload) || !IDENTITY_PROVIDER_SET.has(payload.provider)) {
+    throw new InvalidApiPayloadError("Provider 配置响应无效");
+  }
+  assertNoSensitiveFields(payload, "Provider 配置响应");
+  const provider = payload.provider;
+  const appId = payload.appId === null
+    ? null
+    : requiredString(payload.appId, `${provider}.appId`, 128);
+  if (
+    typeof payload.enabled !== "boolean"
+    || !PROVIDER_VALIDATION_STATES.has(payload.validationState)
+  ) {
+    throw new InvalidApiPayloadError("Provider 配置响应无效");
+  }
+  const secretMetadata = normalizeIdentityProviderSecretMetadata(
+    payload.secretMetadata,
+    `${provider}.secretMetadata`,
+  );
+  if (
+    payload.enabled
+    && (appId === null || !secretMetadata.configured)
+  ) {
+    throw new InvalidApiPayloadError("启用的 Provider 配置不完整");
+  }
+  const validationFailedAt = nullableDate(
+    payload.validationFailedAt,
+    `${provider}.validationFailedAt`,
+  );
+  const validationErrorCode = payload.validationErrorCode === null
+    ? null
+    : requiredString(
+        payload.validationErrorCode,
+        `${provider}.validationErrorCode`,
+        64,
+      );
+  if (
+    (
+      payload.validationState === "validation_failed"
+      && (validationFailedAt === null || validationErrorCode === null)
+    )
+    || (
+      payload.validationState !== "validation_failed"
+      && (validationFailedAt !== null || validationErrorCode !== null)
+    )
+  ) {
+    throw new InvalidApiPayloadError("Provider 验证状态响应无效");
+  }
+  const updatedBy = payload.updatedBy === null
+    ? null
+    : requiredString(payload.updatedBy, `${provider}.updatedBy`, 64);
+  if (updatedBy !== null && !OPERATOR_ID_PATTERN.test(updatedBy)) {
+    throw new InvalidApiPayloadError("Provider 更新者响应无效");
+  }
+  return Object.freeze({
+    provider,
+    enabled: payload.enabled,
+    appId,
+    secretMetadata,
+    endpoint: requiredProviderEndpoint(
+      payload.endpoint,
+      provider,
+      `${provider}.endpoint`,
+    ),
+    timeoutMs: positiveInteger(
+      payload.timeoutMs,
+      `${provider}.timeoutMs`,
+      30_000,
+    ),
+    breakerThreshold: positiveInteger(
+      payload.breakerThreshold,
+      `${provider}.breakerThreshold`,
+      1_000,
+    ),
+    breakerOpenMs: positiveInteger(
+      payload.breakerOpenMs,
+      `${provider}.breakerOpenMs`,
+      600_000,
+    ),
+    validationState: payload.validationState,
+    validationFailedAt,
+    validationErrorCode,
+    updatedBy,
+    updatedAt: requiredDate(payload.updatedAt, `${provider}.updatedAt`),
   });
 }
 
@@ -564,39 +718,30 @@ export function normalizeGameIntegration(payload, expectedGameId = null) {
     !GAME_ID_PATTERN.test(gameId)
     || (expectedGameId !== null && gameId !== expectedGameId)
     || !GAME_CONFIGURATION_STATES.has(payload.configurationState)
+    || !Array.isArray(payload.providers)
+    || payload.providers.length !== IDENTITY_PROVIDERS.length
   ) {
     throw new InvalidApiPayloadError("游戏接入配置响应无效");
   }
-  const wechatAppId = payload.wechatAppId === null
-    ? null
-    : requiredString(payload.wechatAppId, "wechatAppId", 128);
+  const providers = payload.providers.map(
+    normalizeIdentityProviderConfiguration,
+  );
+  if (
+    new Set(providers.map(({ provider }) => provider)).size
+      !== IDENTITY_PROVIDERS.length
+    || IDENTITY_PROVIDERS.some(
+      (provider) => !providers.some((value) => value.provider === provider),
+    )
+  ) {
+    throw new InvalidApiPayloadError("Provider 配置响应重复或缺失");
+  }
   const loadedRevision = payload.loadedRevision === null
     ? null
     : positiveInteger(payload.loadedRevision, "loadedRevision");
   return Object.freeze({
     gameId,
     configurationState: payload.configurationState,
-    wechatAppId,
-    wechatSecret: normalizeWechatSecretMetadata(payload.wechatSecret),
-    wechatEndpoint: requiredWechatEndpoint(
-      payload.wechatEndpoint,
-      "wechatEndpoint",
-    ),
-    wechatTimeoutMs: positiveInteger(
-      payload.wechatTimeoutMs,
-      "wechatTimeoutMs",
-      30_000,
-    ),
-    wechatBreakerThreshold: positiveInteger(
-      payload.wechatBreakerThreshold,
-      "wechatBreakerThreshold",
-      1_000,
-    ),
-    wechatBreakerOpenMs: positiveInteger(
-      payload.wechatBreakerOpenMs,
-      "wechatBreakerOpenMs",
-      600_000,
-    ),
+    providers: Object.freeze(providers),
     sessionTtlSeconds: positiveInteger(
       payload.sessionTtlSeconds,
       "sessionTtlSeconds",
@@ -625,24 +770,37 @@ export function normalizeGameIntegration(payload, expectedGameId = null) {
   });
 }
 
-export function normalizeWechatSecretWrite(payload, expectedGameId = null) {
+export function normalizeIdentityProviderSecretWrite(
+  payload,
+  expectedGameId = null,
+  expectedProvider = null,
+) {
   if (!isRecord(payload)) {
-    throw new InvalidApiPayloadError("微信 Secret 写入响应无效");
+    throw new InvalidApiPayloadError("Provider Secret 写入响应无效");
   }
-  assertNoSensitiveFields(payload, "微信 Secret 写入响应");
+  assertNoSensitiveFields(payload, "Provider Secret 写入响应");
   const gameId = requiredString(payload.gameId, "gameId", 32);
   if (
     !GAME_ID_PATTERN.test(gameId)
     || (expectedGameId !== null && gameId !== expectedGameId)
+    || !IDENTITY_PROVIDER_SET.has(payload.provider)
+    || (
+      expectedProvider !== null
+      && payload.provider !== expectedProvider
+    )
     || !GAME_CONFIGURATION_STATES.has(payload.configurationState)
     || typeof payload.replayed !== "boolean"
   ) {
-    throw new InvalidApiPayloadError("微信 Secret 写入响应无效");
+    throw new InvalidApiPayloadError("Provider Secret 写入响应无效");
   }
   return Object.freeze({
     gameId,
+    provider: payload.provider,
     configurationState: payload.configurationState,
-    wechatSecret: normalizeWechatSecretMetadata(payload.wechatSecret),
+    secretMetadata: normalizeIdentityProviderSecretMetadata(
+      payload.secretMetadata,
+      `${payload.provider}.secretMetadata`,
+    ),
     revision: positiveInteger(payload.revision, "revision"),
     loadedRevision: payload.loadedRevision === null
       ? null
@@ -862,10 +1020,36 @@ export function normalizeConfigurationAuditPage(payload) {
       `records[${index}].operatorId`,
       64,
     );
+    const provider = record.provider === null
+      ? null
+      : requiredString(
+          record.provider,
+          `records[${index}].provider`,
+          16,
+        );
+    const requestId = record.requestId === null
+      ? null
+      : requiredString(
+          record.requestId,
+          `records[${index}].requestId`,
+          64,
+        );
+    const operationId = record.operationId === null
+      ? null
+      : requiredString(
+          record.operationId,
+          `records[${index}].operationId`,
+          64,
+        );
     if (
       (gameId !== null && !GAME_ID_PATTERN.test(gameId))
       || (identityId !== null && !MACHINE_ID_PATTERN.test(identityId))
       || !OPERATOR_ID_PATTERN.test(operatorId)
+      || (provider !== null && !["wechat", "douyin"].includes(provider))
+      || (
+        operationId !== null
+        && !OPERATION_ID_PATTERN.test(operationId)
+      )
     ) {
       throw new InvalidApiPayloadError(`records[${index}] 无效`);
     }
@@ -874,6 +1058,7 @@ export function normalizeConfigurationAuditPage(payload) {
       auditType: record.auditType,
       operatorId,
       gameId,
+      provider,
       identityId,
       action: requiredString(
         record.action,
@@ -891,6 +1076,19 @@ export function normalizeConfigurationAuditPage(payload) {
       newVersion: record.newVersion === null
         ? null
         : nonNegativeInteger(record.newVersion, "newVersion"),
+      revision: record.revision === null
+        ? null
+        : positiveInteger(record.revision, "revision"),
+      requestId,
+      operationId,
+      beforeMetadata: normalizeAuditMetadata(
+        record.beforeMetadata,
+        `records[${index}].beforeMetadata`,
+      ),
+      afterMetadata: normalizeAuditMetadata(
+        record.afterMetadata,
+        `records[${index}].afterMetadata`,
+      ),
       createdAt: requiredDate(
         record.createdAt,
         `records[${index}].createdAt`,
@@ -1110,8 +1308,13 @@ export function gameIntegrationPath(gameId) {
   return `${gameProjectPath(gameId)}/integration`;
 }
 
-export function wechatAppSecretPath(gameId) {
-  return `${gameProjectPath(gameId)}/secrets/wechat-app-secret`;
+export function identityProviderPath(gameId, provider, secret = false) {
+  if (!IDENTITY_PROVIDER_SET.has(provider)) {
+    throw new TypeError("Provider 不在服务端白名单中");
+  }
+  const base = `${gameProjectPath(gameId)}/identity-providers/`
+    + encodeURIComponent(provider);
+  return secret ? `${base}/secret` : base;
 }
 
 export function machineIdentityPath(identityId = null) {
@@ -1401,13 +1604,33 @@ export function createAdminApi(fetchImpl = globalThis.fetch, {
         gameId,
       );
     },
-    async replaceWechatAppSecret(gameId, input) {
-      return normalizeWechatSecretWrite(
-        await request(wechatAppSecretPath(gameId), {
+    async updateIdentityProvider(gameId, provider, input) {
+      return normalizeGameIntegration(
+        await request(identityProviderPath(gameId, provider), {
+          method: "PATCH",
+          body: input,
+        }),
+        gameId,
+      );
+    },
+    async replaceIdentityProviderSecret(gameId, provider, input) {
+      return normalizeIdentityProviderSecretWrite(
+        await request(identityProviderPath(gameId, provider, true), {
           method: "PUT",
           body: input,
         }),
         gameId,
+        provider,
+      );
+    },
+    async clearIdentityProviderSecret(gameId, provider, input) {
+      return normalizeIdentityProviderSecretWrite(
+        await request(identityProviderPath(gameId, provider, true), {
+          method: "DELETE",
+          body: input,
+        }),
+        gameId,
+        provider,
       );
     },
     async listMachineIdentities() {
@@ -1549,6 +1772,16 @@ export function describeApiError(error, context) {
     }
     if (context === "server-update") {
       return `区服已被其他管理员修改，请取消编辑；页面会加载最新版本后再编辑。${suffix}`;
+    }
+    if (
+      [
+        "directory-update",
+        "integration-update",
+        "provider-update",
+        "provider-secret",
+      ].includes(context)
+    ) {
+      return `配置版本或操作标识发生冲突，页面已加载最新状态；请核对后重新操作。${suffix}`;
     }
     return `操作标识与已有记录冲突，请关闭窗口后重新发起。${suffix}`;
   }
@@ -1965,27 +2198,11 @@ export function bootstrapAdminConsole({
       document,
       "configuration-loaded-revision",
     ),
+    identityProviderCards: requiredElement(
+      document,
+      "identity-provider-cards",
+    ),
     integrationForm: requiredElement(document, "integration-form"),
-    integrationWechatAppId: requiredElement(
-      document,
-      "integration-wechat-app-id",
-    ),
-    integrationWechatEndpoint: requiredElement(
-      document,
-      "integration-wechat-endpoint",
-    ),
-    integrationWechatTimeout: requiredElement(
-      document,
-      "integration-wechat-timeout",
-    ),
-    integrationBreakerThreshold: requiredElement(
-      document,
-      "integration-breaker-threshold",
-    ),
-    integrationBreakerOpen: requiredElement(
-      document,
-      "integration-breaker-open",
-    ),
     integrationSessionTtl: requiredElement(
       document,
       "integration-session-ttl",
@@ -2006,10 +2223,6 @@ export function bootstrapAdminConsole({
       document,
       "integration-admin-refill",
     ),
-    wechatSecretStatusBadge: requiredElement(
-      document,
-      "wechat-secret-status-badge",
-    ),
     directoryRevisionLabel: requiredElement(
       document,
       "directory-revision-label",
@@ -2023,10 +2236,6 @@ export function bootstrapAdminConsole({
     integrationFormErrorMessage: requiredElement(
       document,
       "integration-form-error-message",
-    ),
-    wechatSecretReplace: requiredElement(
-      document,
-      "wechat-secret-replace",
     ),
     integrationSave: requiredElement(document, "integration-save"),
     machineIdentitiesSection: requiredElement(
@@ -2087,18 +2296,23 @@ export function bootstrapAdminConsole({
       document,
       "reauthenticate-submit",
     ),
-    wechatSecretDialog: requiredElement(document, "wechat-secret-dialog"),
-    wechatSecretForm: requiredElement(document, "wechat-secret-form"),
-    wechatSecretClose: requiredElement(document, "wechat-secret-close"),
-    wechatSecretInput: requiredElement(document, "wechat-secret-input"),
-    wechatSecretToggle: requiredElement(document, "wechat-secret-toggle"),
-    wechatSecretError: requiredElement(document, "wechat-secret-error"),
-    wechatSecretErrorMessage: requiredElement(
+    providerSecretDialog: requiredElement(document, "provider-secret-dialog"),
+    providerSecretForm: requiredElement(document, "provider-secret-form"),
+    providerSecretDialogTitle: requiredElement(
       document,
-      "wechat-secret-error-message",
+      "provider-secret-dialog-title",
     ),
-    wechatSecretCancel: requiredElement(document, "wechat-secret-cancel"),
-    wechatSecretSubmit: requiredElement(document, "wechat-secret-submit"),
+    providerSecretClose: requiredElement(document, "provider-secret-close"),
+    providerSecretInput: requiredElement(document, "provider-secret-input"),
+    providerSecretToggle: requiredElement(document, "provider-secret-toggle"),
+    providerSecretError: requiredElement(document, "provider-secret-error"),
+    providerSecretErrorMessage: requiredElement(
+      document,
+      "provider-secret-error-message",
+    ),
+    providerSecretCancel: requiredElement(document, "provider-secret-cancel"),
+    providerSecretClear: requiredElement(document, "provider-secret-clear"),
+    providerSecretSubmit: requiredElement(document, "provider-secret-submit"),
     machineIdentityDialog: requiredElement(
       document,
       "machine-identity-dialog",
@@ -2230,7 +2444,8 @@ export function bootstrapAdminConsole({
     reauthenticationSubmitting: false,
     elevatedAction: null,
     elevatedActionOpener: null,
-    wechatSecretSubmitting: false,
+    providerSecretSubmitting: false,
+    providerSecretTarget: null,
     machineFormMode: null,
     editingMachineIdentity: null,
     machineIdentitySubmitting: false,
@@ -2399,23 +2614,26 @@ export function bootstrapAdminConsole({
     );
   }
 
-  function resetSecretField(input, toggle = null) {
+  function resetSecretField(
+    input,
+    toggle = null,
+    hiddenLabel = "显示密码",
+  ) {
     input.value = "";
     input.type = "password";
     if (toggle) {
       toggle.setAttribute("aria-pressed", "false");
-      if (toggle === elements.wechatSecretToggle) {
-        toggle.setAttribute("aria-label", "显示 AppSecret");
-      }
+      toggle.setAttribute("aria-label", hiddenLabel);
     }
   }
 
-  function clearWechatSecretInput() {
+  function clearProviderSecretInput() {
     resetSecretField(
-      elements.wechatSecretInput,
-      elements.wechatSecretToggle,
+      elements.providerSecretInput,
+      elements.providerSecretToggle,
+      "显示 AppSecret",
     );
-    elements.wechatSecretInput.setCustomValidity("");
+    elements.providerSecretInput.setCustomValidity("");
   }
 
   function clearOneTimeSecret() {
@@ -2446,12 +2664,13 @@ export function bootstrapAdminConsole({
     }
   }
 
-  function closeWechatSecretDialog() {
-    clearWechatSecretInput();
-    elements.wechatSecretError.hidden = true;
-    elements.wechatSecretErrorMessage.textContent = "";
-    if (elements.wechatSecretDialog.open) {
-      elements.wechatSecretDialog.close();
+  function closeProviderSecretDialog() {
+    clearProviderSecretInput();
+    elements.providerSecretError.hidden = true;
+    elements.providerSecretErrorMessage.textContent = "";
+    state.providerSecretTarget = null;
+    if (elements.providerSecretDialog.open) {
+      elements.providerSecretDialog.close();
     }
   }
 
@@ -2479,8 +2698,7 @@ export function bootstrapAdminConsole({
 
   function clearSensitiveState() {
     clearBootstrapPasswords();
-    clearWechatSecretInput();
-    closeWechatSecretDialog();
+    closeProviderSecretDialog();
     closeReauthenticationDialog();
     closeMachineIdentityDialog();
     closeMachineRevokeDialog();
@@ -2507,6 +2725,7 @@ export function bootstrapAdminConsole({
     elements.integrationFormError.hidden = true;
     elements.integrationFormErrorMessage.textContent = "";
     elements.configurationCheckList.replaceChildren();
+    elements.identityProviderCards.replaceChildren();
     elements.machineIdentitiesList.replaceChildren();
     elements.machineIdentitiesEmpty.hidden = true;
     elements.configurationAuditList.replaceChildren();
@@ -2556,33 +2775,69 @@ export function bootstrapAdminConsole({
     for (const control of elements.integrationForm.elements) {
       control.disabled = disabled;
     }
+    const canManage = Boolean(
+      state.session?.canManageIntegrations && state.integration,
+    );
+    for (
+      const control of elements.identityProviderCards.querySelectorAll(
+        "[data-provider-control]",
+      )
+    ) {
+      control.disabled = disabled || !canManage;
+    }
+    for (
+      const control of elements.identityProviderCards.querySelectorAll(
+        "[data-provider-secret]",
+      )
+    ) {
+      control.disabled =
+        disabled || !canManage || !state.session?.canRotateSecrets;
+    }
     elements.integrationRefresh.disabled = disabled;
     elements.integrationGameSelect.disabled =
       disabled || availableConfigurationGames().length === 0;
     if (!disabled) {
-      const canManage = Boolean(
-        state.session?.canManageIntegrations && state.integration,
-      );
       for (const control of elements.integrationForm.elements) {
         control.disabled = !canManage;
       }
-      elements.wechatSecretReplace.disabled =
-        !canManage || !state.session?.canRotateSecrets;
       elements.directorySave.disabled =
         !canManage || !state.directorySettings;
     }
   }
 
+  function providerDisplayName(provider) {
+    return provider === "wechat" ? "微信" : "抖音";
+  }
+
+  function providerIsStructurallyReady(provider) {
+    return Boolean(
+      provider?.enabled
+      && provider.appId
+      && provider.secretMetadata.configured,
+    );
+  }
+
   function renderConfigurationCompleteness() {
     const integration = state.integration;
+    const providers = new Map(
+      integration?.providers.map((provider) => [
+        provider.provider,
+        provider,
+      ]) ?? [],
+    );
     const checks = [
+      ...IDENTITY_PROVIDERS.map((providerName) => {
+        const provider = providers.get(providerName);
+        return {
+          label: `${providerDisplayName(providerName)} Provider 配置一致`,
+          complete:
+            Boolean(provider)
+            && (!provider.enabled || providerIsStructurallyReady(provider)),
+        };
+      }),
       {
-        label: "微信 AppID",
-        complete: Boolean(integration?.wechatAppId),
-      },
-      {
-        label: "微信 AppSecret",
-        complete: integration?.wechatSecret.configured === true,
+        label: "至少一个身份 Provider 已启用且凭据完整",
+        complete: [...providers.values()].some(providerIsStructurallyReady),
       },
       {
         label: "至少一个区服",
@@ -2612,15 +2867,266 @@ export function bootstrapAdminConsole({
           + `数据库当前为第 ${integration?.revision ?? "—"} 版。`;
     elements.configurationCheckList.replaceChildren(...checks.map((check) => {
       const item = document.createElement("li");
-      item.className = check.complete ? "gmk-check-complete" : "";
-      const marker = document.createElement("span");
-      marker.setAttribute("aria-hidden", "true");
-      marker.textContent = check.complete ? "✓" : "○";
+      item.dataset.complete = String(check.complete);
       const label = document.createElement("span");
       label.textContent = check.label;
-      item.append(marker, label);
+      item.append(label);
       return item;
     }));
+  }
+
+  function providerValidationPresentation(provider) {
+    if (provider.validationState === "active") {
+      return { text: "验证正常", variant: "success" };
+    }
+    if (provider.validationState === "validation_failed") {
+      return { text: "验证失败", variant: "danger" };
+    }
+    return { text: "尚未验证", variant: "warning" };
+  }
+
+  function createProviderField(
+    providerName,
+    name,
+    labelText,
+    {
+      type = "text",
+      value = "",
+      min = null,
+      max = null,
+      step = null,
+      maxLength = null,
+      span = false,
+    } = {},
+  ) {
+    const field = document.createElement("div");
+    field.className = span
+      ? "wsk-field gmk-provider-span-two"
+      : "wsk-field";
+    const id = `provider-${providerName}-${name}`;
+    const label = document.createElement("label");
+    label.className = "wsk-label";
+    label.htmlFor = id;
+    label.textContent = labelText;
+    const input = document.createElement("input");
+    input.className = "wsk-control";
+    input.id = id;
+    input.name = name;
+    input.type = type;
+    input.value = String(value);
+    input.required = true;
+    input.dataset.providerControl = "";
+    input.dataset.providerField = name;
+    if (min !== null) {
+      input.min = String(min);
+    }
+    if (max !== null) {
+      input.max = String(max);
+    }
+    if (step !== null) {
+      input.step = String(step);
+    }
+    if (maxLength !== null) {
+      input.maxLength = maxLength;
+    }
+    field.append(label, input);
+    return field;
+  }
+
+  function createProviderCard(provider) {
+    const label = providerDisplayName(provider.provider);
+    const form = document.createElement("form");
+    form.className = "wsk-panel gmk-provider-card";
+    form.autocomplete = "off";
+    form.dataset.providerForm = provider.provider;
+
+    const head = document.createElement("div");
+    head.className = "gmk-provider-head";
+    const titleGroup = document.createElement("div");
+    const kicker = document.createElement("p");
+    kicker.className = "wsk-panel-title";
+    kicker.textContent = `${provider.provider.toUpperCase()} IDENTITY`;
+    const title = document.createElement("h2");
+    title.textContent = `${label}登录 Provider`;
+    titleGroup.append(kicker, title);
+    const badges = document.createElement("div");
+    badges.className = "gmk-provider-badges";
+    const enabledBadge = document.createElement("span");
+    setBadge(
+      enabledBadge,
+      provider.enabled ? "已启用" : "已停用",
+      provider.enabled ? "success" : null,
+    );
+    const validationBadge = document.createElement("span");
+    validationBadge.id = `provider-${provider.provider}-validation-badge`;
+    const validation = providerValidationPresentation(provider);
+    setBadge(validationBadge, validation.text, validation.variant);
+    badges.append(enabledBadge, validationBadge);
+    head.append(titleGroup, badges);
+
+    const health = document.createElement("div");
+    health.className = "gmk-provider-health";
+    const secretGroup = document.createElement("div");
+    const secretLabel = document.createElement("span");
+    secretLabel.textContent = "AppSecret";
+    const secretBadge = document.createElement("span");
+    secretBadge.id = `provider-${provider.provider}-secret-badge`;
+    setBadge(
+      secretBadge,
+      provider.secretMetadata.configured
+        ? `已配置 · v${provider.secretMetadata.version}`
+        : "未配置",
+      provider.secretMetadata.configured ? "success" : "warning",
+    );
+    secretGroup.append(secretLabel, secretBadge);
+    const updated = document.createElement("p");
+    updated.className = "wsk-help";
+    updated.textContent =
+      `配置更新：${formatDateTime(provider.updatedAt)}`
+      + (provider.updatedBy ? ` · ${provider.updatedBy}` : "");
+    health.append(secretGroup, updated);
+    if (provider.validationState === "validation_failed") {
+      const failed = document.createElement("p");
+      failed.className = "gmk-provider-failure";
+      failed.textContent =
+        `最近验证失败：${provider.validationErrorCode}`
+        + ` · ${formatDateTime(provider.validationFailedAt)}`;
+      health.append(failed);
+    } else if (provider.secretMetadata.updatedAt) {
+      const secretUpdated = document.createElement("p");
+      secretUpdated.className = "wsk-help";
+      secretUpdated.textContent =
+        `Secret 更新：${formatDateTime(provider.secretMetadata.updatedAt)}`;
+      health.append(secretUpdated);
+    }
+
+    const grid = document.createElement("div");
+    grid.className = "gmk-provider-form-grid";
+    const enabledField = document.createElement("div");
+    enabledField.className =
+      "gmk-provider-enabled gmk-provider-span-two";
+    const enabled = document.createElement("input");
+    enabled.id = `provider-${provider.provider}-enabled`;
+    enabled.name = "enabled";
+    enabled.type = "checkbox";
+    enabled.checked = provider.enabled;
+    enabled.dataset.providerControl = "";
+    enabled.dataset.providerField = "enabled";
+    const enabledLabel = document.createElement("label");
+    enabledLabel.htmlFor = enabled.id;
+    enabledLabel.textContent = `启用${label}登录`;
+    const enabledHelp = document.createElement("p");
+    enabledHelp.className = "wsk-help";
+    enabledHelp.textContent =
+      "启用前必须配置 AppID 与 AppSecret；停用不会自动清除 Secret。";
+    enabledField.append(enabled, enabledLabel, enabledHelp);
+
+    const appIdField = createProviderField(
+      provider.provider,
+      "appId",
+      "AppID",
+      {
+        value: provider.appId ?? "",
+        maxLength: 128,
+        span: true,
+      },
+    );
+    const appId = appIdField.querySelector("input");
+    appId.required = false;
+    const endpointField = createProviderField(
+      provider.provider,
+      "endpoint",
+      "code2session 接口地址",
+      {
+        type: "url",
+        value: provider.endpoint,
+        maxLength: 2_048,
+        span: true,
+      },
+    );
+    grid.append(
+      enabledField,
+      appIdField,
+      endpointField,
+      createProviderField(
+        provider.provider,
+        "timeoutMs",
+        "请求超时（毫秒）",
+        {
+          type: "number",
+          value: provider.timeoutMs,
+          min: 100,
+          max: 30_000,
+          step: 1,
+        },
+      ),
+      createProviderField(
+        provider.provider,
+        "breakerThreshold",
+        "熔断失败阈值",
+        {
+          type: "number",
+          value: provider.breakerThreshold,
+          min: 1,
+          max: 1_000,
+          step: 1,
+        },
+      ),
+      createProviderField(
+        provider.provider,
+        "breakerOpenMs",
+        "熔断开启（毫秒）",
+        {
+          type: "number",
+          value: provider.breakerOpenMs,
+          min: 100,
+          max: 600_000,
+          step: 1,
+        },
+      ),
+    );
+
+    const error = document.createElement("div");
+    error.className = "wsk-alert wsk-danger";
+    error.dataset.providerError = "";
+    error.role = "alert";
+    error.tabIndex = -1;
+    error.hidden = true;
+    const errorTitle = document.createElement("strong");
+    errorTitle.textContent = `${label} Provider 未保存`;
+    const errorMessage = document.createElement("p");
+    errorMessage.dataset.providerErrorMessage = "";
+    error.append(errorTitle, errorMessage);
+
+    const actions = document.createElement("div");
+    actions.className = "gmk-provider-actions";
+    const secret = document.createElement("button");
+    secret.className = "wsk-button wsk-secondary";
+    secret.id = `provider-${provider.provider}-secret`;
+    secret.type = "button";
+    secret.dataset.providerSecret = provider.provider;
+    secret.textContent = provider.secretMetadata.configured
+      ? "替换或清除 AppSecret"
+      : "配置 AppSecret";
+    secret.hidden = !state.session?.canRotateSecrets;
+    const save = document.createElement("button");
+    save.className = "wsk-button";
+    save.id = `provider-${provider.provider}-save`;
+    save.type = "submit";
+    save.dataset.providerControl = "";
+    save.dataset.providerSave = provider.provider;
+    const spinner = document.createElement("span");
+    spinner.className = "wsk-spinner";
+    spinner.dataset.buttonSpinner = "";
+    spinner.setAttribute("aria-hidden", "true");
+    spinner.hidden = true;
+    const saveLabel = document.createElement("span");
+    saveLabel.dataset.buttonLabel = "";
+    saveLabel.textContent = `保存${label}配置`;
+    save.append(spinner, saveLabel);
+    actions.append(secret, save);
+    form.append(head, health, grid, error, actions);
+    return form;
   }
 
   function renderIntegrationSettings() {
@@ -2631,16 +3137,20 @@ export function bootstrapAdminConsole({
     elements.integrationSettingsSection.hidden =
       !state.session?.canManageIntegrations;
     if (!integration) {
+      elements.identityProviderCards.replaceChildren();
       return;
     }
-    elements.integrationWechatAppId.value = integration.wechatAppId ?? "";
-    elements.integrationWechatEndpoint.value = integration.wechatEndpoint;
-    elements.integrationWechatTimeout.value =
-      String(integration.wechatTimeoutMs);
-    elements.integrationBreakerThreshold.value =
-      String(integration.wechatBreakerThreshold);
-    elements.integrationBreakerOpen.value =
-      String(integration.wechatBreakerOpenMs);
+    const providers = new Map(
+      integration.providers.map((provider) => [
+        provider.provider,
+        provider,
+      ]),
+    );
+    elements.identityProviderCards.replaceChildren(
+      ...IDENTITY_PROVIDERS.map((providerName) => (
+        createProviderCard(providers.get(providerName))
+      )),
+    );
     elements.integrationSessionTtl.value =
       String(integration.sessionTtlSeconds);
     elements.integrationLoginCapacity.value =
@@ -2651,24 +3161,10 @@ export function bootstrapAdminConsole({
       String(integration.adminRateCapacity);
     elements.integrationAdminRefill.value =
       String(integration.adminRateRefillPerSecond);
-    const secretPresentation = !integration.wechatSecret.configured
-      ? { text: "未配置", variant: "warning" }
-      : integration.wechatSecret.state === "validation_failed"
-        ? { text: "连接验证失败", variant: "danger" }
-        : { text: "已生效", variant: "success" };
-    setBadge(
-      elements.wechatSecretStatusBadge,
-      secretPresentation.text,
-      secretPresentation.variant,
-    );
     elements.directoryIsOps.checked = state.directorySettings?.isOps ?? false;
     elements.directoryRevisionLabel.textContent = state.directorySettings
       ? `当前目录修订第 ${state.directorySettings.revision} 版。`
       : "";
-    elements.wechatSecretReplace.hidden =
-      !state.session?.canRotateSecrets;
-    elements.wechatSecretReplace.disabled =
-      !canManage || !state.session?.canRotateSecrets;
     elements.directorySave.disabled =
       !canManage || !state.directorySettings;
     elements.integrationSave.disabled = !canManage;
@@ -2874,6 +3370,7 @@ export function bootstrapAdminConsole({
       const target = document.createElement("p");
       target.textContent = [
         record.gameId ? `游戏 ${record.gameId}` : null,
+        record.provider ? `Provider ${record.provider}` : null,
         record.identityId ? `身份 ${record.identityId}` : null,
         `结果 ${record.result}`,
       ].filter(Boolean).join(" · ");
@@ -2883,10 +3380,33 @@ export function bootstrapAdminConsole({
         record.oldVersion === null && record.newVersion === null
           ? ""
           : ` · 版本 ${record.oldVersion ?? "—"} → ${record.newVersion ?? "—"}`;
+      const revisionText = record.revision === null
+        ? ""
+        : ` · revision ${record.revision}`;
+      const correlationText = record.operationId
+        ? ` · operation ${record.operationId}`
+        : record.requestId
+          ? ` · request ${record.requestId}`
+          : "";
       metadata.textContent =
         `${record.operatorId} · ${formatDateTime(record.createdAt)}`
-        + versionText;
+        + versionText + revisionText + correlationText;
       item.append(head, target, metadata);
+      if (
+        record.beforeMetadata !== null
+        || record.afterMetadata !== null
+      ) {
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = "查看变更元数据";
+        const body = document.createElement("pre");
+        body.textContent = JSON.stringify({
+          before: record.beforeMetadata,
+          after: record.afterMetadata,
+        }, null, 2);
+        details.append(summary, body);
+        item.append(details);
+      }
       return item;
     }));
     elements.configurationAuditList.hidden = records.length === 0;
@@ -4107,23 +4627,8 @@ export function bootstrapAdminConsole({
   }
 
   function integrationInput() {
-    const appId = elements.integrationWechatAppId.value.trim();
     const integration = state.integration;
     return {
-      wechatAppId: appId.length === 0 ? null : appId,
-      wechatEndpoint: elements.integrationWechatEndpoint.value.trim(),
-      wechatTimeoutMs: integrationNumber(
-        elements.integrationWechatTimeout,
-        { integer: true },
-      ),
-      wechatBreakerThreshold: integrationNumber(
-        elements.integrationBreakerThreshold,
-        { integer: true },
-      ),
-      wechatBreakerOpenMs: integrationNumber(
-        elements.integrationBreakerOpen,
-        { integer: true },
-      ),
       sessionTtlSeconds: integrationNumber(
         elements.integrationSessionTtl,
         { integer: true },
@@ -4175,7 +4680,8 @@ export function bootstrapAdminConsole({
       && error instanceof AdminApiError
       && (error.status === 0 || error.status >= 500)
     ) {
-      clearWechatSecretInput();
+      clearProviderSecretInput();
+      close?.();
       await loadConfiguration();
       toast(
         "结果暂时未知，已先刷新服务器状态；请核对后再决定是否重试。",
@@ -4195,17 +4701,6 @@ export function bootstrapAdminConsole({
       || !state.configurationGameId
     ) {
       return;
-    }
-    try {
-      requiredWechatEndpoint(
-        elements.integrationWechatEndpoint.value.trim(),
-        "微信接口地址",
-      );
-      elements.integrationWechatEndpoint.setCustomValidity("");
-    } catch {
-      elements.integrationWechatEndpoint.setCustomValidity(
-        "仅允许微信官方接口，或非生产环境的 loopback 地址。",
-      );
     }
     if (!elements.integrationForm.reportValidity()) {
       return;
@@ -4233,7 +4728,7 @@ export function bootstrapAdminConsole({
       state.integration = integration;
       touchSessionActivity();
       renderConfiguration();
-      toast("接入参数已保存；微信凭据尚需实际调用验证。");
+      toast("共享运行参数已保存。");
       void reloadConfigurationAudit();
     } catch (error) {
       if (
@@ -4253,6 +4748,142 @@ export function bootstrapAdminConsole({
       state.configurationSubmitting = false;
       setButtonBusy(elements.integrationSave, false, {
         idleLabel: "保存运行参数",
+        busyLabel: "正在保存…",
+      });
+      if (state.session && state.configurationLoaded) {
+        setConfigurationFormDisabled(false);
+      }
+    }
+  }
+
+  function providerField(form, name) {
+    const field = form.querySelector(`[data-provider-field="${name}"]`);
+    if (!field) {
+      throw new Error(`Provider 表单缺少 ${name}`);
+    }
+    return field;
+  }
+
+  function providerInput(form, provider) {
+    const enabled = providerField(form, "enabled");
+    const appId = providerField(form, "appId");
+    const endpoint = providerField(form, "endpoint");
+    const trimmedAppId = appId.value.trim();
+    const trimmedEndpoint = endpoint.value.trim();
+    appId.value = trimmedAppId;
+    endpoint.value = trimmedEndpoint;
+    appId.setCustomValidity(
+      [...trimmedAppId].length <= 128
+        ? ""
+        : "AppID 最多 128 个字符。",
+    );
+    enabled.setCustomValidity(
+      enabled.checked && !provider.secretMetadata.configured
+        ? "启用前请先配置 AppSecret。"
+        : "",
+    );
+    if (enabled.checked && trimmedAppId.length === 0) {
+      appId.setCustomValidity("启用前必须填写 AppID。");
+    }
+    try {
+      requiredProviderEndpoint(
+        trimmedEndpoint,
+        provider.provider,
+        `${providerDisplayName(provider.provider)}接口地址`,
+      );
+      endpoint.setCustomValidity("");
+    } catch {
+      endpoint.setCustomValidity(
+        `仅允许${providerDisplayName(provider.provider)}官方接口，`
+        + "或非生产环境的 loopback 地址。",
+      );
+    }
+    return {
+      enabled: enabled.checked,
+      appId: trimmedAppId.length === 0 ? null : trimmedAppId,
+      endpoint: trimmedEndpoint,
+      timeoutMs: integrationNumber(
+        providerField(form, "timeoutMs"),
+        { integer: true },
+      ),
+      breakerThreshold: integrationNumber(
+        providerField(form, "breakerThreshold"),
+        { integer: true },
+      ),
+      breakerOpenMs: integrationNumber(
+        providerField(form, "breakerOpenMs"),
+        { integer: true },
+      ),
+      revision: state.integration.revision,
+    };
+  }
+
+  async function submitIdentityProvider(event) {
+    event.preventDefault();
+    const form = event.target.closest("[data-provider-form]");
+    const providerName = form?.dataset.providerForm;
+    const provider = state.integration?.providers.find(
+      (candidate) => candidate.provider === providerName,
+    );
+    if (
+      !form
+      || !provider
+      || state.configurationSubmitting
+      || !state.session?.canManageIntegrations
+      || !state.configurationGameId
+    ) {
+      return;
+    }
+    const input = providerInput(form, provider);
+    if (!form.reportValidity()) {
+      return;
+    }
+    const error = form.querySelector("[data-provider-error]");
+    const errorMessage = form.querySelector("[data-provider-error-message]");
+    const save = form.querySelector("[data-provider-save]");
+    error.hidden = true;
+    state.configurationSubmitting = true;
+    setConfigurationFormDisabled(true);
+    setButtonBusy(save, true, {
+      idleLabel: `保存${providerDisplayName(providerName)}配置`,
+      busyLabel: "正在保存…",
+    });
+    const authGeneration = state.authGeneration;
+    const gameId = state.configurationGameId;
+    try {
+      const integration = await api.updateIdentityProvider(
+        gameId,
+        providerName,
+        input,
+      );
+      if (
+        authGeneration !== state.authGeneration
+        || gameId !== state.configurationGameId
+      ) {
+        return;
+      }
+      state.integration = integration;
+      touchSessionActivity();
+      renderConfiguration();
+      toast(`${providerDisplayName(providerName)} Provider 配置已保存。`);
+      void reloadConfigurationAudit();
+    } catch (caught) {
+      if (
+        authGeneration !== state.authGeneration
+        || gameId !== state.configurationGameId
+      ) {
+        return;
+      }
+      if (await handleConfigurationWriteError(caught, "provider-update")) {
+        return;
+      }
+      errorMessage.textContent = describeApiError(caught, "provider-update");
+      error.hidden = false;
+      error.focus();
+    } finally {
+      state.configurationSubmitting = false;
+      setButtonBusy(save, false, {
+        idleLabel: `保存${providerDisplayName(providerName)}配置`,
         busyLabel: "正在保存…",
       });
       if (state.session && state.configurationLoaded) {
@@ -4331,85 +4962,131 @@ export function bootstrapAdminConsole({
     }
   }
 
-  function openWechatSecretDialog() {
+  function openProviderSecretDialog(providerName) {
+    const provider = state.integration?.providers.find(
+      (candidate) => candidate.provider === providerName,
+    );
     if (
       !state.session?.canManageIntegrations
       || !state.session.canRotateSecrets
-      || !state.integration
+      || !provider
     ) {
       return;
     }
-    clearWechatSecretInput();
-    elements.wechatSecretError.hidden = true;
-    elements.wechatSecretErrorMessage.textContent = "";
-    elements.wechatSecretDialog.showModal();
-    window.queueMicrotask(() => elements.wechatSecretInput.focus());
+    state.providerSecretTarget = providerName;
+    clearProviderSecretInput();
+    elements.providerSecretDialogTitle.textContent =
+      `${providerDisplayName(providerName)} Provider AppSecret`;
+    elements.providerSecretError.hidden = true;
+    elements.providerSecretErrorMessage.textContent = "";
+    elements.providerSecretClear.hidden = !provider.secretMetadata.configured;
+    elements.providerSecretClear.disabled = !provider.secretMetadata.configured;
+    elements.providerSecretDialog.showModal();
+    window.queueMicrotask(() => elements.providerSecretInput.focus());
   }
 
-  function setWechatSecretBusy(busy) {
-    state.wechatSecretSubmitting = busy;
-    elements.wechatSecretInput.disabled = busy;
-    elements.wechatSecretToggle.disabled = busy;
-    elements.wechatSecretClose.disabled = busy;
-    elements.wechatSecretCancel.disabled = busy;
-    setButtonBusy(elements.wechatSecretSubmit, busy, {
+  function setProviderSecretBusy(busy) {
+    const provider = state.integration?.providers.find(
+      (candidate) => candidate.provider === state.providerSecretTarget,
+    );
+    state.providerSecretSubmitting = busy;
+    elements.providerSecretInput.disabled = busy;
+    elements.providerSecretToggle.disabled = busy;
+    elements.providerSecretClose.disabled = busy;
+    elements.providerSecretCancel.disabled = busy;
+    elements.providerSecretClear.disabled =
+      busy || !provider?.secretMetadata.configured;
+    setButtonBusy(elements.providerSecretSubmit, busy, {
       idleLabel: "确认替换",
       busyLabel: "正在保存…",
     });
   }
 
-  async function submitWechatSecret(event) {
-    event.preventDefault();
+  function applyProviderSecretWrite(result, { cleared }) {
+    const updatedAt = new Date(now()).toISOString();
+    state.integration = Object.freeze({
+      ...state.integration,
+      configurationState: result.configurationState,
+      providers: Object.freeze(state.integration.providers.map((provider) => (
+        provider.provider === result.provider
+          ? Object.freeze({
+              ...provider,
+              enabled: cleared ? false : provider.enabled,
+              secretMetadata: result.secretMetadata,
+              validationState: "unvalidated",
+              validationFailedAt: null,
+              validationErrorCode: null,
+              updatedBy: state.session?.operator.operatorId ?? provider.updatedBy,
+              updatedAt,
+            })
+          : provider
+      ))),
+      revision: result.revision,
+      loadedRevision: result.loadedRevision,
+      updatedAt,
+    });
+  }
+
+  async function writeProviderSecret({ cleared }) {
+    const providerName = state.providerSecretTarget;
+    const provider = state.integration?.providers.find(
+      (candidate) => candidate.provider === providerName,
+    );
     if (
-      state.wechatSecretSubmitting
+      state.providerSecretSubmitting
       || !state.session?.canManageIntegrations
       || !state.session.canRotateSecrets
-      || !state.integration
+      || !provider
       || !state.configurationGameId
+      || (cleared && !provider.secretMetadata.configured)
     ) {
-      clearWechatSecretInput();
+      clearProviderSecretInput();
       return;
     }
-    let submittedSecret = elements.wechatSecretInput.value;
-    elements.wechatSecretInput.setCustomValidity(
-      submittedSecret.length > 0 && submittedSecret.length <= 512
-        ? ""
-        : "AppSecret 必须为 1–512 个字符。",
-    );
-    if (!elements.wechatSecretForm.reportValidity()) {
-      submittedSecret = "";
-      clearWechatSecretInput();
-      return;
+    let submittedSecret = "";
+    if (!cleared) {
+      submittedSecret = elements.providerSecretInput.value;
+      elements.providerSecretInput.setCustomValidity(
+        submittedSecret.length > 0 && submittedSecret.length <= 512
+          ? ""
+          : "AppSecret 必须为 1–512 个字符。",
+      );
+      if (!elements.providerSecretForm.reportValidity()) {
+        submittedSecret = "";
+        clearProviderSecretInput();
+        return;
+      }
     }
     const gameId = state.configurationGameId;
     const revision = state.integration.revision;
     const operationId = createConfigurationOperationId(randomUUID);
     const authGeneration = state.authGeneration;
-    elements.wechatSecretError.hidden = true;
-    setWechatSecretBusy(true);
+    elements.providerSecretError.hidden = true;
+    setProviderSecretBusy(true);
     try {
-      const result = await api.replaceWechatAppSecret(gameId, {
-        wechatAppSecret: submittedSecret,
+      const input = {
         revision,
         operationId,
-      });
+        ...(cleared ? {} : { appSecret: submittedSecret }),
+      };
+      const result = cleared
+        ? await api.clearIdentityProviderSecret(gameId, providerName, input)
+        : await api.replaceIdentityProviderSecret(gameId, providerName, input);
       if (
         authGeneration !== state.authGeneration
         || gameId !== state.configurationGameId
       ) {
         return;
       }
-      state.integration = Object.freeze({
-        ...state.integration,
-        configurationState: result.configurationState,
-        wechatSecret: result.wechatSecret,
-        revision: result.revision,
-        loadedRevision: result.loadedRevision,
-      });
+      applyProviderSecretWrite(result, { cleared });
       touchSessionActivity();
-      closeWechatSecretDialog();
+      closeProviderSecretDialog();
       renderConfiguration();
-      toast("AppSecret 已安全保存；尚未声明微信侧验证成功。");
+      toast(
+        cleared
+          ? `${providerDisplayName(providerName)} AppSecret 已清除，Provider 已停用。`
+          : `${providerDisplayName(providerName)} AppSecret 已安全保存，等待实际调用验证。`,
+      );
       void reloadConfigurationAudit();
     } catch (error) {
       if (
@@ -4421,30 +5098,30 @@ export function bootstrapAdminConsole({
       if (
         await handleConfigurationWriteError(
           error,
-          "wechat-secret",
-          { close: closeWechatSecretDialog },
+          "provider-secret",
+          { close: closeProviderSecretDialog },
         )
       ) {
         return;
       }
-      setBadge(
-        elements.wechatSecretStatusBadge,
-        "替换失败",
-        "danger",
-      );
-      elements.wechatSecretErrorMessage.textContent =
-        describeApiError(error, "wechat-secret");
-      elements.wechatSecretError.hidden = false;
-      elements.wechatSecretError.focus();
+      elements.providerSecretErrorMessage.textContent =
+        describeApiError(error, "provider-secret");
+      elements.providerSecretError.hidden = false;
+      elements.providerSecretError.focus();
     } finally {
       submittedSecret = "";
-      clearWechatSecretInput();
-      if (elements.wechatSecretDialog.open) {
-        setWechatSecretBusy(false);
+      clearProviderSecretInput();
+      if (elements.providerSecretDialog.open) {
+        setProviderSecretBusy(false);
       } else {
-        state.wechatSecretSubmitting = false;
+        state.providerSecretSubmitting = false;
       }
     }
+  }
+
+  function submitProviderSecret(event) {
+    event.preventDefault();
+    void writeProviderSecret({ cleared: false });
   }
 
   function renderMachineScopeOptions(selectedGameIds = []) {
@@ -6100,58 +6777,79 @@ export function bootstrapAdminConsole({
     });
   }
 
-  elements.wechatSecretReplace.addEventListener("click", () => {
+  elements.identityProviderCards.addEventListener(
+    "submit",
+    submitIdentityProvider,
+  );
+  elements.identityProviderCards.addEventListener("input", (event) => {
+    event.target.setCustomValidity?.("");
+    const form = event.target.closest?.("[data-provider-form]");
+    const error = form?.querySelector("[data-provider-error]");
+    if (error) {
+      error.hidden = true;
+    }
+  });
+  elements.identityProviderCards.addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-provider-secret]");
+    if (!button || !elements.identityProviderCards.contains(button)) {
+      return;
+    }
+    const providerName = button.dataset.providerSecret;
     requestElevatedAction(
-      () => openWechatSecretDialog(),
-      elements.wechatSecretReplace,
+      () => openProviderSecretDialog(providerName),
+      button,
     );
   });
-  elements.wechatSecretForm.addEventListener("submit", submitWechatSecret);
-  elements.wechatSecretInput.addEventListener("input", () => {
-    elements.wechatSecretInput.setCustomValidity("");
-    elements.wechatSecretError.hidden = true;
+  elements.providerSecretForm.addEventListener("submit", submitProviderSecret);
+  elements.providerSecretClear.addEventListener("click", () => {
+    void writeProviderSecret({ cleared: true });
   });
-  elements.wechatSecretToggle.addEventListener("click", () => {
-    const visible = elements.wechatSecretInput.type === "text";
-    elements.wechatSecretInput.type = visible ? "password" : "text";
-    elements.wechatSecretToggle.setAttribute(
+  elements.providerSecretInput.addEventListener("input", () => {
+    elements.providerSecretInput.setCustomValidity("");
+    elements.providerSecretError.hidden = true;
+  });
+  elements.providerSecretToggle.addEventListener("click", () => {
+    const visible = elements.providerSecretInput.type === "text";
+    elements.providerSecretInput.type = visible ? "password" : "text";
+    elements.providerSecretToggle.setAttribute(
       "aria-pressed",
       String(!visible),
     );
-    elements.wechatSecretToggle.setAttribute(
+    elements.providerSecretToggle.setAttribute(
       "aria-label",
       visible ? "显示 AppSecret" : "隐藏 AppSecret",
     );
   });
   for (const button of [
-    elements.wechatSecretClose,
-    elements.wechatSecretCancel,
+    elements.providerSecretClose,
+    elements.providerSecretCancel,
   ]) {
     button.addEventListener("click", () => {
-      if (!state.wechatSecretSubmitting) {
-        closeWechatSecretDialog();
+      if (!state.providerSecretSubmitting) {
+        closeProviderSecretDialog();
       }
     });
   }
-  elements.wechatSecretDialog.addEventListener("cancel", (event) => {
-    if (state.wechatSecretSubmitting) {
+  elements.providerSecretDialog.addEventListener("cancel", (event) => {
+    if (state.providerSecretSubmitting) {
       event.preventDefault();
       return;
     }
     event.preventDefault();
-    closeWechatSecretDialog();
+    closeProviderSecretDialog();
   });
-  elements.wechatSecretDialog.addEventListener("click", (event) => {
+  elements.providerSecretDialog.addEventListener("click", (event) => {
     if (
-      event.target === elements.wechatSecretDialog
-      && !state.wechatSecretSubmitting
+      event.target === elements.providerSecretDialog
+      && !state.providerSecretSubmitting
     ) {
-      closeWechatSecretDialog();
+      closeProviderSecretDialog();
     }
   });
-  elements.wechatSecretDialog.addEventListener("close", () => {
-    clearWechatSecretInput();
-    state.wechatSecretSubmitting = false;
+  elements.providerSecretDialog.addEventListener("close", () => {
+    clearProviderSecretInput();
+    state.providerSecretTarget = null;
+    state.providerSecretSubmitting = false;
   });
 
   elements.reauthenticateForm.addEventListener(

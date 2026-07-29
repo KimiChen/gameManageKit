@@ -195,10 +195,16 @@ async function fixture() {
       async get() {
         throw new Error("测试未调用");
       },
-      async update() {
+      async updateShared() {
         throw new Error("测试未调用");
       },
-      async replaceWechatSecret() {
+      async updateProvider() {
+        throw new Error("测试未调用");
+      },
+      async replaceProviderSecret() {
+        throw new Error("测试未调用");
+      },
+      async clearProviderSecret() {
         throw new Error("测试未调用");
       },
     },
@@ -228,6 +234,12 @@ async function fixture() {
     metrics: new MetricsRegistry(games.list().map((game) => game.gameId)),
     login: {
       async loginWechat() {
+        return {
+          ok: true,
+          response: { userId: "u_1", accessToken: "token", isNewAccount: true },
+        };
+      },
+      async loginDouyin() {
         return {
           ok: true,
           response: { userId: "u_1", accessToken: "token", isNewAccount: true },
@@ -392,7 +404,7 @@ test("管理员引导端点检查空状态、校验 Origin 并签发普通会话
     },
   });
   assert.equal(invalid.statusCode, 400, invalid.body);
-  assert.equal(invalid.json().code, "INVALID_PAYLOAD");
+  assert.equal(invalid.json().code, "INVALID_REQUEST");
   assert.equal(calls.bootstrap, 0);
 
   const created = await apps.internalApp.inject({

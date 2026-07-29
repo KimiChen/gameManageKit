@@ -823,6 +823,99 @@
     grid-column: 1 / -1;
   }
 
+  .gmk-provider-grid {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-bottom: 1rem;
+  }
+
+  .gmk-provider-card {
+    display: grid;
+    gap: 1rem;
+    min-width: 0;
+  }
+
+  .gmk-provider-head,
+  .gmk-provider-actions,
+  .gmk-provider-health > div {
+    align-items: center;
+    display: flex;
+    gap: 0.75rem;
+    justify-content: space-between;
+  }
+
+  .gmk-provider-head {
+    align-items: start;
+  }
+
+  .gmk-provider-head h2 {
+    margin-top: 0.25rem;
+  }
+
+  .gmk-provider-badges {
+    align-items: flex-end;
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+  }
+
+  .gmk-provider-health {
+    background: var(--surface-soft);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: grid;
+    gap: 0.5rem;
+    padding: 0.75rem;
+  }
+
+  .gmk-provider-failure {
+    color: var(--danger);
+    font-size: 0.8125rem;
+    overflow-wrap: anywhere;
+  }
+
+  .gmk-provider-form-grid {
+    display: grid;
+    gap: 0.875rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gmk-provider-span-two {
+    grid-column: 1 / -1;
+  }
+
+  .gmk-provider-enabled {
+    align-items: center;
+    background: var(--surface-soft);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: grid;
+    gap: 0.375rem 0.625rem;
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 0.75rem;
+  }
+
+  .gmk-provider-enabled input {
+    height: 1rem;
+    margin: 0;
+    width: 1rem;
+  }
+
+  .gmk-provider-enabled label {
+    font-weight: 700;
+  }
+
+  .gmk-provider-enabled .wsk-help {
+    grid-column: 2;
+  }
+
+  .gmk-provider-actions {
+    border-top: 1px solid var(--border);
+    justify-content: flex-end;
+    padding-top: 1rem;
+  }
+
   .gmk-config-form {
     display: grid;
     gap: 1.25rem;
@@ -972,6 +1065,10 @@
 
     .gmk-config-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .gmk-provider-grid {
+      grid-template-columns: 1fr;
     }
 
     .gmk-config-span-two {
@@ -1204,6 +1301,7 @@
 
     .gmk-config-toolbar,
     .gmk-config-grid,
+    .gmk-provider-form-grid,
     .gmk-directory-setting,
     .gmk-secret-delivery {
       grid-template-columns: 1fr;
@@ -1212,11 +1310,13 @@
 
     .gmk-config-toolbar .wsk-button,
     .gmk-config-actions .wsk-button,
+    .gmk-provider-actions .wsk-button,
     .gmk-machine-actions .wsk-button {
       width: 100%;
     }
 
     .gmk-config-actions,
+    .gmk-provider-actions,
     .gmk-machine-actions {
       align-items: stretch;
       flex-direction: column;

@@ -138,17 +138,47 @@ async function createAdminFixtureServer({
   const gameIntegration = {
     gameId: "game-a",
     configurationState: "configured",
-    wechatAppId: "wx-game-a",
-    wechatSecret: {
-      configured: false,
-      version: 0,
-      state: "missing",
-      updatedAt: null,
-    },
-    wechatEndpoint: "https://api.weixin.qq.com/sns/jscode2session",
-    wechatTimeoutMs: 2_000,
-    wechatBreakerThreshold: 4,
-    wechatBreakerOpenMs: 5_000,
+    providers: [
+      {
+        provider: "wechat",
+        enabled: true,
+        appId: "wx-game-a",
+        secretMetadata: {
+          configured: true,
+          version: 1,
+          updatedAt: "2026-07-28T10:00:00.000Z",
+        },
+        endpoint: "https://api.weixin.qq.com/sns/jscode2session",
+        timeoutMs: 2_000,
+        breakerThreshold: 4,
+        breakerOpenMs: 5_000,
+        validationState: "active",
+        validationFailedAt: null,
+        validationErrorCode: null,
+        updatedBy: "ops_kimi",
+        updatedAt: "2026-07-28T10:00:00.000Z",
+      },
+      {
+        provider: "douyin",
+        enabled: false,
+        appId: null,
+        secretMetadata: {
+          configured: false,
+          version: 0,
+          updatedAt: null,
+        },
+        endpoint:
+          "https://minigame.zijieapi.com/mgplatform/api/apps/jscode2session",
+        timeoutMs: 3_000,
+        breakerThreshold: 5,
+        breakerOpenMs: 10_000,
+        validationState: "unvalidated",
+        validationFailedAt: null,
+        validationErrorCode: null,
+        updatedBy: "ops_kimi",
+        updatedAt: "2026-07-28T10:00:00.000Z",
+      },
+    ],
     sessionTtlSeconds: 7_200,
     loginRateCapacity: 100,
     loginRateRefillPerSecond: 100,
@@ -566,32 +596,112 @@ async function createAdminFixtureServer({
         return;
       }
 
+      const providerMatch = url.pathname.match(
+        /^\/v1\/admin\/games\/game-a\/identity-providers\/(wechat|douyin)$/u,
+      );
+      if (request.method === "PATCH" && providerMatch) {
+        const providerName = providerMatch[1];
+        const body = JSON.parse(await readRequestBody(request));
+        const provider = gameIntegration.providers.find(
+          (candidate) => candidate.provider === providerName,
+        );
+        assert.equal(body.revision, gameIntegration.revision);
+        const { revision: _revision, ...update } = body;
+        Object.assign(provider, update, {
+          validationState: "unvalidated",
+          validationFailedAt: null,
+          validationErrorCode: null,
+          updatedBy: "ops_kimi",
+          updatedAt: "2026-07-28T11:21:30.000Z",
+        });
+        gameIntegration.revision += 1;
+        gameIntegration.updatedAt = "2026-07-28T11:21:30.000Z";
+        integrationMutations.push({
+          method: "PATCH_PROVIDER",
+          provider: providerName,
+          body,
+        });
+        json(reply, 200, gameIntegration);
+        return;
+      }
+
+      const providerSecretMatch = url.pathname.match(
+        /^\/v1\/admin\/games\/game-a\/identity-providers\/(wechat|douyin)\/secret$/u,
+      );
       if (
         request.method === "PUT"
-        && url.pathname
-          === "/v1/admin/games/game-a/secrets/wechat-app-secret"
+        && providerSecretMatch
       ) {
+        const providerName = providerSecretMatch[1];
         const body = JSON.parse(await readRequestBody(request));
-        assert.equal(body.wechatAppSecret, "fixture-wechat-secret");
-        Object.assign(gameIntegration, {
-          configurationState: "configured",
-          wechatSecret: {
+        const provider = gameIntegration.providers.find(
+          (candidate) => candidate.provider === providerName,
+        );
+        assert.equal(body.appSecret, "fixture-douyin-secret");
+        assert.equal(body.revision, gameIntegration.revision);
+        Object.assign(provider, {
+          secretMetadata: {
             configured: true,
-            version: 1,
-            state: "active",
+            version: provider.secretMetadata.version + 1,
             updatedAt: "2026-07-28T11:22:00.000Z",
           },
-          revision: gameIntegration.revision + 1,
+          validationState: "unvalidated",
+          validationFailedAt: null,
+          validationErrorCode: null,
+          updatedBy: "ops_kimi",
           updatedAt: "2026-07-28T11:22:00.000Z",
         });
+        gameIntegration.revision += 1;
+        gameIntegration.updatedAt = "2026-07-28T11:22:00.000Z";
         integrationMutations.push({
-          method: "PUT_WECHAT_SECRET",
+          method: "PUT_PROVIDER_SECRET",
+          provider: providerName,
           body,
         });
         json(reply, 200, {
           gameId: "game-a",
+          provider: providerName,
           configurationState: "configured",
-          wechatSecret: gameIntegration.wechatSecret,
+          secretMetadata: provider.secretMetadata,
+          revision: gameIntegration.revision,
+          loadedRevision: gameIntegration.loadedRevision,
+          replayed: false,
+        });
+        return;
+      }
+
+      if (request.method === "DELETE" && providerSecretMatch) {
+        const providerName = providerSecretMatch[1];
+        const body = JSON.parse(await readRequestBody(request));
+        const provider = gameIntegration.providers.find(
+          (candidate) => candidate.provider === providerName,
+        );
+        assert.equal(body.revision, gameIntegration.revision);
+        Object.assign(provider, {
+          enabled: false,
+          secretMetadata: {
+            configured: false,
+            version: 0,
+            updatedAt: null,
+          },
+          validationState: "unvalidated",
+          validationFailedAt: null,
+          validationErrorCode: null,
+          updatedBy: "ops_kimi",
+          updatedAt: "2026-07-28T11:23:00.000Z",
+        });
+        gameIntegration.revision += 1;
+        gameIntegration.updatedAt = "2026-07-28T11:23:00.000Z";
+        integrationMutations.push({
+          method: "DELETE_PROVIDER_SECRET",
+          provider: providerName,
+          body,
+        });
+        json(reply, 200, {
+          gameId: "game-a",
+          provider: providerName,
+          configurationState: "configured",
+          secretMetadata: provider.secretMetadata,
           revision: gameIntegration.revision,
           loadedRevision: gameIntegration.loadedRevision,
           replayed: false,
@@ -801,11 +911,17 @@ async function createAdminFixtureServer({
               auditType: "game_configuration",
               operatorId: "ops_kimi",
               gameId: "game-a",
+              provider: "douyin",
               identityId: null,
               action: "integration.read",
               result: "succeeded",
               oldVersion: null,
               newVersion: 3,
+              revision: 4,
+              requestId: "request-browser-audit",
+              operationId: null,
+              beforeMetadata: { enabled: false },
+              afterMetadata: { enabled: true },
               createdAt: "2026-07-28T11:00:00.000Z",
             },
           ],
@@ -1513,22 +1629,31 @@ test("真实 Chrome 可用键盘完成管理员登录、查询和确认操作", 
       machineVisible:
         !document.querySelector("#machine-identities-section").hidden,
       noSecretInPage:
-        !document.body.textContent.includes("fixture-wechat-secret"),
+        !document.body.textContent.includes("fixture-douyin-secret"),
+      providerCards:
+        document.querySelectorAll("[data-provider-form]").length,
       selectedGame:
         document.querySelector("#integration-game-select").value,
+      wechatValidation:
+        document.querySelector("#provider-wechat-validation-badge").textContent,
+      douyinValidation:
+        document.querySelector("#provider-douyin-validation-badge").textContent,
     })`),
     {
       auditVisible: true,
-      completeness: "3 / 4",
+      completeness: "5 / 5",
+      douyinValidation: "尚未验证",
       machineVisible: true,
       noSecretInPage: true,
+      providerCards: 2,
       selectedGame: "game-a",
+      wechatValidation: "验证正常",
     },
   );
 
   await evaluate(
     client,
-    "document.querySelector('#wechat-secret-replace').focus()",
+    "document.querySelector('#provider-douyin-secret').focus()",
   );
   await pressKey(client, "Enter");
   await waitFor(
@@ -1549,7 +1674,7 @@ test("真实 Chrome 可用键盘完成管理员登录、查询和确认操作", 
   await waitFor(
     client,
     "!document.querySelector('#reauthenticate-dialog').open"
-      + " && document.querySelector('#wechat-secret-dialog').open",
+      + " && document.querySelector('#provider-secret-dialog').open",
     "重新认证后打开 AppSecret 输入窗口",
   );
   assert.equal(
@@ -1562,32 +1687,32 @@ test("真实 Chrome 可用键盘完成管理员登录、查询和确认操作", 
 
   await focusAndType(
     client,
-    "#wechat-secret-input",
-    "fixture-wechat-secret",
+    "#provider-secret-input",
+    "fixture-douyin-secret",
   );
   await evaluate(
     client,
-    "document.querySelector('#wechat-secret-submit').focus()",
+    "document.querySelector('#provider-secret-submit').focus()",
   );
   await pressKey(client, "Enter");
   await waitFor(
     client,
-    "!document.querySelector('#wechat-secret-dialog').open"
-      + " && document.querySelector('#wechat-secret-status-badge')"
-      + ".textContent === '已生效'",
+    "!document.querySelector('#provider-secret-dialog').open"
+      + " && document.querySelector('#provider-douyin-secret-badge')"
+      + ".textContent === '已配置 · v1'",
     "AppSecret 替换完成",
   );
   assert.deepEqual(
     await evaluate(client, `({
-      hashClean: !location.hash.includes("fixture-wechat-secret"),
-      inputType: document.querySelector("#wechat-secret-input").type,
-      inputValue: document.querySelector("#wechat-secret-input").value,
+      hashClean: !location.hash.includes("fixture-douyin-secret"),
+      inputType: document.querySelector("#provider-secret-input").type,
+      inputValue: document.querySelector("#provider-secret-input").value,
       liveRegionClean: ![...document.querySelectorAll('[aria-live]')]
-        .some((node) => node.textContent.includes("fixture-wechat-secret")),
-      pageClean: !document.body.textContent.includes("fixture-wechat-secret"),
+        .some((node) => node.textContent.includes("fixture-douyin-secret")),
+      pageClean: !document.body.textContent.includes("fixture-douyin-secret"),
       toastClean:
         !document.querySelector("#toast-region").textContent
-          .includes("fixture-wechat-secret"),
+          .includes("fixture-douyin-secret"),
     })`),
     {
       hashClean: true,
@@ -1600,7 +1725,71 @@ test("真实 Chrome 可用键盘完成管理员登录、查询和确认操作", 
   );
   assert.equal(
     fixture.integrationMutations.filter(
-      (mutation) => mutation.method === "PUT_WECHAT_SECRET",
+      (mutation) => (
+        mutation.method === "PUT_PROVIDER_SECRET"
+        && mutation.provider === "douyin"
+      ),
+    ).length,
+    1,
+  );
+
+  await focusAndType(client, "#provider-douyin-appId", "tt-game-a");
+  await evaluate(client, `(() => {
+    const enabled = document.querySelector("#provider-douyin-enabled");
+    enabled.checked = true;
+    enabled.dispatchEvent(new Event("change", { bubbles: true }));
+    document.querySelector("#provider-douyin-save").focus();
+  })()`);
+  await pressKey(client, "Enter");
+  await waitFor(
+    client,
+    "document.querySelector('[data-provider-form=\"douyin\"] .wsk-badge')"
+      + ".textContent === '已启用'",
+    "启用抖音 Provider",
+  );
+  const douyinUpdate = fixture.integrationMutations.find(
+    (mutation) => (
+      mutation.method === "PATCH_PROVIDER"
+      && mutation.provider === "douyin"
+    ),
+  );
+  assert.equal(douyinUpdate.body.enabled, true);
+  assert.equal(douyinUpdate.body.appId, "tt-game-a");
+  assert.equal(
+    douyinUpdate.body.endpoint,
+    "https://minigame.zijieapi.com/mgplatform/api/apps/jscode2session",
+  );
+
+  await evaluate(
+    client,
+    "document.querySelector('#provider-douyin-secret').focus()",
+  );
+  await pressKey(client, "Enter");
+  await waitFor(
+    client,
+    "document.querySelector('#provider-secret-dialog').open"
+      + " && !document.querySelector('#provider-secret-clear').hidden",
+    "打开已配置的抖音 Secret 窗口",
+  );
+  await evaluate(
+    client,
+    "document.querySelector('#provider-secret-clear').focus()",
+  );
+  await pressKey(client, "Enter");
+  await waitFor(
+    client,
+    "!document.querySelector('#provider-secret-dialog').open"
+      + " && document.querySelector('#provider-douyin-secret-badge')"
+      + ".textContent === '未配置'"
+      + " && !document.querySelector('#provider-douyin-enabled').checked",
+    "清除抖音 Secret 并停用 Provider",
+  );
+  assert.equal(
+    fixture.integrationMutations.filter(
+      (mutation) => (
+        mutation.method === "DELETE_PROVIDER_SECRET"
+        && mutation.provider === "douyin"
+      ),
     ).length,
     1,
   );
@@ -1684,9 +1873,17 @@ test("真实 Chrome 可用键盘完成管理员登录、查询和确认操作", 
   );
   assert.equal(fixture.machineIdentityMutations.length, 1);
 
+  // Let the native dialog finish restoring focus before moving it to the
+  // navigation link; otherwise that deferred restoration can swallow Enter.
+  await delay(50);
   await evaluate(
     client,
     "document.querySelector('#integration-games-link').focus()",
+  );
+  await waitFor(
+    client,
+    "document.activeElement?.id === 'integration-games-link'",
+    "聚焦游戏项目入口",
   );
   await pressKey(client, "Enter");
   await waitFor(

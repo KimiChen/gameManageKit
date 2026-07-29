@@ -27,6 +27,7 @@ import {
   isValidAdminDisplayNameInput,
   isValidAdminPasswordInput,
   isValidUserId,
+  identityProviderPath,
   machineIdentityPath,
   machineSecretRevokePath,
   machineSecretRotationPath,
@@ -39,6 +40,9 @@ import {
   normalizeGameProjectList,
   normalizeGameServer,
   normalizeGameServerList,
+  normalizeIdentityProviderConfiguration,
+  normalizeIdentityProviderSecretMetadata,
+  normalizeIdentityProviderSecretWrite,
   normalizeMachineIdentity,
   normalizeMachineIdentityList,
   normalizeMachineSecretIssued,
@@ -46,11 +50,8 @@ import {
   normalizeMachineSecretRevoked,
   normalizeOperationResult,
   normalizeSession,
-  normalizeWechatSecretMetadata,
-  normalizeWechatSecretWrite,
   reuseOrCreateOperationIntent,
   unixSecondsToDateTimeLocal,
-  wechatAppSecretPath,
 } from "../../web/admin/app.js";
 import { resetPasswordControl } from "../../web/admin/wsk.js";
 
@@ -127,20 +128,37 @@ const validGameServer = (overrides = {}) => ({
   ...overrides,
 });
 
+const validProvider = (provider, overrides = {}) => ({
+  provider,
+  enabled: provider === "wechat",
+  appId: provider === "wechat" ? "wx-game-a" : null,
+  secretMetadata: {
+    configured: provider === "wechat",
+    version: provider === "wechat" ? 2 : 0,
+    updatedAt:
+      provider === "wechat" ? "2026-07-28T10:00:00.000Z" : null,
+  },
+  endpoint: provider === "wechat"
+    ? "https://api.weixin.qq.com/sns/jscode2session"
+    : "https://minigame.zijieapi.com/mgplatform/api/apps/jscode2session",
+  timeoutMs: provider === "wechat" ? 2_000 : 3_000,
+  breakerThreshold: provider === "wechat" ? 4 : 5,
+  breakerOpenMs: provider === "wechat" ? 5_000 : 10_000,
+  validationState: provider === "wechat" ? "active" : "unvalidated",
+  validationFailedAt: null,
+  validationErrorCode: null,
+  updatedBy: "ops_kimi",
+  updatedAt: "2026-07-28T10:00:00.000Z",
+  ...overrides,
+});
+
 const validIntegration = (overrides = {}) => ({
   gameId: "game-a",
   configurationState: "configured",
-  wechatAppId: "wx-game-a",
-  wechatSecret: {
-    configured: true,
-    version: 2,
-    state: "active",
-    updatedAt: "2026-07-28T10:00:00.000Z",
-  },
-  wechatEndpoint: "https://api.weixin.qq.com/sns/jscode2session",
-  wechatTimeoutMs: 2_000,
-  wechatBreakerThreshold: 4,
-  wechatBreakerOpenMs: 5_000,
+  providers: [
+    validProvider("wechat"),
+    validProvider("douyin"),
+  ],
   sessionTtlSeconds: 7_200,
   loginRateCapacity: 40,
   loginRateRefillPerSecond: 2.5,
@@ -550,7 +568,7 @@ test("区服响应严格校验游戏归属、枚举、URL 和乐观锁字段", (
   );
 });
 
-test("接入配置响应只接收 Secret 元数据并校验目录 revision", () => {
+test("接入配置响应只接收 Provider Secret 元数据并校验 revision", () => {
   const directory = normalizeDirectorySettings({
     gameId: "game-a",
     isOps: true,
@@ -562,57 +580,85 @@ test("接入配置响应只接收 Secret 元数据并校验目录 revision", () 
   assert.equal(directory.isOps, true);
 
   const integration = normalizeGameIntegration(validIntegration(), "game-a");
-  assert.equal(integration.wechatAppId, "wx-game-a");
-  assert.deepEqual(integration.wechatSecret, {
+  assert.equal(integration.providers[0].provider, "wechat");
+  assert.equal(integration.providers[0].appId, "wx-game-a");
+  assert.deepEqual(integration.providers[0].secretMetadata, {
     configured: true,
     version: 2,
-    state: "active",
     updatedAt: "2026-07-28T10:00:00.000Z",
   });
-  assert.equal(Object.isFrozen(integration.wechatSecret), true);
+  assert.equal(Object.isFrozen(integration.providers), true);
+  assert.equal(
+    Object.isFrozen(integration.providers[0].secretMetadata),
+    true,
+  );
 
   assert.deepEqual(
-    normalizeWechatSecretMetadata({
+    normalizeIdentityProviderSecretMetadata({
       configured: false,
       version: 0,
-      state: "missing",
       updatedAt: null,
-    }),
+    }, "douyin"),
     {
       configured: false,
       version: 0,
-      state: "missing",
       updatedAt: null,
     },
   );
   assert.equal(
-    normalizeWechatSecretMetadata({
-      configured: true,
-      version: 2,
-      state: "validation_failed",
-      updatedAt: "2026-07-28T10:00:00.000Z",
-    }).state,
+    normalizeIdentityProviderConfiguration(validProvider("douyin", {
+      enabled: true,
+      appId: "tt-game-a",
+      secretMetadata: {
+        configured: true,
+        version: 2,
+        updatedAt: "2026-07-28T10:00:00.000Z",
+      },
+      validationState: "validation_failed",
+      validationFailedAt: "2026-07-28T10:05:00.000Z",
+      validationErrorCode: "PROVIDER_CONFIGURATION_INVALID",
+    })).validationState,
     "validation_failed",
   );
   assert.throws(
-    () => normalizeWechatSecretMetadata({
+    () => normalizeIdentityProviderSecretMetadata({
       configured: false,
       version: 0,
-      state: "validation_failed",
-      updatedAt: null,
+      updatedAt: "2026-07-28T10:00:00.000Z",
+    }, "douyin"),
+    InvalidApiPayloadError,
+  );
+  assert.throws(
+    () => normalizeIdentityProviderConfiguration(validProvider("douyin", {
+      enabled: true,
+      appId: "tt-game-a",
+    })),
+    InvalidApiPayloadError,
+  );
+  assert.throws(
+    () => normalizeIdentityProviderConfiguration(validProvider("douyin", {
+      endpoint: "https://api.weixin.qq.com/sns/jscode2session",
+    })),
+    InvalidApiPayloadError,
+  );
+  assert.throws(
+    () => normalizeIdentityProviderConfiguration({
+      ...validProvider("douyin"),
+      appSecret: "must-not-be-returned",
     }),
     InvalidApiPayloadError,
   );
-  const write = normalizeWechatSecretWrite({
+  const write = normalizeIdentityProviderSecretWrite({
     gameId: "game-a",
+    provider: "wechat",
     configurationState: "configured",
-    wechatSecret: validIntegration().wechatSecret,
+    secretMetadata: validProvider("wechat").secretMetadata,
     revision: 4,
     loadedRevision: 4,
     replayed: false,
-  }, "game-a");
+  }, "game-a", "wechat");
   assert.equal(write.replayed, false);
-  assert.equal(write.wechatSecret.version, 2);
+  assert.equal(write.secretMetadata.version, 2);
 
   assert.throws(
     () => normalizeDirectorySettings({
@@ -635,10 +681,10 @@ test("接入配置响应只接收 Secret 元数据并校验目录 revision", () 
     );
   }
   assert.throws(
-    () => normalizeWechatSecretWrite({
+    () => normalizeIdentityProviderSecretWrite({
       ...write,
       secret: "must-not-be-returned",
-    }, "game-a"),
+    }, "game-a", "wechat"),
     InvalidApiPayloadError,
   );
   for (const endpoint of [
@@ -648,17 +694,37 @@ test("接入配置响应只接收 Secret 元数据并校验目录 revision", () 
   ]) {
     assert.throws(
       () => normalizeGameIntegration(
-        validIntegration({ wechatEndpoint: endpoint }),
+        validIntegration({
+          providers: [
+            validProvider("wechat", { endpoint }),
+            validProvider("douyin"),
+          ],
+        }),
         "game-a",
       ),
       InvalidApiPayloadError,
     );
   }
+  const loopback = normalizeGameIntegration(validIntegration({
+    providers: [
+      validProvider("wechat", {
+        endpoint: "http://127.0.0.1:8787/mock-wechat",
+      }),
+      validProvider("douyin"),
+    ],
+  }), "game-a");
   assert.equal(
-    normalizeGameIntegration(validIntegration({
-      wechatEndpoint: "http://127.0.0.1:8787/mock-wechat",
-    }), "game-a").wechatEndpoint,
+    loopback.providers[0].endpoint,
     "http://127.0.0.1:8787/mock-wechat",
+  );
+  assert.throws(
+    () => normalizeGameIntegration(validIntegration({
+      providers: [
+        validProvider("wechat"),
+        validProvider("wechat"),
+      ],
+    }), "game-a"),
+    InvalidApiPayloadError,
   );
 });
 
@@ -757,11 +823,17 @@ test("配置审计接受 game_configuration 白名单且拒绝敏感字段", () 
     auditType: "game_configuration",
     operatorId: "ops_kimi",
     gameId: "game-a",
+    provider: "douyin",
     identityId: null,
     action: "update_integration",
     result: "succeeded",
     oldVersion: 2,
     newVersion: 3,
+    revision: 4,
+    requestId: "request-audit-1",
+    operationId: null,
+    beforeMetadata: { enabled: false },
+    afterMetadata: { enabled: true },
     createdAt: "2026-07-28T10:00:00.000Z",
   };
   const page = normalizeConfigurationAuditPage({ records: [record] });
@@ -787,7 +859,7 @@ test("区服开放时间在 datetime-local 与 Unix 秒之间无损转换", () =
   assert.match(localValue, /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$/u);
   assert.equal(dateTimeLocalToUnixSeconds(localValue), unixSeconds);
   assert.equal(dateTimeLocalToUnixSeconds("2026-02-30T12:00:00"), null);
-  assert.equal(dateTimeLocalToUnixSeconds("1969-12-31T23:59:59"), null);
+  assert.equal(dateTimeLocalToUnixSeconds("1900-01-01T00:00:00"), null);
   assert.equal(dateTimeLocalToUnixSeconds("not-a-date"), null);
 });
 
@@ -1135,9 +1207,14 @@ test("接入配置 API 路径编码并按契约发送精确请求", async () => 
     "/v1/admin/games/game%2Fa/integration",
   );
   assert.equal(
-    wechatAppSecretPath("game/a"),
-    "/v1/admin/games/game%2Fa/secrets/wechat-app-secret",
+    identityProviderPath("game/a", "wechat"),
+    "/v1/admin/games/game%2Fa/identity-providers/wechat",
   );
+  assert.equal(
+    identityProviderPath("game/a", "douyin", true),
+    "/v1/admin/games/game%2Fa/identity-providers/douyin/secret",
+  );
+  assert.throws(() => identityProviderPath("game/a", "unknown"), TypeError);
   assert.equal(
     machineIdentityPath("service/a"),
     "/v1/admin/machine-identities/service%2Fa",
@@ -1189,11 +1266,17 @@ test("接入配置 API 路径编码并按契约发送精确请求", async () => 
       auditType: "game_configuration",
       operatorId: "ops_kimi",
       gameId: "game-a",
+      provider: "douyin",
       identityId: null,
       action: "update_integration",
       result: "succeeded",
       oldVersion: 2,
       newVersion: 3,
+      revision: 4,
+      requestId: "request-audit-1",
+      operationId: null,
+      beforeMetadata: { enabled: false },
+      afterMetadata: { enabled: true },
       createdAt: "2026-07-28T10:00:00.000Z",
     }],
   };
@@ -1203,11 +1286,37 @@ test("接入配置 API 路径编码并按契约发送精确请求", async () => 
     jsonResponse({ ...directory, revision: 5 }),
     jsonResponse(validIntegration()),
     jsonResponse(validIntegration({ revision: 4, loadedRevision: 4 })),
+    jsonResponse(validIntegration({
+      providers: [
+        validProvider("wechat"),
+        validProvider("douyin", { appId: "tt-game-a" }),
+      ],
+      revision: 5,
+      loadedRevision: 4,
+    })),
     jsonResponse({
       gameId: "game-a",
+      provider: "douyin",
       configurationState: "configured",
-      wechatSecret: validIntegration().wechatSecret,
-      revision: 4,
+      secretMetadata: {
+        configured: true,
+        version: 1,
+        updatedAt: "2026-07-28T10:00:00.000Z",
+      },
+      revision: 6,
+      loadedRevision: 4,
+      replayed: false,
+    }),
+    jsonResponse({
+      gameId: "game-a",
+      provider: "douyin",
+      configurationState: "configured",
+      secretMetadata: {
+        configured: false,
+        version: 0,
+        updatedAt: null,
+      },
+      revision: 7,
       loadedRevision: 4,
       replayed: false,
     }),
@@ -1240,11 +1349,6 @@ test("接入配置 API 路径编码并按契约发送精确请求", async () => 
 
   const directoryInput = { isOps: true, revision: 4 };
   const integrationInput = {
-    wechatAppId: "wx-game-a",
-    wechatEndpoint: "https://api.weixin.qq.com/sns/jscode2session",
-    wechatTimeoutMs: 2_000,
-    wechatBreakerThreshold: 4,
-    wechatBreakerOpenMs: 5_000,
     sessionTtlSeconds: 7_200,
     loginRateCapacity: 40,
     loginRateRefillPerSecond: 2.5,
@@ -1252,10 +1356,24 @@ test("接入配置 API 路径编码并按契约发送精确请求", async () => 
     adminRateRefillPerSecond: 1,
     revision: 3,
   };
+  const providerInput = {
+    enabled: false,
+    appId: "tt-game-a",
+    endpoint:
+      "https://minigame.zijieapi.com/mgplatform/api/apps/jscode2session",
+    timeoutMs: 3_000,
+    breakerThreshold: 5,
+    breakerOpenMs: 10_000,
+    revision: 4,
+  };
   const secretInput = {
-    wechatAppSecret: "test-only-placeholder",
-    revision: 3,
-    operationId: "operation-wechat",
+    appSecret: "test-only-placeholder",
+    revision: 5,
+    operationId: "operation-douyin",
+  };
+  const clearSecretInput = {
+    revision: 6,
+    operationId: "operation-douyin-clear",
   };
   const createIdentityInput = {
     identityId: "game-a-service",
@@ -1286,7 +1404,13 @@ test("接入配置 API 路径编码并按契约发送精确请求", async () => 
   await api.updateDirectorySettings("game-a", directoryInput);
   await api.getGameIntegration("game-a");
   await api.updateGameIntegration("game-a", integrationInput);
-  await api.replaceWechatAppSecret("game-a", secretInput);
+  await api.updateIdentityProvider("game-a", "douyin", providerInput);
+  await api.replaceIdentityProviderSecret("game-a", "douyin", secretInput);
+  await api.clearIdentityProviderSecret(
+    "game-a",
+    "douyin",
+    clearSecretInput,
+  );
   await api.listMachineIdentities();
   await api.createMachineIdentity(createIdentityInput);
   await api.updateMachineIdentity("game-a-service", updateIdentityInput);
@@ -1309,7 +1433,9 @@ test("接入配置 API 路径编码并按契约发送精确请求", async () => 
       ["/v1/admin/games/game-a/directory-settings", "PATCH"],
       ["/v1/admin/games/game-a/integration", "GET"],
       ["/v1/admin/games/game-a/integration", "PATCH"],
-      ["/v1/admin/games/game-a/secrets/wechat-app-secret", "PUT"],
+      ["/v1/admin/games/game-a/identity-providers/douyin", "PATCH"],
+      ["/v1/admin/games/game-a/identity-providers/douyin/secret", "PUT"],
+      ["/v1/admin/games/game-a/identity-providers/douyin/secret", "DELETE"],
       ["/v1/admin/machine-identities", "GET"],
       ["/v1/admin/machine-identities", "POST"],
       ["/v1/admin/machine-identities/game-a-service", "PATCH"],
@@ -1324,11 +1450,13 @@ test("接入配置 API 路径编码并按契约发送精确请求", async () => 
   });
   assert.deepEqual(JSON.parse(requests[2].init.body), directoryInput);
   assert.deepEqual(JSON.parse(requests[4].init.body), integrationInput);
-  assert.deepEqual(JSON.parse(requests[5].init.body), secretInput);
-  assert.deepEqual(JSON.parse(requests[7].init.body), createIdentityInput);
-  assert.deepEqual(JSON.parse(requests[8].init.body), updateIdentityInput);
-  assert.deepEqual(JSON.parse(requests[9].init.body), rotateInput);
-  assert.deepEqual(JSON.parse(requests[10].init.body), revokeInput);
+  assert.deepEqual(JSON.parse(requests[5].init.body), providerInput);
+  assert.deepEqual(JSON.parse(requests[6].init.body), secretInput);
+  assert.deepEqual(JSON.parse(requests[7].init.body), clearSecretInput);
+  assert.deepEqual(JSON.parse(requests[9].init.body), createIdentityInput);
+  assert.deepEqual(JSON.parse(requests[10].init.body), updateIdentityInput);
+  assert.deepEqual(JSON.parse(requests[11].init.body), rotateInput);
+  assert.deepEqual(JSON.parse(requests[12].init.body), revokeInput);
 });
 
 test("管理员初始化 API 严格检查状态并只提交创建字段", async () => {
