@@ -691,9 +691,9 @@ export class GameIntegrationService {
   ): Promise<GameIntegration> {
     this.validateGameId(gameId);
     const provider = normalizedProvider(providerValue);
-    const normalized = providerInput(input, provider, this.production);
     let result: GameIntegration;
     try {
+      const normalized = providerInput(input, provider, this.production);
       result = await this.database.transaction(async (connection) => {
         await authorization.authorize(connection, "write");
         const current = await this.requireIntegration(connection, gameId, true);
@@ -772,10 +772,10 @@ export class GameIntegrationService {
         gameId,
         provider,
         "identity_provider_update",
-        normalized.revision,
+        Number.isSafeInteger(input?.revision) ? input.revision : 0,
         authorization,
         error,
-        normalized.enabled,
+        typeof input?.enabled === "boolean" ? input.enabled : null,
       );
       throw error;
     }

@@ -587,15 +587,22 @@ test("Provider 白名单、官方端点、启用完整性和已有身份 AppID �
     }, authorization()),
     gameError(409, "GAME_PROJECT_CONFLICT"),
   );
-  assert.equal(database.gameAudits.length, 3);
+  assert.equal(database.gameAudits.length, 5);
   assert.deepEqual(
     database.gameAudits.map((audit) => audit[5]),
     [
       "identity_provider_enable",
       "identity_provider_update",
+      "identity_provider_update",
+      "identity_provider_update",
       "identity_provider_disable",
     ],
   );
+  for (const audit of database.gameAudits.slice(1, 3)) {
+    assert.deepEqual(JSON.parse(String(audit[6])), {
+      errorCode: "INVALID_PAYLOAD",
+    });
+  }
   assert.deepEqual(runtime.invalidated, []);
 });
 
